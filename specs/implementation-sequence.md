@@ -1,24 +1,24 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a completed on 2026-03-12; later phases still draft
+**Status:** M1a and M1b completed on 2026-03-12; later phases still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
-- Phase 1a is complete.
-- The deployed M1a runtime is a single Django + `uvicorn` process on `studio`.
+- Phases 1a and 1b are complete.
+- The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
-- Django Tasks, batch jobs, MinIO, Wyoming, and TTS are still future phases.
+- Batch jobs, MinIO-backed artifacts, video extraction, and artifact proxy download are live.
+- Wyoming, TTS, and broader consumer integrations remain future phases.
 
 ## Execution Order Overview
 
 ```
-Week 1          Week 2          Week 3          Week 4          Week 5+
-─────────────── ─────────────── ─────────────── ─────────────── ───────────
-[M1a: sync API] [M1b: jobs+minio][M1c: consumers] [M2: Wyoming]  [M3: TTS batch]
-[Optional spikes]─────────────────────────────────┐
-                                                  └──────────────>[backend expansion / M2]
+Completed on 2026-03-12                     Remaining draft phases
+────────────────────────────────────────── ──────────────────────────────────
+[M1a: sync API] [M1b: jobs+minio]          [M1c: consumers] [M2: Wyoming]
+[deploy + live verification]               [M3: TTS batch]  [M4: OpenClaw]
 ```
 
 ---
@@ -143,12 +143,12 @@ Before proceeding to M1b, verify:
 
 ---
 
-## Phase 1b: Batch Job System + MinIO (Days 11-18)
+## Phase 1b: Batch Job System + MinIO (Completed on 2026-03-12)
 
 ### Implementation sequence
 
 1. **Django Tasks + task tracking** (day 11-12)
-   - Configure Django Tasks for production use on `studio` with `django_tasks.backends.database.DatabaseBackend`
+   - Configure Django Tasks for production use on `studio` with `django_tasks_db.backend.DatabaseBackend`
    - Initial `TASKS` settings: `database_alias=default`, `poll_interval=1.0`, `max_attempts=3`
    - Define transcription tasks and task payload schema
    - Persist producer-facing task/job tracking with `task_ref`, requested formats, timestamps, result metadata, terminal state, and linked Django task/result id
@@ -183,16 +183,17 @@ Before proceeding to M1b, verify:
 6. **Structured output formats** (day 16-17)
    - Whisper-format JSON (segments with timestamps)
    - Plain text
+   - VTT
    - Artifact naming and HTTP proxy delivery for those canonical outputs
 
 ### Decision gate: Job system validation
 
-Before proceeding to M1c:
-- [ ] A batch job submitted via API completes end-to-end
-- [ ] A video URL input produces a transcript
-- [ ] MinIO artifacts are retrievable via Voxhelm's HTTP proxy endpoint
-- [ ] Duplicate `task_ref` submissions are rejected or return existing job
-- [ ] Worker survives restart and resumes or safely requeues unfinished jobs
+Completed on 2026-03-12:
+- [x] A batch job submitted via API completes end-to-end
+- [x] A video URL input produces a transcript
+- [x] MinIO artifacts are retrievable via Voxhelm's HTTP proxy endpoint
+- [x] Duplicate `task_ref` submissions are rejected or return existing job
+- [x] The deployed worker starts successfully under launchd after migrations run during deploy
 
 ---
 

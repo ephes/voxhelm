@@ -13,7 +13,7 @@ Archive:
 ```bash
 uv sync
 just test
-uv run uvicorn voxhelm_project.asgi:application
+uv run uvicorn config.asgi:application
 ```
 
 ## Required Environment

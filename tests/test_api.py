@@ -6,7 +6,7 @@ from pathlib import Path
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from voxhelm_api.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
+from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
 class DummyBackend:
@@ -41,7 +41,7 @@ def test_transcription_requires_bearer_token(client):
 
 def test_upload_transcription_returns_json(client, monkeypatch):
     backend = DummyBackend()
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: backend)
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: backend)
     upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
 
     response = client.post(
@@ -56,7 +56,7 @@ def test_upload_transcription_returns_json(client, monkeypatch):
 
 
 def test_text_response_format(client, monkeypatch):
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: DummyBackend())
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
     upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
 
     response = client.post(
@@ -71,7 +71,7 @@ def test_text_response_format(client, monkeypatch):
 
 
 def test_verbose_json_response_format(client, monkeypatch):
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: DummyBackend())
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
     upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
 
     response = client.post(
@@ -88,7 +88,7 @@ def test_verbose_json_response_format(client, monkeypatch):
 
 
 def test_vtt_response_format(client, monkeypatch):
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: DummyBackend())
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
     upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
 
     response = client.post(
@@ -105,7 +105,7 @@ def test_vtt_response_format(client, monkeypatch):
 
 def test_url_mode_uses_allowlist(client, monkeypatch, settings):
     backend = DummyBackend()
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: backend)
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: backend)
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
 
     def fake_download(*, source_url: str):
@@ -114,7 +114,7 @@ def test_url_mode_uses_allowlist(client, monkeypatch, settings):
         path.write_bytes(b"mp3-bytes")
         return path
 
-    monkeypatch.setattr("voxhelm_api.views.download_allowed_url_to_tempfile", fake_download)
+    monkeypatch.setattr("transcriptions.views.download_allowed_url_to_tempfile", fake_download)
 
     response = client.post(
         "/v1/audio/transcriptions",
@@ -177,10 +177,13 @@ def test_url_download_cleanup_on_size_limit(monkeypatch, settings, tmp_path):
         created_paths.append(Path(handle.name))
         return handle
 
-    monkeypatch.setattr("voxhelm_api.views.urlopen", lambda request, timeout: DummyResponse())
-    monkeypatch.setattr("voxhelm_api.views.tempfile.NamedTemporaryFile", fake_named_temporary_file)
+    monkeypatch.setattr("transcriptions.views.urlopen", lambda request, timeout: DummyResponse())
+    monkeypatch.setattr(
+        "transcriptions.views.tempfile.NamedTemporaryFile",
+        fake_named_temporary_file,
+    )
 
-    from voxhelm_api.views import ApiError, download_allowed_url_to_tempfile
+    from transcriptions.views import ApiError, download_allowed_url_to_tempfile
 
     try:
         download_allowed_url_to_tempfile(source_url="https://media.example.com/file.mp3")

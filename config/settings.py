@@ -12,6 +12,13 @@ def env_list(name: str, *, default: str = "") -> list[str]:
     return [item.strip() for item in raw.replace("\n", ",").split(",") if item.strip()]
 
 
+def env_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 def env_tokens(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -37,12 +44,16 @@ def env_tokens(name: str) -> dict[str, str]:
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 ALLOWED_HOSTS = env_list("VOXHELM_ALLOWED_HOSTS", default="localhost,127.0.0.1")
-ROOT_URLCONF = "voxhelm_project.urls"
-WSGI_APPLICATION = "voxhelm_project.wsgi.application"
+ROOT_URLCONF = "config.urls"
+WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 INSTALLED_APPS = [
-    "voxhelm_api",
+    "django_tasks",
+    "django_tasks_db",
+    "transcriptions",
+    "jobs",
 ]
 
 MIDDLEWARE = [
@@ -72,6 +83,9 @@ VOXHELM_MAX_URL_DOWNLOAD_BYTES = int(
     os.getenv("VOXHELM_MAX_URL_DOWNLOAD_BYTES", str(128 * 1024 * 1024))
 )
 VOXHELM_URL_FETCH_TIMEOUT_SECONDS = int(os.getenv("VOXHELM_URL_FETCH_TIMEOUT_SECONDS", "60"))
+VOXHELM_BATCH_MAX_DOWNLOAD_BYTES = int(
+    os.getenv("VOXHELM_BATCH_MAX_DOWNLOAD_BYTES", str(512 * 1024 * 1024))
+)
 VOXHELM_ALLOWED_URL_HOSTS = set(env_list("VOXHELM_ALLOWED_URL_HOSTS"))
 VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
 VOXHELM_ACCEPTED_MODELS = {
@@ -79,4 +93,32 @@ VOXHELM_ACCEPTED_MODELS = {
     "whisper-1",
     VOXHELM_MLX_MODEL,
 }
+VOXHELM_BATCH_ACCEPTED_MODELS = {
+    "auto",
+    *VOXHELM_ACCEPTED_MODELS,
+}
+VOXHELM_TASK_QUEUE = os.getenv("VOXHELM_TASK_QUEUE", "default")
+VOXHELM_FFMPEG_BIN = os.getenv("VOXHELM_FFMPEG_BIN", "ffmpeg")
 
+VOXHELM_ARTIFACT_BACKEND = os.getenv("VOXHELM_ARTIFACT_BACKEND", "filesystem")
+VOXHELM_ARTIFACT_ROOT = Path(
+    os.getenv("VOXHELM_ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifacts"))
+)
+VOXHELM_ARTIFACT_BUCKET = os.getenv("VOXHELM_ARTIFACT_BUCKET", "voxhelm")
+VOXHELM_ARTIFACT_PREFIX = os.getenv("VOXHELM_ARTIFACT_PREFIX", "voxhelm")
+VOXHELM_ARTIFACT_S3_ENDPOINT_URL = os.getenv("VOXHELM_ARTIFACT_S3_ENDPOINT_URL", "").strip()
+VOXHELM_ARTIFACT_S3_REGION = os.getenv("VOXHELM_ARTIFACT_S3_REGION", "us-east-1")
+VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID = os.getenv("VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID", "").strip()
+VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY = os.getenv(
+    "VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY", ""
+).strip()
+VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE = env_bool(
+    "VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE",
+    default=True,
+)
+
+TASKS = {
+    "default": {
+        "BACKEND": os.getenv("VOXHELM_TASKS_BACKEND", "django_tasks_db.backend.DatabaseBackend")
+    }
+}

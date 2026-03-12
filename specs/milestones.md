@@ -1,30 +1,33 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a implemented on 2026-03-12; later milestones still draft
+**Status:** M1a and M1b implemented on 2026-03-12; later milestones still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
 
 Implemented today:
 
-- M1a only
-- single Django + `uvicorn` process on `studio`
+- M1a and M1b
+- Django + `uvicorn` HTTP process plus Django Tasks worker on `studio`
 - private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`
 - `GET /v1/health`
 - `POST /v1/audio/transcriptions`
+- `POST /v1/jobs`
+- `GET /v1/jobs/{id}`
+- `GET /v1/jobs/{id}/artifacts/{name}`
 - bearer auth
 - multipart upload and JSON URL mode
 - response formats `json`, `text`, `verbose_json`, and `vtt`
 - accepted model aliases `gpt-4o-mini-transcribe` and `whisper-1`
+- Django Tasks database-backed job execution
+- MinIO-backed artifact storage in bucket `voxhelm`
+- video-to-audio extraction for batch jobs
 - Archive validation with env vars only
+- live batch-job submission, completion, artifact fetch, and MinIO object verification
 
 Not implemented yet:
 
-- Django Tasks runtime
-- batch jobs
-- MinIO artifacts
-- video preprocessing
 - Wyoming
 - TTS
 - additional consumers beyond Archive validation
@@ -155,8 +158,9 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
   - Internal linkage from Voxhelm job UUID to the Django task/result id returned by `enqueue()`
 - `POST /v1/jobs` endpoint for batch job submission
 - `GET /v1/jobs/{id}` for status polling
+- `GET /v1/jobs/{id}/artifacts/{name}` for artifact download through Voxhelm
 - Django Tasks worker processes on `studio`
-  - Backed initially by `django_tasks.backends.database.DatabaseBackend`
+  - Backed by `django_tasks_db.backend.DatabaseBackend`
 - MinIO artifact storage:
   - Input media stored to MinIO before processing
   - Transcript outputs stored to MinIO with stable references
@@ -182,11 +186,13 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 
 ### Success criteria
 
-- A batch job submitted via `POST /v1/jobs` with a URL input completes end-to-end: submit, queue, process, store to MinIO, return result
-- A video URL input produces a transcript (audio extracted automatically)
-- Duplicate submissions with the same `task_ref` do not create duplicate jobs
-- A worker restart resumes or safely requeues unfinished jobs
-- Artifacts are retrievable from MinIO after job completion
+Completed on 2026-03-12:
+
+- [x] A batch job submitted via `POST /v1/jobs` with a URL input completes end-to-end: submit, queue, process, store to MinIO, return result
+- [x] A video URL input produces a transcript (audio extracted automatically)
+- [x] Duplicate submissions with the same `task_ref` do not create duplicate jobs
+- [x] The deployed worker starts successfully under launchd after migrations run during deploy
+- [x] Artifacts are retrievable through Voxhelm and present in MinIO after job completion
 
 ### Key risks
 

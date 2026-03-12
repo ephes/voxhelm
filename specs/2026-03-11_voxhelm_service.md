@@ -1,21 +1,27 @@
 # PRD: Media Service
 
 **Date:** 2026-03-11
-**Status:** PRD reference; M1a implemented on 2026-03-12, later milestones still planned
+**Status:** PRD reference; M1a and M1b implemented on 2026-03-12, later milestones still planned
 
 ## Summary
 
 Implementation note as of 2026-03-12:
 
-- Only Milestone 1a is implemented today.
-- The deployed service is the Archive-first synchronous STT slice:
+- Milestones 1a and 1b are implemented today.
+- The deployed service includes the Archive-first synchronous STT slice plus the first batch-job slice:
   - `GET /v1/health`
   - `POST /v1/audio/transcriptions`
+  - `POST /v1/jobs`
+  - `GET /v1/jobs/{id}`
+  - `GET /v1/jobs/{id}/artifacts/{name}`
   - `mlx-whisper`
   - bearer-token auth
   - multipart upload and JSON URL input
+  - Django Tasks worker execution
+  - MinIO-backed artifact storage via the `VOXHELM_ARTIFACT_*` S3-compatible env vars
+  - video-to-audio extraction for batch work
   - private HTTPS ingress via Traefik on `macmini`
-- Batch jobs, Django Tasks runtime, MinIO, Wyoming, TTS, and other consumers remain deferred to later milestones.
+- Wyoming, TTS, and broader consumer integrations remain deferred to later milestones.
 
 Create a small self-hosted media service that provides shared speech and media processing capabilities for:
 

@@ -1,7 +1,7 @@
 # Voxhelm Interface Map
 
 **Date:** 2026-03-11
-**Status:** Active architecture doc; M1a implemented on 2026-03-12
+**Status:** Active architecture doc; M1a and M1b implemented on 2026-03-12
 
 This document is the active source of truth for Voxhelm's architecture boundaries, interface contracts, artifact access model, and auth domains.
 
@@ -9,16 +9,15 @@ This document is the active source of truth for Voxhelm's architecture boundarie
 
 ## Topology and Responsibility Split
 
-Current implemented topology (M1a):
+Current implemented topology (M1a + M1b):
 
-- One Django + `uvicorn` process on `studio`
+- One Django + `uvicorn` HTTP process on `studio`
+- One Django Tasks worker process on `studio`
 - Private HTTPS ingress on `macmini` via Traefik at `https://voxhelm.home.xn--wersdrfer-47a.de`
-- No Django Tasks workers yet; the sync path is the only implemented execution mode
+- MinIO-backed artifact handling for batch work, with artifacts served back through Voxhelm HTTP endpoints
 
-Planned later topology (M1b+):
+Planned later topology (M2+):
 
-- Add Django Tasks workers on `studio` for batch jobs
-- Add MinIO-backed artifact handling for async work
 - Add Wyoming sidecar/listener in M2
 
 ```
@@ -36,10 +35,10 @@ Home Assistant (M2) reaches a separate Wyoming listener later.
 
 | Component | Responsibilities |
 |-----------|------------------|
-| Django HTTP process (implemented in M1a) | Authenticate producers, validate requests, fetch allowed URL inputs, invoke the configured sync STT backend, render OpenAI-compatible responses, expose health |
-| Django Tasks workers (planned for M1b) | Execute queued transcription/synthesis work, fetch media, extract audio from video, normalize/transcode inputs, invoke STT/TTS backends, upload artifacts, report status/results back into the control plane |
+| Django HTTP process (implemented in M1a) | Authenticate producers, validate requests, fetch allowed URL inputs, invoke the configured sync STT backend, render OpenAI-compatible responses, expose health, accept batch jobs, proxy artifact downloads |
+| Django Tasks workers (implemented in M1b) | Execute queued transcription work, fetch media, extract audio from video, invoke STT backends, upload artifacts, and report status/results back into the control plane |
 | Consumers | Submit sync or batch requests, poll for status where needed, consume returned text or artifact references, and apply only consumer-local post-processing beyond Voxhelm's published artifact formats |
-| Artifact store (planned for M1b) | Hold source inputs, intermediates, and final artifacts; never exposed directly to consumers |
+| Artifact store (implemented in M1b) | Hold source inputs, intermediates, and final artifacts; never exposed directly to consumers |
 
 ---
 
@@ -50,12 +49,12 @@ Voxhelm exposes five producer/operator-facing interface surfaces:
 | # | Interface | Protocol | Direction | v1 | Consumers |
 |---|-----------|----------|-----------|-----|-----------|
 | 1 | OpenAI-compatible STT API | HTTP | inbound | yes | Archive, podcast-transcript |
-| 2 | Batch job API | HTTP | inbound + poll | M1b | python-podcast |
+| 2 | Batch job API | HTTP | inbound + poll | yes | python-podcast |
 | 3 | Wyoming STT/TTS | TCP (Wyoming) | inbound | M2 | Home Assistant |
-| 4 | Artifact storage API | S3 (MinIO) | bidirectional | M1b | Voxhelm workers and control plane only (consumers access artifacts via Voxhelm HTTP proxy) |
+| 4 | Artifact storage API | S3 (MinIO) | bidirectional | yes | Voxhelm workers and control plane only (consumers access artifacts via Voxhelm HTTP proxy) |
 | 5 | Health / operator API | HTTP | inbound | yes | ops tooling, monitoring |
 
-The worker execution path is intentionally not part of the producer-facing contract. In the current M1a deployment there is no separate worker runtime yet; Django Tasks and worker processes begin in M1b.
+The worker execution path is intentionally not part of the producer-facing contract. In the current production deployment, the HTTP process and the Django Tasks worker run as separate launchd services on `studio`.
 
 OpenClaw is an architectural placeholder for v1. It will consume interface 1 and/or 2 when it integrates (Milestone 4).
 
@@ -131,7 +130,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 
 ### 2.2 Batch Job API
 
-**Implemented in M1a:** no, planned for M1b
+**Implemented in M1b:** yes
 
 **Purpose:** Asynchronous job execution for long-running transcription, TTS, and media processing through one common producer-facing API.
 
@@ -143,6 +142,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 |--------|------|------|---------|
 | POST | `/v1/jobs` | Producer token | Submit a new job |
 | GET | `/v1/jobs/<job_id>` | Producer token | Poll job status |
+| GET | `/v1/jobs/<job_id>/artifacts/<name>` | Producer token | Download an exposed artifact |
 
 #### 2.2.1 Job Submission (Producer Side)
 
@@ -171,10 +171,11 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 }
 ```
 
-**Job types (v1):** `transcribe`
+**Job types (current v1):** `transcribe`
 **Job types (later):** `synthesize`, `extract_audio`, `analyze_media`, `diarize`
 
-**Input kinds:** `url`, `upload`, `minio_ref`
+**Input kinds (current M1b):** `url`
+**Input kinds (later):** `upload`, `minio_ref`
 
 **Output formats for `transcribe`:**
 
@@ -182,11 +183,11 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 |--------|-------|----------|
 | `text` | Plain text string | Archive (via sync endpoint), podcast-pipeline (indirect) |
 | `json` | Whisper-style `{"segments": [{"id", "start", "end", "text", ...}]}` | podcast-transcript, python-podcast |
+| `vtt` / `webvtt` | WebVTT text | subtitle and transcript consumers |
 | `dote` | DOTe JSON | django-cast, podcast-oriented consumers |
 | `podlove` | Podlove transcript JSON | django-cast / Podlove consumers |
-| `webvtt` | WebVTT text | subtitle and transcript consumers |
 
-Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. When a producer requests additional output formats, Voxhelm converts from that canonical representation server-side and stores the requested artifacts.
+Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current M1b implementation stores `text`, `json`, and `vtt` artifacts. Additional server-side conversions remain planned.
 
 **Response:** `201 Created`
 
@@ -234,16 +235,21 @@ The producer-facing `id` is Voxhelm's stable job identifier. Voxhelm also stores
 
 **States:** `queued` -> `running` -> `succeeded` | `failed` | `canceled` | `expired`
 
+#### 2.2.3 Artifact Download
+
+**Request:** `GET /v1/jobs/<job_id>/artifacts/<name>`
+
+Returns the named exposed artifact for the caller's job. Consumers do not need direct MinIO access.
+
 #### 2.2.3 Internal Execution Model
 
 The batch API is the stable producer contract. How jobs move from `queued` to `running` is an internal implementation choice.
 
-**M1b default:** the control plane enqueues work through Django Tasks, and worker processes on `studio` execute queued tasks.
+**Current default:** the control plane enqueues work through Django Tasks, and worker processes on `studio` execute queued tasks.
 
-**Concrete runtime choice:** use `django_tasks.backends.database.DatabaseBackend` with the same local SQLite database as the control plane. Initial backend options should be:
-- `database_alias: default`
-- `poll_interval: 1.0`
-- `max_attempts: 3`
+**Concrete runtime choice:** use `django_tasks_db.backend.DatabaseBackend` with the same local SQLite database as the control plane.
+
+The current implementation also persists the linked Django task/result identifier in the producer-facing job record and reconciles terminal state from the Django Tasks result backend when jobs are queried.
 
 **Future-compatible option:** if Voxhelm later needs remote workers or stricter process isolation beyond the current Django Tasks setup, it can add more explicit worker coordination without changing the producer-facing batch API.
 
@@ -289,18 +295,19 @@ The batch API is the stable producer contract. How jobs move from `queued` to `r
 
 **Direction:** Bidirectional -- Voxhelm workers write artifacts; the control plane reads them to serve to consumers. Consumers do not access MinIO directly.
 
-**Bucket structure (proposed):**
+**Bucket structure (current):**
 
 ```
 voxhelm/
   jobs/<job_id>/
-    input/          # downloaded/uploaded source media
-    intermediate/   # extracted audio, resampled files
-    output/         # final artifacts (text, whisper-json, audio)
-  cache/            # reusable preprocessed media
+    sample.wav
+    extracted.wav
+    transcript.json
+    transcript.txt
+    transcript.vtt
 ```
 
-**Auth:** MinIO access key + secret key. Used only by Voxhelm workers and the control plane — never exposed to consumers.
+**Auth:** S3-compatible credentials. Used only by Voxhelm workers and the control plane — never exposed to consumers.
 
 **Consumers:** Consumers retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. This keeps the security boundary narrow: only Voxhelm holds MinIO credentials. Django Tasks workers on `studio` read/write directly using S3 credentials.
 
@@ -372,13 +379,10 @@ Archive's existing settings would be reconfigured:
 
 Queued task execution is internal to the service. Producer auth and operator auth remain the relevant external boundaries; worker runtime credentials are an implementation detail of the Django Tasks backend and deployment.
 
-**v1 backend:** `django_tasks.backends.database.DatabaseBackend`
+**v1 backend:** `django_tasks_db.backend.DatabaseBackend`
 
 **v1 settings shape:**
-- `TASKS["default"]["BACKEND"] = "django_tasks.backends.database.DatabaseBackend"`
-- `database_alias = "default"`
-- `poll_interval = 1.0`
-- `max_attempts = 3`
+- `TASKS["default"]["BACKEND"] = "django_tasks_db.backend.DatabaseBackend"`
 
 **Model boundary:** Voxhelm keeps a producer-facing job record keyed by its own UUID and stores the linked Django task/result id internally for execution and recovery. Consumers only see the Voxhelm job UUID.
 
@@ -398,12 +402,17 @@ Session-based authentication for the operator web UI and admin endpoints (if Vox
 
 S3-compatible credentials for artifact storage. Used only by Voxhelm internally (workers and the control plane).
 
-| Setting | Proposed env var |
+| Setting | Current env var |
 |---------|------------------|
-| MinIO endpoint | `VOXHELM_MINIO_ENDPOINT` |
-| MinIO access key | `VOXHELM_MINIO_ACCESS_KEY` |
-| MinIO secret key | `VOXHELM_MINIO_SECRET_KEY` |
-| MinIO bucket | `VOXHELM_MINIO_BUCKET` |
+| Artifact backend | `VOXHELM_ARTIFACT_BACKEND` |
+| Artifact root (filesystem backend only) | `VOXHELM_ARTIFACT_ROOT` |
+| S3 endpoint URL | `VOXHELM_ARTIFACT_S3_ENDPOINT_URL` |
+| S3 region | `VOXHELM_ARTIFACT_S3_REGION` |
+| S3 access key ID | `VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID` |
+| S3 secret access key | `VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY` |
+| S3 bucket | `VOXHELM_ARTIFACT_BUCKET` |
+| Object prefix | `VOXHELM_ARTIFACT_PREFIX` |
+| Force path-style addressing | `VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE` |
 
 Consumers do not access MinIO directly. They retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. The sync endpoint returns results inline in the HTTP response body.
 

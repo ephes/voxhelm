@@ -71,6 +71,7 @@ class ParsedRequest:
 
 @require_GET
 def health(request: HttpRequest) -> JsonResponse:
+    del request
     return JsonResponse({"status": "ok"})
 
 

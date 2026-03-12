@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** M1a chunks partially implemented on 2026-03-12; later chunks still draft
+**Status:** M1a and M1b chunks implemented on 2026-03-12; later chunks still draft
 
 Current completion state:
 
-- Implemented: C1, C5, C7, C8, and the M1a portion of C11
-- Not implemented yet: C2, C3, C4, C6, C9, C10, C12-C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, and C11
+- Not implemented yet: C9, C10, C12-C17
 
 ---
 
@@ -121,7 +121,7 @@ Current completion state:
 
 ### C1 -- Django Project Skeleton and Auth
 
-**Implementation note (2026-03-12):** Delivered in a narrower M1a form. Auth is environment-configured bearer tokens; there is no token CRUD model/admin UI yet.
+**Implementation note (2026-03-12):** Delivered. Auth is environment-configured bearer tokens; there is no token CRUD model/admin UI yet.
 
 **Purpose:** Establish the runnable Django project with database, settings, auth tokens, and health endpoint so all subsequent chunks have a foundation to build on.
 
@@ -168,6 +168,8 @@ Current completion state:
 
 ### C2 -- Task Tracking and Submission API
 
+**Implementation note (2026-03-12):** Delivered in a narrower M1b form. Implemented endpoints are `POST /v1/jobs`, `GET /v1/jobs/{id}`, and `GET /v1/jobs/{id}/artifacts/{name}`. `GET /v1/jobs` and `DELETE /v1/jobs/{id}` remain deferred.
+
 **Purpose:** Allow producers to submit jobs and query their status. This is the write side of the control plane.
 
 **Included scope:**
@@ -197,8 +199,9 @@ Current completion state:
 
 - `POST /v1/jobs` -- job submission
 - `GET /v1/jobs/{id}` -- job status
-- `GET /v1/jobs` -- job listing
-- `DELETE /v1/jobs/{id}` -- job cancellation
+- `GET /v1/jobs/{id}/artifacts/{name}` -- artifact download
+- `GET /v1/jobs` -- job listing (deferred)
+- `DELETE /v1/jobs/{id}` -- job cancellation (deferred)
 
 **Acceptance criteria:**
 
@@ -219,13 +222,14 @@ Current completion state:
 
 ### C3 -- Django Tasks Runtime Integration
 
+**Implementation note (2026-03-12):** Delivered. The current runtime uses `django_tasks_db.backend.DatabaseBackend`, stores the linked Django task/result id on each job, and runs a dedicated launchd worker on `studio`.
+
 **Purpose:** Execute queued async work through Django Tasks on `studio` and connect task execution to the producer-facing job/task records.
 
 **Included scope:**
 
 - Configure the chosen Django Tasks backend for production use
-- Initial backend choice: `django_tasks.backends.database.DatabaseBackend`
-- Initial backend settings: `database_alias=default`, `poll_interval=1.0`, `max_attempts=3`
+- Initial backend choice: `django_tasks_db.backend.DatabaseBackend`
 - Define task entrypoints for transcription and extraction work
 - Launch Django Tasks worker processes on `studio`
 - Map queued/running/completed task execution back into producer-facing job/task records
@@ -268,6 +272,8 @@ Current completion state:
 
 ### C4 -- MinIO Artifact Persistence
 
+**Implementation note (2026-03-12):** Delivered. Production uses the S3-compatible artifact backend against MinIO bucket `voxhelm`, while the filesystem backend remains the local default.
+
 **Purpose:** Store and retrieve job input and output artifacts in MinIO so they are durable and accessible by both the control plane and workers.
 
 **Included scope:**
@@ -279,7 +285,7 @@ Current completion state:
 - Download helper: retrieve artifact by storage key
 - HTTP proxy endpoint for artifact delivery (`GET /v1/jobs/{id}/artifacts/{name}`) — consumers access artifacts through Voxhelm, not directly from MinIO
 - Cleanup: configurable retention policy (delete artifacts after N days for completed jobs)
-- Settings: MinIO endpoint, bucket name, access key, secret key (from environment)
+- Settings: S3-compatible endpoint URL, bucket name, access key ID, secret access key, prefix, and path-style toggle (from environment)
 
 **Explicitly excluded scope:**
 
@@ -293,10 +299,8 @@ Current completion state:
 
 **Primary interfaces:**
 
-- Internal Python API: `store_artifact(job, kind, filename, data) -> Artifact`
-- Internal Python API: `get_artifact_url(artifact) -> str`
-- `GET /v1/jobs/{id}/artifacts` -- list artifacts for a job (producer token required)
-- `GET /v1/jobs/{id}/artifacts/{artifact_id}` -- proxy download from MinIO
+- Internal Python API: artifact store read/write helpers
+- `GET /v1/jobs/{id}/artifacts/{name}` -- proxy download from MinIO
 
 **Acceptance criteria:**
 
@@ -612,7 +616,7 @@ Current completion state:
 
 ### C11 -- Deployment Role (ops-library)
 
-**Implementation note (2026-03-12):** The M1a subset is delivered. The `studio` app deployment and the private Traefik ingress on `macmini` are in place; worker/MinIO expansion remains for M1b.
+**Implementation note (2026-03-12):** Delivered. The role now deploys the HTTP app and worker launchd units, runs Django migrations before restarting services, renders the S3-compatible artifact env vars, and includes post-deploy API and worker health checks.
 
 **Purpose:** Deploy Voxhelm to `studio` using the existing ops-library/ops-control patterns so it can be operated as a standard homelab service.
 

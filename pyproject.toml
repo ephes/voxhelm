@@ -5,7 +5,10 @@ description = "Shared local transcription service"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "boto3>=1.42.66",
   "Django>=5.2,<5.3",
+  "django-tasks>=0.12.0",
+  "django-tasks-db>=0.12.0",
   "mlx-whisper; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "uvicorn>=0.35.0",
 ]
@@ -20,7 +23,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "voxhelm_project.settings"
+DJANGO_SETTINGS_MODULE = "config.settings"
 pythonpath = ["."]
 testpaths = ["tests"]
 
@@ -30,6 +33,9 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"jobs/migrations/*.py" = ["E501", "I001"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -41,10 +47,14 @@ check_untyped_defs = true
 plugins = ["mypy_django_plugin.main"]
 
 [tool.django-stubs]
-django_settings_module = "voxhelm_project.settings"
+django_settings_module = "config.settings"
 
 [[tool.mypy.overrides]]
 module = ["mlx_whisper"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
 [build-system]
@@ -52,4 +62,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["voxhelm_api", "voxhelm_project"]
+packages = ["config", "jobs", "transcriptions"]

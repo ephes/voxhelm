@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 
-from voxhelm_api.service import TranscribeParams, TranscriptionResult, transcribe_audio
+from transcriptions.service import TranscribeParams, TranscriptionResult, transcribe_audio
 
 
 class SerialBackend:
@@ -26,7 +26,7 @@ class SerialBackend:
 
 def test_transcribe_audio_serializes_backend_access(monkeypatch) -> None:
     backend = SerialBackend()
-    monkeypatch.setattr("voxhelm_api.service.get_backend_service", lambda: backend)
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: backend)
     params = TranscribeParams(request_model="whisper-1", prompt=None, language=None)
     errors: list[Exception] = []
 
