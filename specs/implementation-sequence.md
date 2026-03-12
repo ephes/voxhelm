@@ -1,18 +1,17 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b completed on 2026-03-12; first M1c slice completed on 2026-03-12; later phases still draft
+**Status:** M1a and M1b completed on 2026-03-12; consumer-facing M1c slices completed on 2026-03-12; later phases still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
 - Phases 1a and 1b are complete.
-- The first Phase 1c slice is complete: `podcast-transcript` now supports `--backend voxhelm` and has been validated against the deployed edge service.
+- The consumer-facing Phase 1c slices are complete: `podcast-transcript` now supports `--backend voxhelm` and has been validated against the deployed edge service, `podcast-pipeline` has the required compatibility follow-on, and `django-cast` now provides an explicit `generate_transcripts` management command for Voxhelm-backed transcript creation.
 - The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Batch jobs, MinIO-backed artifacts, video extraction, and artifact proxy download are live.
-- `podcast-pipeline` is not yet config-only compatible with that backend because its current transcribe command contract does not pass or resolve an audio input for the external transcriber.
-- Wyoming, TTS, and the remaining consumer integrations remain future phases.
+- Wyoming, TTS, and backend expansion beyond the current default remain future phases.
 
 ## Execution Order Overview
 
@@ -200,11 +199,11 @@ Completed on 2026-03-12:
 
 ---
 
-## Phase 1c: Consumer Integrations (Days 17-24; first slice completed on 2026-03-12)
+## Phase 1c: Consumer Integrations (Days 17-24; consumer slices completed on 2026-03-12)
 
 ### Parallelizable work
 
-The remaining consumer integrations are largely independent and could be done in any order. The recommended order still optimizes for risk (podcast-transcript was lowest risk and is now done; python-podcast remains the highest-risk stream).
+The consumer integrations were largely independent and could be done in any order. The recommended order optimized for risk: podcast-transcript first, then the smaller podcast-pipeline compatibility follow-on, then python-podcast / django-cast.
 
 #### Stream A: podcast-transcript backend (days 17-19)
 
@@ -220,10 +219,9 @@ The remaining consumer integrations are largely independent and could be done in
    - Add `--backend voxhelm` to podcast-transcript's argument parser
    - Factory function `voxhelm_from_settings` following existing pattern
 
-3. **podcast-pipeline: follow-on still required**
-   - podcast-pipeline shells out to an external transcriber command, but its current contract only passes `{mode}`, `{output_dir}`, and `{workspace}`
-   - repo inspection after Stream A showed that no audio input is passed or resolved for the transcriber, so config-only switching is not currently possible
-   - the remaining work is a small compatibility step or wrapper, not a new Voxhelm backend
+3. **podcast-pipeline: follow-on delivered**
+   - podcast-pipeline shells out to an external transcriber command, and now has the required compatibility for the Voxhelm-backed transcribe path
+   - this remained a small compatibility step rather than a new Voxhelm backend
 
 #### Stream B: Additional STT backends (days 17-19)
 
@@ -236,18 +234,20 @@ The remaining consumer integrations are largely independent and could be done in
 
 #### Stream C: python-podcast / django-cast integration (days 19-23)
 
+**Implementation note (2026-03-12):** Delivered as an explicit management-command flow in `django-cast`. The shipped path keeps Podlove and DOTe conversion local in `django-cast`; Voxhelm currently supplies the batch job plus canonical JSON and WebVTT artifacts.
+
 1. **Voxhelm client library** (or inline HTTP client in django-cast)
    - Submit batch transcription job with audio URL
    - Poll for job completion
    - Download artifacts
 
-2. **Transcript format conversion** (server-side + consumer integration)
-   - Voxhelm normalizes backend output into Whisper-native JSON internally
-   - Voxhelm produces requested DOTe, Podlove, WebVTT, and plain-text artifacts server-side
-   - Create/update django-cast `Transcript` model with the returned artifacts
+2. **Transcript format conversion** (consumer integration)
+   - Voxhelm normalizes backend output into Whisper-native JSON internally and exposes canonical JSON + WebVTT artifacts
+   - django-cast converts the JSON into Podlove JSON and DOTe locally
+   - Create/update django-cast `Transcript` model with the returned/generated artifacts
 
 3. **Management command: `generate_transcripts`**
-   - Find Audio objects without Transcript
+   - Explicit operator entrypoint for selected episodes or audio objects
    - Submit Voxhelm job for each
    - Poll and populate Transcript models
 
@@ -258,8 +258,8 @@ The remaining consumer integrations are largely independent and could be done in
 
 Before declaring M1 complete:
 - [x] `podcast-transcript --backend voxhelm <url>` produces the expected transcript artifacts through its existing output flow
-- [ ] podcast-pipeline's `transcribe` command works with voxhelm backend configured
-- [ ] python-podcast can generate transcripts for episodes through Voxhelm
+- [x] podcast-pipeline's `transcribe` command works with the Voxhelm-backed transcribe flow
+- [x] python-podcast can generate transcripts for episodes through Voxhelm
 - [ ] All three STT backends produce valid output
 - [ ] Archive continues to work (regression check)
 
@@ -384,6 +384,6 @@ Everything else can follow incrementally.
 
 1. Deploy M1a to `studio` and verify `GET /v1/health`, then run the Archive switchover test against audio inputs only.
 2. Deploy M1b on the same host with Django Tasks workers and MinIO connectivity, then verify URL input, artifact proxying, restart recovery, and video preprocessing.
-3. Roll consumer integrations in M1c one stream at a time: podcast-transcript first, then indirect podcast-pipeline validation, then python-podcast / django-cast.
+3. Roll consumer integrations in M1c one stream at a time: podcast-transcript first, then podcast-pipeline compatibility, then python-podcast / django-cast.
 4. Start M2 once M1a is stable; verify Wyoming STT first, then add Wyoming TTS only if the Piper/TTS dependency is ready.
 5. Start M3 after M1b and Piper readiness; verify batch synthesize jobs before wiring Archive article-audio usage.

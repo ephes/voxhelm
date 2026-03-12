@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b implemented on 2026-03-12; first M1c slice delivered on 2026-03-12; later milestones still draft
+**Status:** M1a and M1b implemented on 2026-03-12; consumer-facing M1c integrations delivered on 2026-03-12; backend-expansion and later milestones still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -10,6 +10,7 @@ Implemented today:
 
 - M1a and M1b
 - first M1c slice: `podcast-transcript --backend voxhelm`
+- M1c consumer follow-ons: `podcast-pipeline` compatibility and `python-podcast` / `django-cast` explicit transcript generation
 - Django + `uvicorn` HTTP process plus Django Tasks worker on `studio`
 - private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`
 - `GET /v1/health`
@@ -30,8 +31,6 @@ Implemented today:
 
 Not implemented yet:
 
-- podcast-pipeline compatibility follow-on
-- python-podcast / django-cast integration
 - additional STT backends beyond the current default
 - Wyoming
 - TTS
@@ -208,13 +207,13 @@ Completed on 2026-03-12:
 
 **Title:** podcast-transcript backend, python-podcast integration, podcast-pipeline support
 
-**Implementation note (2026-03-12):** The first M1c slice is delivered. `podcast-transcript` now has a `Voxhelm` backend and `--backend voxhelm`, and that path has been validated against the deployed edge service. `podcast-pipeline` did not turn out to be zero-change compatible: its current transcribe command contract does not pass or resolve an audio input for the external transcriber, so a small follow-on change or wrapper is still required. `python-podcast` / `django-cast` remain deferred.
+**Implementation note (2026-03-12):** The consumer-facing M1c slices are delivered. `podcast-transcript` now has a `Voxhelm` backend and `--backend voxhelm`, that path has been validated against the deployed edge service, `podcast-pipeline` has the required compatibility follow-on, and `django-cast` now provides an explicit `generate_transcripts` management command that submits Voxhelm jobs and persists the existing transcript artifacts. Remaining M1c work is limited to backend expansion beyond the current default.
 
 ### What ships
 
 - **podcast-transcript backend:** New `Voxhelm` class implementing the `TranscriptionBackend` protocol in podcast-transcript. This class currently calls `POST /v1/audio/transcriptions` and writes Whisper-compatible JSON into the existing output pipeline. Added as a `--backend voxhelm` option to the podcast-transcript CLI.
-- **podcast-pipeline follow-on:** Still pending. The repo inspection that followed the first M1c slice showed that podcast-pipeline's `transcribe` entrypoint does not currently provide an audio input to the external transcriber, so config-only switching is not yet possible.
-- **python-podcast / django-cast integration:** Management command or signal-based trigger in python-podcast/django-cast that submits a transcription job to Voxhelm for an episode's audio, polls for completion, and creates/updates the `Transcript` model with Podlove JSON, WebVTT, and DOTe outputs. Voxhelm performs the server-side conversion from canonical Whisper JSON into these consumer-facing formats.
+- **podcast-pipeline follow-on:** Delivered. The pipeline now provides the required audio-input compatibility for the Voxhelm-backed `podcast-transcript` path.
+- **python-podcast / django-cast integration:** Delivered as an explicit management command in `django-cast`. It submits a Voxhelm batch job for an episode/audio URL, polls for completion, downloads Voxhelm JSON and WebVTT artifacts, converts JSON into Podlove JSON and DOTe locally inside `django-cast`, and creates or updates the existing `Transcript` model without changing its contract.
 - Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
 - Second and third STT backend adapters (all three of whisperkit, mlx-whisper, whisper.cpp available, selectable via `model` or `backend` parameter)
 
@@ -235,16 +234,16 @@ Completed on 2026-03-12:
 Completed on 2026-03-12:
 
 - [x] `podcast-transcript --backend voxhelm <url>` produces the expected output formats (DOTe, Podlove, WebVTT, plain text) through its existing pipeline
+- [x] podcast-pipeline's `transcribe` command works with the Voxhelm-backed podcast-transcript path
+- [x] python-podcast can trigger transcript generation for an episode and populate the django-cast Transcript model
 
 Still pending:
 
-- [ ] podcast-pipeline's `transcribe` command works with `--backend voxhelm` in the podcast-transcript config
-- [ ] python-podcast can trigger transcript generation for an episode and populate the django-cast Transcript model
 - [ ] All three STT backends are selectable and produce valid transcripts
 
 ### Key risks
 
-- Output format differences between backends (whisper.cpp produces different JSON than mlx-whisper) -- mitigation: normalize in Voxhelm before returning, do not push format conversion to consumers
+- Output format differences between backends (whisper.cpp produces different JSON than mlx-whisper) -- mitigation: normalize in Voxhelm before returning canonical JSON/VTT outputs, with consumer-local Podlove/DOTe conversion where needed
 - podcast-transcript's `TranscriptionBackend` protocol expects `(audio_file: Path, transcript_path: Path)` -- the Voxhelm backend either uploads the file or passes a URL, which is a different flow than local execution. Mitigation: the Voxhelm backend class handles this internally.
 - podcast-pipeline's current transcriber command contract was narrower than assumed in the initial plan. Mitigation: treat it as a small follow-on integration step instead of assuming zero-change compatibility.
 

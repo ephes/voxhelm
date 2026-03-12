@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** M1a and M1b chunks implemented on 2026-03-12; C9 implemented on 2026-03-12; later chunks still draft
+**Status:** M1a and M1b chunks implemented on 2026-03-12; C9 and C10 implemented on 2026-03-12; later chunks still draft
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, and C11
-- Not implemented yet: C10, C12-C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, and C11
+- Not implemented yet: C12-C17
 
 ---
 
