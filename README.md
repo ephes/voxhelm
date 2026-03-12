@@ -27,7 +27,13 @@ Optional settings:
 
 ```bash
 export VOXHELM_ALLOWED_HOSTS="localhost,127.0.0.1"
-export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-turbo"
+export VOXHELM_STT_BACKEND="whispercpp"
+export VOXHELM_STT_FALLBACK_BACKEND="mlx"
+export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
+export VOXHELM_WHISPERCPP_MODEL="ggml-large-v3.bin"
+export VOXHELM_WHISPERCPP_BIN="/opt/homebrew/bin/whisper-cli"
+export VOXHELM_WHISPERCPP_PROCESSORS="4"
+export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 ```

@@ -229,11 +229,10 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             store_extracted_audio_artifact(job=job, audio_path=extracted_audio_path)
             audio_path = extracted_audio_path
 
-        resolved_model = resolve_model(job.model)
         result = transcribe_audio(
             audio_path,
             TranscribeParams(
-                request_model=resolved_model,
+                request_model=job.model or "auto",
                 prompt=None,
                 language=job.language or None,
             ),
@@ -243,7 +242,6 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             job=job,
             media=media,
             result=result,
-            resolved_model=resolved_model,
             processing_seconds=processing_seconds,
         )
         persist_output_artifacts(job=job, result=result)
@@ -275,29 +273,20 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             extracted_audio_path.unlink(missing_ok=True)
 
 
-def resolve_model(requested_model: str) -> str:
-    if requested_model == "auto":
-        return settings.VOXHELM_MLX_MODEL
-    if requested_model in {"gpt-4o-mini-transcribe", "whisper-1"}:
-        return settings.VOXHELM_MLX_MODEL
-    return requested_model
-
-
 def build_result_metadata(
     *,
     job: Job,
     media: DownloadedMedia,
     result: TranscriptionResult,
-    resolved_model: str,
     processing_seconds: float,
 ) -> dict[str, Any]:
     duration_seconds = 0.0
     if result.segments:
         duration_seconds = max(segment.end for segment in result.segments)
     return {
-        "backend": "mlx-whisper",
+        "backend": result.backend_name or settings.VOXHELM_STT_BACKEND,
         "requested_model": job.model or "auto",
-        "model": resolved_model,
+        "model": result.model_name or job.model or "auto",
         "language": result.language or job.language or "",
         "duration_seconds": duration_seconds,
         "processing_seconds": processing_seconds,

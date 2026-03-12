@@ -76,7 +76,15 @@ USE_I18N = True
 USE_TZ = True
 
 VOXHELM_BEARER_TOKENS = env_tokens("VOXHELM_BEARER_TOKENS")
-VOXHELM_MLX_MODEL = os.getenv("VOXHELM_MLX_MODEL", "mlx-community/whisper-large-v3-turbo")
+VOXHELM_STT_BACKEND = os.getenv("VOXHELM_STT_BACKEND", "whispercpp").strip()
+VOXHELM_STT_FALLBACK_BACKEND = os.getenv("VOXHELM_STT_FALLBACK_BACKEND", "mlx").strip()
+VOXHELM_MLX_MODEL = os.getenv("VOXHELM_MLX_MODEL", "mlx-community/whisper-large-v3-mlx")
+VOXHELM_WHISPERCPP_MODEL = os.getenv("VOXHELM_WHISPERCPP_MODEL", "ggml-large-v3.bin").strip()
+VOXHELM_WHISPERCPP_BIN = os.getenv("VOXHELM_WHISPERCPP_BIN", "/opt/homebrew/bin/whisper-cli")
+VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "4"))
+VOXHELM_MODEL_CACHE_DIR = Path(
+    os.getenv("VOXHELM_MODEL_CACHE_DIR", str(BASE_DIR / "var" / "models"))
+)
 VOXHELM_MAX_UPLOAD_BYTES = int(os.getenv("VOXHELM_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 VOXHELM_MAX_UPLOAD_MIB = VOXHELM_MAX_UPLOAD_BYTES // (1024 * 1024)
 VOXHELM_MAX_URL_DOWNLOAD_BYTES = int(
@@ -92,6 +100,7 @@ VOXHELM_ACCEPTED_MODELS = {
     "gpt-4o-mini-transcribe",
     "whisper-1",
     VOXHELM_MLX_MODEL,
+    VOXHELM_WHISPERCPP_MODEL,
 }
 VOXHELM_BATCH_ACCEPTED_MODELS = {
     "auto",
