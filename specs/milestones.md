@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b implemented on 2026-03-12; later milestones still draft
+**Status:** M1a and M1b implemented on 2026-03-12; first M1c slice delivered on 2026-03-12; later milestones still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -9,6 +9,7 @@
 Implemented today:
 
 - M1a and M1b
+- first M1c slice: `podcast-transcript --backend voxhelm`
 - Django + `uvicorn` HTTP process plus Django Tasks worker on `studio`
 - private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`
 - `GET /v1/health`
@@ -25,12 +26,15 @@ Implemented today:
 - video-to-audio extraction for batch jobs
 - Archive validation with env vars only
 - live batch-job submission, completion, artifact fetch, and MinIO object verification
+- live validation of `podcast-transcript` against the deployed Voxhelm edge service
 
 Not implemented yet:
 
+- podcast-pipeline compatibility follow-on
+- python-podcast / django-cast integration
+- additional STT backends beyond the current default
 - Wyoming
 - TTS
-- additional consumers beyond Archive validation
 
 ## Design Decisions
 
@@ -121,8 +125,7 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 - Time-aligned/structured transcript output (M1b)
 - Wyoming (M2)
 - TTS (M3)
-- podcast-transcript integration (M1c)
-- python-podcast / django-cast integration (M1c)
+- remaining consumer integrations (M1c)
 
 ### Dependencies
 
@@ -172,7 +175,6 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 ### What is deferred
 
 - Multiple STT backends beyond the default (M1c)
-- podcast-transcript backend class (M1c)
 - python-podcast / django-cast integration (M1c)
 - podcast-pipeline integration (M1c)
 - Interactive/batch lane separation (M2)
@@ -206,10 +208,12 @@ Completed on 2026-03-12:
 
 **Title:** podcast-transcript backend, python-podcast integration, podcast-pipeline support
 
+**Implementation note (2026-03-12):** The first M1c slice is delivered. `podcast-transcript` now has a `Voxhelm` backend and `--backend voxhelm`, and that path has been validated against the deployed edge service. `podcast-pipeline` did not turn out to be zero-change compatible: its current transcribe command contract does not pass or resolve an audio input for the external transcriber, so a small follow-on change or wrapper is still required. `python-podcast` / `django-cast` remain deferred.
+
 ### What ships
 
-- **podcast-transcript backend:** New `Voxhelm` class implementing the `TranscriptionBackend` protocol in podcast-transcript. This class calls `POST /v1/audio/transcriptions` (sync) or submits a batch job, downloads the result, and writes it to the expected transcript path. Added as a `--backend voxhelm` option to the podcast-transcript CLI.
-- **podcast-pipeline support:** With the podcast-transcript backend in place, podcast-pipeline's `transcribe` entrypoint (which shells out to `podcast-transcript`) works automatically. No changes needed to podcast-pipeline itself.
+- **podcast-transcript backend:** New `Voxhelm` class implementing the `TranscriptionBackend` protocol in podcast-transcript. This class currently calls `POST /v1/audio/transcriptions` and writes Whisper-compatible JSON into the existing output pipeline. Added as a `--backend voxhelm` option to the podcast-transcript CLI.
+- **podcast-pipeline follow-on:** Still pending. The repo inspection that followed the first M1c slice showed that podcast-pipeline's `transcribe` entrypoint does not currently provide an audio input to the external transcriber, so config-only switching is not yet possible.
 - **python-podcast / django-cast integration:** Management command or signal-based trigger in python-podcast/django-cast that submits a transcription job to Voxhelm for an episode's audio, polls for completion, and creates/updates the `Transcript` model with Podlove JSON, WebVTT, and DOTe outputs. Voxhelm performs the server-side conversion from canonical Whisper JSON into these consumer-facing formats.
 - Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
 - Second and third STT backend adapters (all three of whisperkit, mlx-whisper, whisper.cpp available, selectable via `model` or `backend` parameter)
@@ -228,15 +232,21 @@ Completed on 2026-03-12:
 
 ### Success criteria
 
-- `podcast-transcript --backend voxhelm <url>` produces the same output formats (DOTe, Podlove, WebVTT, plain text) as the existing whisper-cpp backend
-- podcast-pipeline's `transcribe` command works with `--backend voxhelm` in the podcast-transcript config
-- python-podcast can trigger transcript generation for an episode and populate the django-cast Transcript model
-- All three STT backends are selectable and produce valid transcripts
+Completed on 2026-03-12:
+
+- [x] `podcast-transcript --backend voxhelm <url>` produces the expected output formats (DOTe, Podlove, WebVTT, plain text) through its existing pipeline
+
+Still pending:
+
+- [ ] podcast-pipeline's `transcribe` command works with `--backend voxhelm` in the podcast-transcript config
+- [ ] python-podcast can trigger transcript generation for an episode and populate the django-cast Transcript model
+- [ ] All three STT backends are selectable and produce valid transcripts
 
 ### Key risks
 
 - Output format differences between backends (whisper.cpp produces different JSON than mlx-whisper) -- mitigation: normalize in Voxhelm before returning, do not push format conversion to consumers
 - podcast-transcript's `TranscriptionBackend` protocol expects `(audio_file: Path, transcript_path: Path)` -- the Voxhelm backend either uploads the file or passes a URL, which is a different flow than local execution. Mitigation: the Voxhelm backend class handles this internally.
+- podcast-pipeline's current transcriber command contract was narrower than assumed in the initial plan. Mitigation: treat it as a small follow-on integration step instead of assuming zero-change compatibility.
 
 ---
 

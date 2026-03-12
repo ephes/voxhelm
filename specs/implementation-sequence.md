@@ -1,24 +1,27 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b completed on 2026-03-12; later phases still draft
+**Status:** M1a and M1b completed on 2026-03-12; first M1c slice completed on 2026-03-12; later phases still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
 - Phases 1a and 1b are complete.
+- The first Phase 1c slice is complete: `podcast-transcript` now supports `--backend voxhelm` and has been validated against the deployed edge service.
 - The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Batch jobs, MinIO-backed artifacts, video extraction, and artifact proxy download are live.
-- Wyoming, TTS, and broader consumer integrations remain future phases.
+- `podcast-pipeline` is not yet config-only compatible with that backend because its current transcribe command contract does not pass or resolve an audio input for the external transcriber.
+- Wyoming, TTS, and the remaining consumer integrations remain future phases.
 
 ## Execution Order Overview
 
 ```
-Completed on 2026-03-12                     Remaining draft phases
-────────────────────────────────────────── ──────────────────────────────────
-[M1a: sync API] [M1b: jobs+minio]          [M1c: consumers] [M2: Wyoming]
-[deploy + live verification]               [M3: TTS batch]  [M4: OpenClaw]
+Completed on 2026-03-12                              Remaining draft phases
+──────────────────────────────────────────────────── ──────────────────────────────────
+[M1a: sync API] [M1b: jobs+minio] [M1c: podcast-transcript]
+[deploy + live verification]                         [M1c: remaining] [M2: Wyoming]
+                                                    [M3: TTS batch]  [M4: OpenClaw]
 ```
 
 ---
@@ -197,13 +200,15 @@ Completed on 2026-03-12:
 
 ---
 
-## Phase 1c: Consumer Integrations (Days 17-24)
+## Phase 1c: Consumer Integrations (Days 17-24; first slice completed on 2026-03-12)
 
 ### Parallelizable work
 
-The three consumer integrations are largely independent and could be done in any order. The recommended order optimizes for risk (podcast-transcript is lowest risk, python-podcast is highest).
+The remaining consumer integrations are largely independent and could be done in any order. The recommended order still optimizes for risk (podcast-transcript was lowest risk and is now done; python-podcast remains the highest-risk stream).
 
 #### Stream A: podcast-transcript backend (days 17-19)
+
+**Implementation note (2026-03-12):** Delivered. The current implementation uses Voxhelm's synchronous `POST /v1/audio/transcriptions` path, requests `verbose_json`, keeps `podcast-transcript`'s existing output conversions local, and accepts `VOXHELM_API_BASE` values pointing at either the service root or `/v1`.
 
 1. **New `Voxhelm` backend class** in podcast-transcript
    - Implements existing `TranscriptionBackend` protocol: `def transcribe(self, audio_file: Path, transcript_path: Path) -> None`
@@ -215,9 +220,10 @@ The three consumer integrations are largely independent and could be done in any
    - Add `--backend voxhelm` to podcast-transcript's argument parser
    - Factory function `voxhelm_from_settings` following existing pattern
 
-3. **podcast-pipeline: zero changes needed**
-   - podcast-pipeline shells out to `podcast-transcript` CLI
-   - Once podcast-transcript has the `voxhelm` backend, pipeline users can switch via config/env
+3. **podcast-pipeline: follow-on still required**
+   - podcast-pipeline shells out to an external transcriber command, but its current contract only passes `{mode}`, `{output_dir}`, and `{workspace}`
+   - repo inspection after Stream A showed that no audio input is passed or resolved for the transcriber, so config-only switching is not currently possible
+   - the remaining work is a small compatibility step or wrapper, not a new Voxhelm backend
 
 #### Stream B: Additional STT backends (days 17-19)
 
@@ -251,7 +257,7 @@ The three consumer integrations are largely independent and could be done in any
 ### Decision gate: Consumer acceptance
 
 Before declaring M1 complete:
-- [ ] `podcast-transcript --backend voxhelm <url>` produces the expected transcript artifacts through its existing output flow
+- [x] `podcast-transcript --backend voxhelm <url>` produces the expected transcript artifacts through its existing output flow
 - [ ] podcast-pipeline's `transcribe` command works with voxhelm backend configured
 - [ ] python-podcast can generate transcripts for episodes through Voxhelm
 - [ ] All three STT backends produce valid output

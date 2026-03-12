@@ -3,13 +3,15 @@
 Current implementation snapshot as of 2026-03-12:
 
 - M1a and M1b are implemented and deployed.
+- The first M1c slice is implemented in the consumer repo: `podcast-transcript` now has a `--backend voxhelm` path that talks to the live Voxhelm sync transcription endpoint.
 - The live production shape is a Django HTTP process plus a Django Tasks worker on `studio`, with private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Implemented endpoints: `GET /v1/health`, `POST /v1/audio/transcriptions`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, and `GET /v1/jobs/{id}/artifacts/{name}`.
 - Implemented sync STT contract: bearer auth, multipart upload, JSON URL mode, accepted models `gpt-4o-mini-transcribe` and `whisper-1`, response formats `json`, `text`, `verbose_json`, and `vtt`.
 - Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, and artifact download through the Voxhelm HTTP proxy.
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription and a live M1b batch job with artifact retrieval have both been validated against the deployed service.
-- Later work (consumer integrations beyond Archive validation, Wyoming, TTS, additional backends) remains planned.
+- `podcast-pipeline` is not yet config-only compatible with that backend: its current transcribe command contract does not pass or resolve an audio input for the external transcriber.
+- Later work (remaining consumer integrations, Wyoming, TTS, additional backends) remains planned.
 
 This directory currently contains both the original PRD and the planning package derived from it. The goal of this file is to make the document stack explicit, so readers know:
 

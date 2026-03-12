@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** M1a and M1b chunks implemented on 2026-03-12; later chunks still draft
+**Status:** M1a and M1b chunks implemented on 2026-03-12; C9 implemented on 2026-03-12; later chunks still draft
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, and C11
-- Not implemented yet: C9, C10, C12-C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, and C11
+- Not implemented yet: C10, C12-C17
 
 ---
 
@@ -527,6 +527,8 @@ Current completion state:
 
 ### C9 -- podcast-transcript Voxhelm Backend
 
+**Implementation note (2026-03-12):** Delivered as the first M1c slice. `podcast-transcript` now has a `Voxhelm` backend, `--backend voxhelm`, README/docs updates, and test coverage. It was validated against the deployed Voxhelm edge service. The follow-on assumption that podcast-pipeline would work without changes was not borne out by repo inspection; its transcribe command contract still needs a small compatibility step or wrapper.
+
 **Purpose:** Add Voxhelm as a fourth backend to podcast-transcript, so it can use the `studio` service instead of local mlx-whisper, local whisper.cpp, or Groq API.
 
 **Included scope:**
@@ -544,7 +546,7 @@ Current completion state:
 
 **Dependencies:** C7 (OpenAI-compatible endpoint), C6 (batch fallback for long episodes)
 
-**Consumer(s):** podcast-transcript users (including podcast-pipeline, which delegates to podcast-transcript)
+**Consumer(s):** podcast-transcript users (with future indirect podcast-pipeline usage once its transcribe command contract is adjusted)
 
 **Primary interfaces:**
 
@@ -552,11 +554,11 @@ Current completion state:
 
 **Acceptance criteria:**
 
-- `podcast-transcript` can transcribe an audio file using the Voxhelm backend
-- Output is valid Whisper-format JSON that the existing DOTe/Podlove/WebVTT conversion pipeline handles correctly
-- All four output formats (DOTe, Podlove, WebVTT, plaintext) are produced correctly from Voxhelm output
-- podcast-pipeline can use podcast-transcript with the Voxhelm backend without modification
-- Configuration is documented
+- [x] `podcast-transcript` can transcribe an audio file using the Voxhelm backend
+- [x] Output is valid Whisper-format JSON that the existing DOTe/Podlove/WebVTT conversion pipeline handles correctly
+- [x] All four output formats (DOTe, Podlove, WebVTT, plaintext) are produced correctly from Voxhelm output
+- [x] Configuration is documented
+- [ ] podcast-pipeline can use podcast-transcript with the Voxhelm backend without modification
 
 **Main risks:**
 
@@ -1002,7 +1004,7 @@ M3-M4 has no dependency on M1c, but M3 still depends on both M1b and M2.
 
 1. **Archive integration is via OpenAI-compatible endpoint (C7), not batch API.** Archive's current code is synchronous and uses the OpenAI multipart POST pattern. The fastest path to integration is matching that API exactly. Batch API integration for Archive is future work.
 
-2. **podcast-transcript gets a Voxhelm backend (C9), not a replacement.** podcast-transcript already handles chunking, resampling, and library/CLI output workflows. Voxhelm is another transcription backend alongside mlx-whisper, whisper.cpp, and Groq. This means podcast-pipeline gets Voxhelm support for free.
+2. **podcast-transcript gets a Voxhelm backend (C9), not a replacement.** podcast-transcript already handles chunking, resampling, and library/CLI output workflows. Voxhelm is another transcription backend alongside mlx-whisper, whisper.cpp, and Groq. This keeps the remaining podcast-pipeline integration step small, but it does not eliminate it entirely because podcast-pipeline's current transcribe command contract is narrower than originally assumed.
 
 3. **python-podcast/django-cast gets new integration code (C10).** This is the only consumer with no existing transcription path, so it needs the most new code. Its planned integration path is the batch API so it can rely on server-generated transcript artifacts.
 
