@@ -34,6 +34,12 @@ export VOXHELM_WHISPERCPP_MODEL="ggml-large-v3.bin"
 export VOXHELM_WHISPERCPP_BIN="/opt/homebrew/bin/whisper-cli"
 export VOXHELM_WHISPERCPP_PROCESSORS="4"
 export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
+export VOXHELM_WYOMING_STT_HOST="0.0.0.0"
+export VOXHELM_WYOMING_STT_PORT="10300"
+export VOXHELM_WYOMING_STT_BACKEND=""
+export VOXHELM_WYOMING_STT_MODEL=""
+export VOXHELM_WYOMING_STT_LANGUAGE=""
+export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 ```
@@ -57,3 +63,19 @@ curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/sample.mp3","model":"whisper-1"}'
 ```
+
+## Wyoming STT
+
+Milestone 2 adds a separate Wyoming STT sidecar process for Home Assistant:
+
+```bash
+uv run voxhelm-wyoming-stt
+```
+
+The sidecar reuses Voxhelm's existing STT backend layer. If
+`VOXHELM_WYOMING_STT_BACKEND` and `VOXHELM_WYOMING_STT_MODEL` are unset, it
+falls back to the service-wide backend defaults.
+
+Current limitation: there is no cross-process lane scheduler yet. The Wyoming
+sidecar runs in its own process, but it can still contend with the HTTP API and
+batch worker for CPU, memory, and model cache usage on `studio`.
