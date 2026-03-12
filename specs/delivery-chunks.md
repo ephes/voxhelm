@@ -570,18 +570,26 @@ Current completion state:
 
 ### C10 -- python-podcast / django-cast Integration
 
-**Purpose:** Enable python-podcast / django-cast to trigger transcript generation via Voxhelm and store the results as Transcript model instances.
+**Implementation note (2026-03-12):** Delivered in `django-cast` as a Wagtail-admin workflow. Editors can trigger transcript generation from Episode and Audio edit views, site admins can manage Voxhelm settings through Wagtail site settings, transcript persistence stays on the existing `Transcript` model contract, and the management command remains only as fallback operator tooling.
+
+**Purpose:** Enable python-podcast / django-cast editors to trigger transcript generation via Wagtail admin, configure Voxhelm through Wagtail admin, and store the results as Transcript model instances without shell access.
 
 **Included scope:**
 
-- New management command or service function in python-podcast/django-cast: `generate_transcript(audio_id)` that:
+- Wagtail-admin-managed Voxhelm configuration for python-podcast / django-cast:
+  1. Voxhelm API base URL
+  2. Voxhelm API token
+  3. Optional model/language preferences
+  4. Permissioned editing for privileged Wagtail admins only
+- Wagtail admin action or button on Episode and/or Audio in Wagtail admin that:
   1. Gets the Audio instance and its file URL
-  2. Submits a batch transcription job to Voxhelm (`POST /v1/jobs`) with the required output formats
-  3. Polls for completion and retrieves the job result
-  4. Downloads the server-converted Podlove JSON, WebVTT, DOTe JSON, and plain-text artifacts from Voxhelm
-  5. Creates or updates the `Transcript` model instance linked to the Audio
-- Configuration: Voxhelm API base URL, API key, model preference (via django settings or env vars)
-- Admin action: "Generate transcript" bulk action on Audio admin
+  2. Submits a batch transcription job to Voxhelm (`POST /v1/jobs`)
+  3. Polls for completion or hands off to a bounded background flow initiated from Wagtail admin
+  4. Downloads Voxhelm JSON and WebVTT artifacts
+  5. Converts JSON into the existing django-cast Podlove JSON and DOTe shapes where needed
+  6. Creates or updates the `Transcript` model instance linked to the Audio
+- Wagtail-admin feedback surface showing success/failure to the editor
+- Optional management command fallback for operators, but it is not sufficient for acceptance
 
 **Explicitly excluded scope:**
 
@@ -589,28 +597,33 @@ Current completion state:
 - Speaker diarization (S3)
 - Changes to django-cast's Transcript model schema
 - TTS generation for episodes
+- Django admin UI for transcript generation or configuration
 
 **Dependencies:** C6 (batch transcription and server-side artifact generation)
 
-**Consumer(s):** python-podcast / django-cast operators
+**Consumer(s):** python-podcast / django-cast Wagtail editors and site admins
 
 **Primary interfaces:**
 
-- Management command: `manage.py generate_transcripts [--audio-id ID]`
-- Admin action on Audio model
+- Wagtail admin configuration surface for Voxhelm connection settings
+- Wagtail admin action/button on Episode and/or Audio
 - Voxhelm HTTP API (C2 or C7)
+- Optional management command fallback for operators
 
 **Acceptance criteria:**
 
+- A Wagtail editor can trigger transcript generation for a podcast episode audio from Wagtail admin with no shell access
+- A privileged Wagtail admin can configure the Voxhelm base URL and API token from Wagtail admin
 - A podcast episode audio can be transcribed via Voxhelm and the resulting Transcript model has valid Podlove, WebVTT, and DOTe files
-- The admin bulk action works for selected Audio instances
+- The Wagtail admin action/button works on the intended Episode/Audio surfaces
 - Long episodes (> 25 MiB) use the batch API and poll for results
 - Existing manually-uploaded transcripts are not overwritten unless explicitly requested
 
 **Main risks:**
 
-- This is the most greenfield integration -- python-podcast/django-cast has no auto-transcription today. The scope needs to be kept narrow to avoid scope creep.
+- This is the most greenfield integration -- python-podcast/django-cast has no editor-facing auto-transcription today. The scope needs to be kept narrow to avoid scope creep.
 - Audio file accessibility: django-cast Audio files may be stored in Django's default storage (local or S3). Voxhelm needs a URL to fetch from, which may require presigned URLs or direct file upload.
+- Storing a Voxhelm token in Wagtail-admin-managed configuration requires careful permissions and auditability.
 
 **Suggested implementation order:** After C6 and C7 are working. This is a lower-priority M1 chunk that can slide to early M2 if needed.
 

@@ -1,13 +1,13 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b completed on 2026-03-12; consumer-facing M1c slices completed on 2026-03-12; later phases still draft
+**Status:** M1a and M1b completed on 2026-03-12; the current M1c consumer slices (`podcast-transcript`, `podcast-pipeline`, and `python-podcast` / `django-cast`) completed on 2026-03-12; later phases still draft
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
 - Phases 1a and 1b are complete.
-- The consumer-facing Phase 1c slices are complete: `podcast-transcript` now supports `--backend voxhelm` and has been validated against the deployed edge service, `podcast-pipeline` has the required compatibility follow-on, and `django-cast` now provides an explicit `generate_transcripts` management command for Voxhelm-backed transcript creation.
+- The current Phase 1c consumer slices are complete: `podcast-transcript`, `podcast-pipeline`, and the Wagtail-admin `django-cast` / `python-podcast` integration.
 - The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Batch jobs, MinIO-backed artifacts, video extraction, and artifact proxy download are live.
@@ -18,8 +18,8 @@ Current implementation checkpoint:
 ```
 Completed on 2026-03-12                              Remaining draft phases
 ──────────────────────────────────────────────────── ──────────────────────────────────
-[M1a: sync API] [M1b: jobs+minio] [M1c: podcast-transcript]
-[deploy + live verification]                         [M1c: remaining] [M2: Wyoming]
+[M1a: sync API] [M1b: jobs+minio] [M1c: consumers]
+[deploy + live verification]                         [M2: Wyoming]
                                                     [M3: TTS batch]  [M4: OpenClaw]
 ```
 
@@ -199,7 +199,7 @@ Completed on 2026-03-12:
 
 ---
 
-## Phase 1c: Consumer Integrations (Days 17-24; consumer slices completed on 2026-03-12)
+## Phase 1c: Consumer Integrations (Days 17-24; current consumer slices completed on 2026-03-12)
 
 ### Parallelizable work
 
@@ -234,7 +234,7 @@ The consumer integrations were largely independent and could be done in any orde
 
 #### Stream C: python-podcast / django-cast integration (days 19-23)
 
-**Implementation note (2026-03-12):** Delivered as an explicit management-command flow in `django-cast`. The shipped path keeps Podlove and DOTe conversion local in `django-cast`; Voxhelm currently supplies the batch job plus canonical JSON and WebVTT artifacts.
+**Implementation note (2026-03-12):** Delivered. `django-cast` reuses the existing Voxhelm service and transcript persistence plumbing, keeps Podlove JSON and DOTe conversion local, adds Wagtail-admin actions on Episode and Audio edit views, and exposes site-scoped Voxhelm settings in Wagtail admin. The existing `generate_transcripts` management command remains available as fallback operator tooling.
 
 1. **Voxhelm client library** (or inline HTTP client in django-cast)
    - Submit batch transcription job with audio URL
@@ -246,20 +246,25 @@ The consumer integrations were largely independent and could be done in any orde
    - django-cast converts the JSON into Podlove JSON and DOTe locally
    - Create/update django-cast `Transcript` model with the returned/generated artifacts
 
-3. **Management command: `generate_transcripts`**
-   - Explicit operator entrypoint for selected episodes or audio objects
-   - Submit Voxhelm job for each
-   - Poll and populate Transcript models
+3. **Wagtail admin integration**
+   - Wagtail admin action/button on Episode and/or Audio to generate a transcript with Voxhelm
+   - Editor-visible success/failure messaging in Wagtail admin
+   - No dependence on shell access or Django admin
 
-4. **Optional: signal-based trigger**
-   - On Audio save, schedule Voxhelm job if no transcript exists
+4. **Wagtail-admin-managed configuration**
+   - Wagtail settings or a protected snippet for Voxhelm API base URL, API token, and optional model/language preferences
+   - Restricted editing to privileged Wagtail admins
+
+5. **Optional management command fallback**
+   - Useful for operators, but not part of acceptance
 
 ### Decision gate: Consumer acceptance
 
 Before declaring M1 complete:
 - [x] `podcast-transcript --backend voxhelm <url>` produces the expected transcript artifacts through its existing output flow
 - [x] podcast-pipeline's `transcribe` command works with the Voxhelm-backed transcribe flow
-- [x] python-podcast can generate transcripts for episodes through Voxhelm
+- [x] Wagtail editors can generate transcripts for episodes through Wagtail admin
+- [x] Voxhelm connection settings for python-podcast are manageable through Wagtail admin
 - [ ] All three STT backends produce valid output
 - [ ] Archive continues to work (regression check)
 
