@@ -28,7 +28,7 @@ Current completion state:
 | C9 | podcast-transcript Voxhelm backend | M1c | C7, C6 |
 | C10 | python-podcast / django-cast integration | M1c | C6 |
 | C11 | Deployment role (ops-library) | M1a+b | C1 |
-| C12 | Wyoming STT/TTS adapter | M2 | S2, C5 |
+| C12 | Wyoming STT adapter | M2 | S2, C5 |
 | C13 | Interactive lane scheduling | M2 | C12, C3 |
 | C14 | Home Assistant integration | M2 | C12, C13, C11 |
 | C15 | TTS backend adapter layer (Piper) | M3 | C1 |
@@ -689,13 +689,12 @@ Current completion state:
 
 ### C12 -- Wyoming STT/TTS Adapter
 
-**Purpose:** Expose Voxhelm's STT (and later TTS) capabilities via the Wyoming protocol so Home Assistant can use them as local voice providers.
+**Purpose:** Expose Voxhelm's STT capability via the Wyoming protocol so Home Assistant can use it as a local voice provider. TTS follows later through C15 so Piper is implemented once and then reused.
 
 **Included scope:**
 
 - Implementation based on S2 spike findings (sidecar process or embedded)
 - Wyoming STT provider: receives audio stream, invokes Voxhelm STT backend, returns transcript text
-- Wyoming TTS provider: receives text, invokes Voxhelm TTS backend (Piper or configured engine), returns audio stream
 - Configuration: backend selection, model selection, language defaults
 - If sidecar: standalone script to run the Wyoming server, managed via launchd on `studio`
 - If embedded: Django management command that runs the Wyoming event loop
@@ -709,7 +708,7 @@ Current completion state:
 **Dependencies:**
 - S2 (feasibility spike)
 - C5 (STT backends) — required for Wyoming STT
-- C15 (TTS backend adapter / Piper) — required for Wyoming TTS. **If C15 is not yet complete, C12 ships with STT only and TTS is added when C15 is ready.**
+- TTS is intentionally excluded here and lands with C15
 
 **Consumer(s):** Home Assistant
 
@@ -722,15 +721,13 @@ Current completion state:
 - Home Assistant can discover and configure the Wyoming STT provider
 - A voice command spoken to an HA device is transcribed by Voxhelm
 - Latency is acceptable for interactive voice (< 3 seconds for short utterances)
-- (When C15 is available) Home Assistant can discover and configure the Wyoming TTS provider
-- (When C15 is available) A TTS request from HA produces audible speech output
 
 **Main risks:**
 
 - Wyoming protocol compatibility issues. Mitigate with S2 spike.
 - Latency requirements may be hard to meet with large models. Mitigate by using smaller/faster models for interactive.
 
-**Suggested implementation order:** After S2 completes and C5 is available. TTS portion requires C15.
+**Suggested implementation order:** After S2 completes and C5 is available.
 
 ---
 
@@ -777,14 +774,14 @@ Current completion state:
 
 ### C14 -- Home Assistant Integration
 
-**Purpose:** Complete the Home Assistant integration: deploy Wyoming adapters, configure HA, and validate the end-to-end voice pipeline.
+**Purpose:** Complete the Home Assistant STT integration: deploy Wyoming STT, configure HA, and validate the end-to-end Assist STT path.
 
 **Included scope:**
 
-- Deploy Wyoming adapter(s) on `studio` (extend C11 deployment role)
-- Configure Home Assistant to use Voxhelm Wyoming providers
-- Test with Nabu Casa voice device and HA mobile app
-- Document HA configuration (which Wyoming server to add, how to select it in Assist pipeline)
+- Deploy Wyoming STT on `studio` (extend C11 deployment role)
+- Configure Home Assistant to use the Voxhelm Wyoming STT provider
+- Validate at least one real Assist turn through Home Assistant using Voxhelm STT
+- Document HA configuration (which Wyoming server to add, how to select it in Assist pipeline, and the current STT-only limitation)
 - Validate latency and reliability under normal conditions
 
 **Explicitly excluded scope:**
@@ -793,7 +790,7 @@ Current completion state:
 - Custom satellite hardware setup
 - OpenClaw voice integration
 
-**Dependencies:** C12, C13, C11 (deployed service)
+**Dependencies:** C12, C11 (deployed service). C13 is only required if real HA use proves the no-scheduler limitation is a concrete blocker.
 
 **Consumer(s):** Home Assistant users (Jochen)
 
@@ -804,17 +801,18 @@ Current completion state:
 
 **Acceptance criteria:**
 
-- "Hey Nabu" or equivalent wake triggers STT on Voxhelm and TTS response is audible
-- HA mobile app voice input works through Voxhelm
-- Voice interactions complete within acceptable latency (< 5 seconds total round trip)
-- Service is stable over 24 hours of normal use
+- Home Assistant can discover/configure the Voxhelm Wyoming STT provider
+- The preferred Assist pipeline uses Voxhelm STT
+- At least one Assist turn succeeds end-to-end through the Home Assistant Assist pipeline using Voxhelm STT
+- Voice interactions complete within acceptable latency for STT-only validation
+- Operator docs accurately describe the STT-only limitation and the deferred TTS follow-on
 
 **Main risks:**
 
 - HA pipeline quirks or version-specific requirements. Mitigate by testing against current HA version.
 - Network latency between HA (macmini) and Voxhelm (`studio`) over Tailscale.
 
-**Suggested implementation order:** After C12 and C13. This is primarily integration testing and configuration, not heavy development.
+**Suggested implementation order:** After C12. Add C13 only if real HA validation demonstrates an actual interactive-latency problem.
 
 ---
 
@@ -822,7 +820,7 @@ Current completion state:
 
 ### C15 -- TTS Backend Adapter Layer (Piper)
 
-**Purpose:** Provide a pluggable TTS backend abstraction, starting with Piper, so the system can generate speech audio.
+**Purpose:** Provide a pluggable TTS backend abstraction, starting with Piper, so the system can generate speech audio once on `studio` and reuse it for both Home Assistant Wyoming TTS and batch consumers.
 
 **Included scope:**
 
@@ -830,6 +828,8 @@ Current completion state:
 - `SynthesizeOptions`: voice/model identifier, language, speed, output format (wav, mp3, ogg)
 - `SynthesisResult`: audio data (bytes or path), metadata (backend, model, language, duration, processing time)
 - Piper backend implementation: invoke Piper CLI or library
+- Piper deployment on `studio`, including voice installation and operator docs
+- Wyoming TTS provider wired to use the shared Piper backend/runtime on `studio`
 - Backend registry: lookup by identifier (`auto`, `piper`)
 - Voice/model management: document how to install Piper voices, configurable default voice per language
 - Audio format conversion: output in requested format via ffmpeg
@@ -837,7 +837,6 @@ Current completion state:
 **Explicitly excluded scope:**
 
 - Batch job wiring (C16)
-- Wyoming TTS (C12 will use this layer)
 - Kokoro or other future TTS engines
 
 **Dependencies:** C1
@@ -854,6 +853,8 @@ Current completion state:
 - Piper backend can synthesize a short text string to WAV audio
 - Output audio is valid and playable
 - Voice selection works (at least one English and one German voice)
+- Home Assistant can discover/configure the Wyoming TTS provider backed by Piper on `studio`
+- A Home Assistant TTS request produces intelligible speech
 - `auto` resolves to configured default
 - `just test` passes with at least one integration test
 

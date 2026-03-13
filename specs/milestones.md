@@ -255,20 +255,21 @@ Still pending:
 
 ## Milestone 2: Home Assistant Voice (Wyoming)
 
-**Title:** Wyoming STT/TTS for Home Assistant
+**Title:** Wyoming STT for Home Assistant
 
 ### What ships
 
 - Wyoming-compatible STT server process on `studio`
-- Wyoming-compatible TTS server process on `studio` (Piper) — **requires C15 (TTS backend adapter) to be complete; if M2 ships before M3, TTS follows separately**
-- Interactive execution lane: separate from batch queue, priority scheduling
+- Home Assistant integration that provisions the Wyoming STT provider and selects it in the Assist pipeline
+- Interactive execution lane only if real HA use proves that batch work causes unacceptable contention
 - Low-latency STT backend configuration (possibly a smaller/faster model for interactive use)
-- Piper TTS engine deployment on `studio` (tied to C15 availability)
 - Deployment runbook for connecting Home Assistant to Voxhelm Wyoming endpoints
 - ops-library role for Wyoming companion processes (launchd services on `studio`)
 
 ### What is deferred
 
+- Wyoming-compatible TTS server process on `studio` (Piper) moves to M3/C15 so TTS is implemented once and then reused by both Home Assistant and batch consumers
+- Piper TTS engine deployment on `studio`
 - Batch TTS for article audio (M3)
 - Wake-word detection (out of scope per PRD)
 - OpenClaw voice turns (M4)
@@ -279,14 +280,14 @@ Still pending:
 - Spike 0c (Wyoming feasibility)
 - M1a (STT backend adapter layer, deployment infrastructure)
 - **Wyoming STT** does not depend on M1b or M1c (separate protocol path, can develop in parallel)
-- **Wyoming TTS** depends on C15 (Piper TTS backend adapter, which is an M3 chunk). If M2 ships before M3, it ships with STT only and TTS follows when C15 is ready
+- **Wyoming TTS** is intentionally deferred to M3/C15. Do not build a Home-Assistant-only TTS slice just to satisfy an M2 validation step; Piper should be implemented once on `studio` and reused for both Wyoming TTS and batch TTS work.
 
 ### Success criteria
 
-- Home Assistant Assist pipeline uses `studio` for both STT and TTS
-- Voice commands through a HA voice device or mobile app work end-to-end
-- Interactive voice requests are not blocked by concurrent batch transcription jobs
-- Piper produces intelligible speech for response text
+- Home Assistant Assist pipeline uses `studio` for STT
+- At least one Assist turn succeeds end-to-end through the real Home Assistant Assist pipeline using Voxhelm STT
+- Interactive voice requests are not blocked by concurrent batch transcription jobs, or C13 remains explicitly deferred because no concrete blocker was observed
+- Operator docs accurately describe the current STT-only shape and the deferred TTS follow-on
 
 ### Key risks
 
@@ -295,15 +296,16 @@ Still pending:
 
 ---
 
-## Milestone 3: TTS Batch Generation
+## Milestone 3: Shared TTS Runtime And Batch Generation
 
-**Title:** Batch text-to-speech for article audio
+**Title:** Piper-backed TTS for Home Assistant and batch consumers
 
 ### What ships
 
-- `synthesize` job type in the batch system
-- Piper TTS backend adapter for batch use (reuse from M2 deployment)
+- Piper TTS backend adapter and deployment on `studio`
+- Wyoming-compatible TTS server process on `studio` for Home Assistant Assist
 - `POST /v1/audio/speech` synchronous endpoint
+- `synthesize` job type in the batch system
 - `POST /v1/jobs` with `job_type: synthesize` for batch use
 - Configurable voice/model presets per producer
 - Audio output stored to MinIO as artifacts
@@ -318,10 +320,12 @@ Still pending:
 ### Dependencies
 
 - M1b (batch job system, MinIO)
-- M2 (Piper deployed and operational)
+- M2 (Home Assistant STT deployment/runbook and Wyoming integration path)
 
 ### Success criteria
 
+- Home Assistant Assist pipeline can use `studio` for TTS once Piper/Wyoming TTS is wired
+- A Home Assistant TTS request produces intelligible speech
 - Archive can submit article text and receive generated speech audio
 - Generated audio is a valid podcast-quality MP3/WAV usable as a feed enclosure
 - Batch TTS jobs do not starve interactive voice traffic
@@ -377,4 +381,4 @@ Still pending:
 
 **Critical observation:** M1a is the fastest path to production value. A single developer should target M1a as the first deliverable, which could be usable within 2 weeks of starting (including spikes). The full PRD Milestone 1 has been split into M1a/M1b/M1c to keep each increment deployable and testable.
 
-**Parallelization note:** M2 (Wyoming) can proceed in parallel with M1b/M1c after M1a is complete, since it shares the backend adapter layer but not the job system.
+**Parallelization note:** M2 (Wyoming STT) can proceed in parallel with M1b/M1c after M1a is complete, since it shares the backend adapter layer but not the job system. M3 then adds Piper once, on `studio`, and reuses it for both Home Assistant Wyoming TTS and batch/article TTS.

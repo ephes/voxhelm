@@ -270,9 +270,9 @@ Before declaring M1 complete:
 
 ---
 
-## Phase 2: Wyoming / Home Assistant (Days 20-30)
+## Phase 2: Wyoming / Home Assistant STT (Days 20-30)
 
-**Wyoming STT can start as soon as M1a is complete. Wyoming TTS follows only when Piper/TTS backend work from M3 is available.**
+**Wyoming STT can start as soon as M1a is complete. Do not build a throwaway Home-Assistant-only TTS slice just to satisfy an M2 validation step; Piper should be implemented once on `studio` in Phase 3 and then reused by both Wyoming TTS and batch TTS.**
 
 ### Implementation sequence
 
@@ -283,25 +283,18 @@ Before declaring M1 complete:
    - Launchd plist for Wyoming STT service
    - Configure port binding
 
-2. **Optional Piper deployment + Wyoming TTS** (day 22-24)
-   - This step depends on the TTS backend adapter work in M3. If that work is not ready, M2 ships STT only.
-   - Install Piper on `studio`
-   - Download voice models (at least one English, one German)
-   - Deploy Wyoming TTS service via launchd
-   - Configure separate port binding
-
-3. **Interactive lane scheduling** (day 24-26)
+2. **Interactive lane scheduling** (day 22-24)
    - If Option B: Voxhelm's backend adapter must prioritize interactive requests
    - Mechanism: batch worker pauses/yields when interactive request arrives
    - Simpler alternative if Option A: Wyoming processes have their own model instances, no contention with batch
 
-4. **Home Assistant configuration** (day 26-27)
+3. **Home Assistant configuration** (day 24-26)
    - Add Wyoming STT provider in HA config
-   - Add Wyoming TTS provider if the optional TTS step shipped
-   - Test voice pipeline end-to-end
+   - Select Voxhelm STT in the preferred Assist pipeline
+   - Test the Assist pipeline end-to-end for STT
    - Document setup in ops-control runbook
 
-5. **Deployment role** (day 27-28)
+4. **Deployment role** (day 26-27)
    - ops-library role for Wyoming companion processes
    - Model download automation
    - Health monitoring
@@ -310,31 +303,37 @@ Before declaring M1 complete:
 
 - [ ] Voice command through HA device works end-to-end for STT
 - [ ] STT latency is acceptable for interactive use (< 2 seconds for a typical command)
-- [ ] If Wyoming TTS shipped, Piper produces intelligible responses
-- [ ] Batch transcription jobs are not noticeably degraded during voice use
+- [ ] Batch transcription jobs are not noticeably degraded during voice use, or C13 remains explicitly deferred because no concrete blocker was observed
 
 ---
 
-## Phase 3: TTS Batch Generation (Days 28-35)
+## Phase 3: Shared TTS Runtime + Batch Generation (Days 28-35)
 
 ### Implementation sequence
 
 1. **TTS backend adapter** (day 28-29)
    - `class TTSBackend(Protocol): def synthesize(self, text: str, params: SynthesizeParams) -> SynthesizeResult`
-   - Piper adapter (reuse M2 deployment)
+   - Piper adapter
    - Voice/model preset configuration
 
-2. **Synthesize job type** (day 29-30)
+2. **Piper deployment + Wyoming TTS** (day 29-31)
+   - Install Piper on `studio`
+   - Download voice models (at least one English, one German)
+   - Deploy Wyoming TTS service via launchd
+   - Wire Home Assistant to the Wyoming TTS provider
+   - Validate one audible HA response end-to-end
+
+3. **Synthesize job type** (day 31-32)
    - Add `synthesize` to job type enum
    - Job submission with text input, voice preset, output format
    - Worker processes synthesize jobs
 
-3. **Sync TTS endpoint** (day 30-31)
+4. **Sync TTS endpoint** (day 32-33)
    - `POST /v1/audio/speech`
    - Text input, voice selection, response as audio stream
    - Size limits on input text
 
-4. **Archive integration** (day 31-33)
+5. **Archive integration** (day 33-35)
    - Archive submits article text for TTS
    - Receives a stable Voxhelm artifact URL backed by MinIO
    - Attaches as feed enclosure
@@ -353,7 +352,7 @@ Deferred until OpenClaw's API needs are concrete. Implementation is expected to 
 M1a (sync endpoint) -> M1b (jobs) -> M1c (consumers)
           |                    |
           ├-> optional backend spikes / expansion
-          └-> M2 (Wyoming) ----┴----> M3 (TTS batch)
+          └-> M2 (Wyoming STT) -┴----> M3 (shared Piper TTS + batch)
 ```
 
 The critical path to first production value is:
@@ -379,8 +378,8 @@ Everything else can follow incrementally.
 | M1c: podcast-transcript backend | M1a (sync endpoint) | M1b (can use sync mode only) |
 | M1c: Additional backends | M1a | M1b, M1c streams |
 | M1c: python-podcast integration | M1b (needs job API) | podcast-transcript backend |
-| M2: Wyoming | M1a + Spike 0c | M1b, M1c |
-| M3: TTS | M1b + M2 (Piper) | M1c |
+| M2: Wyoming STT | M1a + Spike 0c | M1b, M1c |
+| M3: Shared TTS | M1b + M2 STT path | M1c |
 | M4: OpenClaw | M1a + M3 | M1c |
 
 ---
@@ -390,5 +389,5 @@ Everything else can follow incrementally.
 1. Deploy M1a to `studio` and verify `GET /v1/health`, then run the Archive switchover test against audio inputs only.
 2. Deploy M1b on the same host with Django Tasks workers and MinIO connectivity, then verify URL input, artifact proxying, restart recovery, and video preprocessing.
 3. Roll consumer integrations in M1c one stream at a time: podcast-transcript first, then podcast-pipeline compatibility, then python-podcast / django-cast.
-4. Start M2 once M1a is stable; verify Wyoming STT first, then add Wyoming TTS only if the Piper/TTS dependency is ready.
-5. Start M3 after M1b and Piper readiness; verify batch synthesize jobs before wiring Archive article-audio usage.
+4. Start M2 once M1a is stable; verify Wyoming STT and the Home Assistant Assist STT path first.
+5. Start M3 after M1b and the M2 STT path are stable; implement Piper once on `studio`, reuse it for Wyoming TTS, then verify batch synthesize jobs before wiring Archive article-audio usage.
