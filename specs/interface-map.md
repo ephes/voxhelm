@@ -1,7 +1,7 @@
 # Voxhelm Interface Map
 
 **Date:** 2026-03-11
-**Status:** Active architecture doc; M1a and M1b implemented on 2026-03-12
+**Status:** Active architecture doc; M1-M3 core runtime slices are implemented as of 2026-03-13
 
 This document is the active source of truth for Voxhelm's architecture boundaries, interface contracts, artifact access model, and auth domains.
 
@@ -9,16 +9,18 @@ This document is the active source of truth for Voxhelm's architecture boundarie
 
 ## Topology and Responsibility Split
 
-Current implemented topology (M1a + M1b):
+Current implemented topology:
 
 - One Django + `uvicorn` HTTP process on `studio`
 - One Django Tasks worker process on `studio`
+- One Wyoming STT/TTS sidecar process on `studio`
 - Private HTTPS ingress on `macmini` via Traefik at `https://voxhelm.home.xn--wersdrfer-47a.de`
 - MinIO-backed artifact handling for batch work, with artifacts served back through Voxhelm HTTP endpoints
 
-Planned later topology (M2+):
+Remaining planned topology work:
 
-- Add Wyoming sidecar/listener in M2
+- Add interactive lane scheduling / resource reservation so Wyoming traffic cannot be starved by batch work
+- Add future OpenClaw-facing consumers without changing the core service boundaries
 
 ```
 Archive / podcast-transcript / python-podcast / OpenClaw (future)
@@ -30,7 +32,7 @@ Archive / podcast-transcript / python-podcast / OpenClaw (future)
               Django HTTP API on studio
       (sync STT, auth, validation, health endpoint)
 
-Home Assistant (M2) reaches a separate Wyoming listener later.
+Home Assistant now reaches a separate Wyoming listener on `studio`.
 ```
 
 | Component | Responsibilities |
@@ -50,7 +52,7 @@ Voxhelm exposes five producer/operator-facing interface surfaces:
 |---|-----------|----------|-----------|-----|-----------|
 | 1 | OpenAI-compatible STT API | HTTP | inbound | yes | Archive, podcast-transcript |
 | 2 | Batch job API | HTTP | inbound + poll | yes | python-podcast |
-| 3 | Wyoming STT/TTS | TCP (Wyoming) | inbound | M2 | Home Assistant |
+| 3 | Wyoming STT/TTS | TCP (Wyoming) | inbound | yes | Home Assistant |
 | 4 | Artifact storage API | S3 (MinIO) | bidirectional | yes | Voxhelm workers and control plane only (consumers access artifacts via Voxhelm HTTP proxy) |
 | 5 | Health / operator API | HTTP | inbound | yes | ops tooling, monitoring |
 

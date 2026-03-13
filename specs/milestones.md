@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b implemented on 2026-03-12; the current M1c consumer slices (`podcast-transcript`, `podcast-pipeline`, and `python-podcast` / `django-cast`) delivered on 2026-03-12; backend-expansion and later milestones still draft
+**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13; remaining planned work is C13 lane scheduling, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -9,12 +9,15 @@
 Implemented today:
 
 - M1a and M1b
-- first M1c slice: `podcast-transcript --backend voxhelm`
-- M1c consumer follow-ons: `podcast-pipeline` compatibility and `python-podcast` / `django-cast` Wagtail-admin transcript workflow
+- M1c consumer work: `podcast-transcript --backend voxhelm`, `podcast-pipeline` compatibility, and `python-podcast` / `django-cast` Wagtail-admin transcript workflow
+- M2 Home Assistant voice wiring: Wyoming STT/TTS sidecar on `studio`, Home Assistant integration, declarative Assist pipelines, and area-registry alias updates
+- core M3 runtime: Piper-backed TTS, `POST /v1/audio/speech`, and batch `synthesize` jobs
 - Django + `uvicorn` HTTP process plus Django Tasks worker on `studio`
+- Wyoming STT/TTS sidecar on `studio`
 - private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`
 - `GET /v1/health`
 - `POST /v1/audio/transcriptions`
+- `POST /v1/audio/speech`
 - `POST /v1/jobs`
 - `GET /v1/jobs/{id}`
 - `GET /v1/jobs/{id}/artifacts/{name}`
@@ -28,12 +31,14 @@ Implemented today:
 - Archive validation with env vars only
 - live batch-job submission, completion, artifact fetch, and MinIO object verification
 - live validation of `podcast-transcript` against the deployed Voxhelm edge service
+- live validation of direct Home Assistant STT against the deployed Wyoming path
 
 Not implemented yet:
 
-- additional STT backends beyond the current default
-- Wyoming
-- TTS
+- interactive lane scheduling / capacity reservation between batch and Wyoming traffic
+- additional STT backends beyond the current `whisper.cpp` and `mlx-whisper` set
+- Archive article-to-audio consumer integration
+- OpenClaw integration
 
 ## Design Decisions
 
@@ -255,12 +260,16 @@ Still pending:
 
 ## Milestone 2: Home Assistant Voice (Wyoming)
 
-**Title:** Wyoming STT for Home Assistant
+**Title:** Wyoming voice for Home Assistant
+
+**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a Wyoming STT/TTS sidecar on `studio`, and the Home Assistant deploy/config path provisions Wyoming plus declarative Assist pipelines. The remaining gap from the original M2 plan is C13 lane scheduling: the current deployment works, but it still shares host resources with the HTTP API and batch worker.
 
 ### What ships
 
-- Wyoming-compatible STT server process on `studio`
-- Home Assistant integration that provisions the Wyoming STT provider and selects it in the Assist pipeline
+- Wyoming-compatible STT/TTS sidecar process on `studio`
+- Home Assistant integration that provisions the Wyoming provider and selects it in the Assist pipeline
+- Declarative multi-pipeline Assist configuration and preferred-pipeline selection
+- Area-registry alias and canonical-sensor updates for Assist-friendly room resolution
 - Interactive execution lane only if real HA use proves that batch work causes unacceptable contention
 - Low-latency STT backend configuration (possibly a smaller/faster model for interactive use)
 - Deployment runbook for connecting Home Assistant to Voxhelm Wyoming endpoints
@@ -268,9 +277,8 @@ Still pending:
 
 ### What is deferred
 
-- Wyoming-compatible TTS server process on `studio` (Piper) moves to M3/C15 so TTS is implemented once and then reused by both Home Assistant and batch consumers
-- Piper TTS engine deployment on `studio`
-- Batch TTS for article audio (M3)
+- Interactive lane scheduling / resource reservation (C13)
+- Archive article-audio consumer follow-on for the shared TTS runtime
 - Wake-word detection (out of scope per PRD)
 - OpenClaw voice turns (M4)
 - Diarization
@@ -280,14 +288,14 @@ Still pending:
 - Spike 0c (Wyoming feasibility)
 - M1a (STT backend adapter layer, deployment infrastructure)
 - **Wyoming STT** does not depend on M1b or M1c (separate protocol path, can develop in parallel)
-- **Wyoming TTS** is intentionally deferred to M3/C15. Do not build a Home-Assistant-only TTS slice just to satisfy an M2 validation step; Piper should be implemented once on `studio` and reused for both Wyoming TTS and batch TTS work.
+- The shared Piper/TTS runtime from M3 now backs the Wyoming TTS path as well. The still-open follow-on is C13 scheduling rather than missing protocol support.
 
 ### Success criteria
 
-- Home Assistant Assist pipeline uses `studio` for STT
-- At least one Assist turn succeeds end-to-end through the real Home Assistant Assist pipeline using Voxhelm STT
-- Interactive voice requests are not blocked by concurrent batch transcription jobs, or C13 remains explicitly deferred because no concrete blocker was observed
-- Operator docs accurately describe the current STT-only shape and the deferred TTS follow-on
+- Home Assistant Assist pipeline uses `studio` for STT and TTS
+- At least one Assist turn succeeds end-to-end through the real Home Assistant Assist pipeline using Voxhelm
+- C13 remains the explicit next step because the current deployment still allows batch and Wyoming contention on `studio`
+- Operator docs accurately describe the live voice setup and the default-off debug-logging guidance
 
 ### Key risks
 
@@ -300,6 +308,8 @@ Still pending:
 
 **Title:** Piper-backed TTS for Home Assistant and batch consumers
 
+**Implementation note (2026-03-13):** Delivered at the Voxhelm service/runtime layer. Piper-backed TTS is live in Voxhelm, Home Assistant can use the Wyoming TTS path, and Voxhelm exposes both synchronous speech generation and batch `synthesize` jobs. Archive article-to-audio consumer integration remains a future follow-on.
+
 ### What ships
 
 - Piper TTS backend adapter and deployment on `studio`
@@ -309,10 +319,11 @@ Still pending:
 - `POST /v1/jobs` with `job_type: synthesize` for batch use
 - Configurable voice/model presets per producer
 - Audio output stored to MinIO as artifacts
-- Archive integration: Archive can submit text for TTS and receive a stable audio URL for feed enclosures
+- Shared runtime that Home Assistant already consumes via Wyoming TTS
 
 ### What is deferred
 
+- Archive article-to-audio consumer integration
 - Additional TTS engines (Kokoro, etc.)
 - OpenClaw integration (M4)
 - Diarization
@@ -324,11 +335,11 @@ Still pending:
 
 ### Success criteria
 
-- Home Assistant Assist pipeline can use `studio` for TTS once Piper/Wyoming TTS is wired
+- Home Assistant Assist pipeline can use `studio` for TTS
 - A Home Assistant TTS request produces intelligible speech
-- Archive can submit article text and receive generated speech audio
-- Generated audio is a valid podcast-quality MP3/WAV usable as a feed enclosure
-- Batch TTS jobs do not starve interactive voice traffic
+- Voxhelm exposes valid audio output through both `POST /v1/audio/speech` and batch `synthesize` jobs
+- Archive article-audio remains a future consumer slice rather than a missing service/runtime capability
+- Batch TTS jobs still need C13-style protection so they do not starve interactive voice traffic
 
 ### Key risks
 
@@ -375,10 +386,10 @@ Still pending:
 | M1a | Sync STT Endpoint | Archive | `studio` access | 1-2 weeks |
 | M1b | Batch Jobs + MinIO | python-podcast, future consumers | M1a | 1-2 weeks |
 | M1c | Consumer Integrations | podcast-transcript, python-podcast, podcast-pipeline | M1b | 1-2 weeks |
-| M2 | Wyoming Voice | Home Assistant | M0 Spike 0c, M1a | 1-2 weeks |
-| M3 | TTS Batch | Archive (article audio) | M1b, M2 | 1 week |
+| M2 | Wyoming Voice | Home Assistant | M0 Spike 0c, M1a | delivered |
+| M3 | TTS Runtime + Batch | Home Assistant, future Archive article audio | M1b, M2 | delivered at service/runtime layer |
 | M4 | OpenClaw | OpenClaw | M1a, M3 | 1 week |
 
 **Critical observation:** M1a is the fastest path to production value. A single developer should target M1a as the first deliverable, which could be usable within 2 weeks of starting (including spikes). The full PRD Milestone 1 has been split into M1a/M1b/M1c to keep each increment deployable and testable.
 
-**Parallelization note:** M2 (Wyoming STT) can proceed in parallel with M1b/M1c after M1a is complete, since it shares the backend adapter layer but not the job system. M3 then adds Piper once, on `studio`, and reuses it for both Home Assistant Wyoming TTS and batch/article TTS.
+**Parallelization note:** The original M2 and M3 plan was executed as intended: Wyoming voice and then shared Piper/TTS were added without changing the producer-facing HTTP contracts. The next concrete implementation step is C13 lane scheduling so the live voice path remains responsive under mixed load.

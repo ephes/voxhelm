@@ -1,26 +1,26 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a and M1b completed on 2026-03-12; the current M1c consumer slices (`podcast-transcript`, `podcast-pipeline`, and `python-podcast` / `django-cast`) completed on 2026-03-12; later phases still draft
+**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13; remaining planned work is C13 lane scheduling, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
 - Phases 1a and 1b are complete.
 - The current Phase 1c consumer slices are complete: `podcast-transcript`, `podcast-pipeline`, and the Wagtail-admin `django-cast` / `python-podcast` integration.
-- The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker on `studio`.
+- The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker and a Wyoming STT/TTS sidecar on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
-- Batch jobs, MinIO-backed artifacts, video extraction, and artifact proxy download are live.
-- Wyoming, TTS, and backend expansion beyond the current default remain future phases.
+- Batch jobs, MinIO-backed artifacts, video extraction, artifact proxy download, synchronous speech generation, and batch `synthesize` jobs are live.
+- Home Assistant is wired to Voxhelm STT/TTS through Wyoming and declarative Assist pipelines.
+- The remaining implementation gap with direct user impact is C13 lane scheduling so Wyoming traffic stays responsive under mixed batch load.
 
 ## Execution Order Overview
 
 ```
-Completed on 2026-03-12                              Remaining draft phases
-──────────────────────────────────────────────────── ──────────────────────────────────
-[M1a: sync API] [M1b: jobs+minio] [M1c: consumers]
-[deploy + live verification]                         [M2: Wyoming]
-                                                    [M3: TTS batch]  [M4: OpenClaw]
+Completed as of 2026-03-13                          Remaining draft phases
+──────────────────────────────────────────────────── ───────────────────────────────────────
+[M1a: sync API] [M1b: jobs+minio] [M1c: consumers] [M2: Wyoming voice] [M3: shared TTS]
+[deploy + live verification]                        [C13: lane scheduling] [M4: OpenClaw]
 ```
 
 ---
@@ -270,9 +270,9 @@ Before declaring M1 complete:
 
 ---
 
-## Phase 2: Wyoming / Home Assistant STT (Days 20-30)
+## Phase 2: Wyoming / Home Assistant Voice (Days 20-30)
 
-**Wyoming STT can start as soon as M1a is complete. Do not build a throwaway Home-Assistant-only TTS slice just to satisfy an M2 validation step; Piper should be implemented once on `studio` in Phase 3 and then reused by both Wyoming TTS and batch TTS.**
+**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a shared Wyoming STT/TTS sidecar on `studio`, and Home Assistant is wired to it through the deploy layer. The remaining follow-on from the original Phase 2 plan is C13 lane scheduling.
 
 ### Implementation sequence
 
@@ -301,13 +301,15 @@ Before declaring M1 complete:
 
 ### Decision gate: HA voice acceptance
 
-- [ ] Voice command through HA device works end-to-end for STT
-- [ ] STT latency is acceptable for interactive use (< 2 seconds for a typical command)
+- [x] Voice command through HA device works end-to-end for STT
+- [x] The Assist pipeline can use Voxhelm for TTS as well
 - [ ] Batch transcription jobs are not noticeably degraded during voice use, or C13 remains explicitly deferred because no concrete blocker was observed
 
 ---
 
 ## Phase 3: Shared TTS Runtime + Batch Generation (Days 28-35)
+
+**Implementation note (2026-03-13):** Delivered at the Voxhelm service/runtime layer. Piper-backed TTS, `POST /v1/audio/speech`, and batch `synthesize` jobs are live. Archive article-audio consumer integration remains future work.
 
 ### Implementation sequence
 

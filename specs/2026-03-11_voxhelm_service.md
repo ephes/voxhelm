@@ -1,27 +1,30 @@
 # PRD: Media Service
 
 **Date:** 2026-03-11
-**Status:** PRD reference; M1a and M1b implemented on 2026-03-12, later milestones still planned
+**Status:** PRD reference; M1-M3 core runtime slices are implemented as of 2026-03-13, with later follow-on work still planned
 
 ## Summary
 
-Implementation note as of 2026-03-12:
+Implementation note as of 2026-03-13:
 
-- Milestones 1a and 1b are implemented today.
-- The deployed service includes the Archive-first synchronous STT slice plus the first batch-job slice:
+- Milestones 1a and 1b are implemented, and the current M1c consumer slices are deployed.
+- The deployed service includes the Archive-first synchronous STT slice plus the batch-job slice:
   - `GET /v1/health`
   - `POST /v1/audio/transcriptions`
+  - `POST /v1/audio/speech`
   - `POST /v1/jobs`
   - `GET /v1/jobs/{id}`
   - `GET /v1/jobs/{id}/artifacts/{name}`
-  - `mlx-whisper`
+  - `whisper.cpp` and `mlx-whisper`
+  - Piper-backed TTS
   - bearer-token auth
   - multipart upload and JSON URL input
   - Django Tasks worker execution
   - MinIO-backed artifact storage via the `VOXHELM_ARTIFACT_*` S3-compatible env vars
   - video-to-audio extraction for batch work
   - private HTTPS ingress via Traefik on `macmini`
-- Wyoming, TTS, and broader consumer integrations remain deferred to later milestones.
+- The Home Assistant voice path is also live through a Wyoming sidecar on `studio`, with declarative Assist pipelines and area-registry alias support managed from deploy config.
+- Remaining follow-on work is narrower: interactive lane scheduling, additional backend expansion, Archive article-audio consumer integration, and OpenClaw.
 
 Create a small self-hosted media service that provides shared speech and media processing capabilities for:
 

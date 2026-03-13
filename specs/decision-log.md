@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; M1a implemented on 2026-03-12 and later milestones remain planned
+**Status:** Accepted defaults; M1-M3 core runtime slices are implemented as of 2026-03-13, with C13 lane scheduling and M4/OpenClaw still planned
 
 ---
 

@@ -2,12 +2,13 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** M1a and M1b chunks implemented on 2026-03-12; C9 and C10 implemented on 2026-03-12; later chunks still draft
+**Status:** C1-C12, C14, C15, and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13; C13 lane scheduling, Archive article-audio follow-on, and C17/OpenClaw remain draft
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, and C11
-- Not implemented yet: C12-C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C14, C15
+- Implemented at the Voxhelm service/runtime layer: C16
+- Not implemented yet: C13, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -689,6 +690,8 @@ Current completion state:
 
 ### C12 -- Wyoming STT/TTS Adapter
 
+**Implementation note (2026-03-13):** Delivered. Voxhelm ships a Wyoming sidecar on `studio` that exposes both STT and TTS over one listener backed by Voxhelm's shared STT/TTS runtime.
+
 **Purpose:** Expose Voxhelm's STT capability via the Wyoming protocol so Home Assistant can use it as a local voice provider. TTS follows later through C15 so Piper is implemented once and then reused.
 
 **Included scope:**
@@ -727,7 +730,7 @@ Current completion state:
 - Wyoming protocol compatibility issues. Mitigate with S2 spike.
 - Latency requirements may be hard to meet with large models. Mitigate by using smaller/faster models for interactive.
 
-**Suggested implementation order:** After S2 completes and C5 is available.
+**Suggested implementation order:** Delivered.
 
 ---
 
@@ -768,11 +771,13 @@ Current completion state:
 
 - On a single-GPU host, two simultaneous transcriptions may OOM. Mitigate by limiting total concurrency to 1 for the GPU and using separate CPU-based backends for interactive if needed.
 
-**Suggested implementation order:** After C3 and C12 are in progress. Can be a thin layer added to the existing worker model.
+**Suggested implementation order:** This is now the next concrete implementation step.
 
 ---
 
 ### C14 -- Home Assistant Integration
+
+**Implementation note (2026-03-13):** Delivered. Home Assistant is wired to Voxhelm's Wyoming voice path, the deploy layer can manage multiple Assist pipelines declaratively, and area aliases/sensor overrides are provisioned through the area registry helper.
 
 **Purpose:** Complete the Home Assistant STT integration: deploy Wyoming STT, configure HA, and validate the end-to-end Assist STT path.
 
@@ -781,7 +786,7 @@ Current completion state:
 - Deploy Wyoming STT on `studio` (extend C11 deployment role)
 - Configure Home Assistant to use the Voxhelm Wyoming STT provider
 - Validate at least one real Assist turn through Home Assistant using Voxhelm STT
-- Document HA configuration (which Wyoming server to add, how to select it in Assist pipeline, and the current STT-only limitation)
+- Document HA configuration (which Wyoming server to add, how to select it in Assist pipelines, and the current remaining no-scheduler limitation)
 - Validate latency and reliability under normal conditions
 
 **Explicitly excluded scope:**
@@ -805,20 +810,22 @@ Current completion state:
 - The preferred Assist pipeline uses Voxhelm STT
 - At least one Assist turn succeeds end-to-end through the Home Assistant Assist pipeline using Voxhelm STT
 - Voice interactions complete within acceptable latency for STT-only validation
-- Operator docs accurately describe the STT-only limitation and the deferred TTS follow-on
+- Operator docs accurately describe the live STT/TTS shape and the remaining no-scheduler limitation
 
 **Main risks:**
 
 - HA pipeline quirks or version-specific requirements. Mitigate by testing against current HA version.
 - Network latency between HA (macmini) and Voxhelm (`studio`) over Tailscale.
 
-**Suggested implementation order:** After C12. Add C13 only if real HA validation demonstrates an actual interactive-latency problem.
+**Suggested implementation order:** Delivered. C13 remains the follow-on hardening step.
 
 ---
 
 ## M3 Chunks -- TTS Batch Generation
 
 ### C15 -- TTS Backend Adapter Layer (Piper)
+
+**Implementation note (2026-03-13):** Delivered. Voxhelm now has a shared Piper-backed TTS runtime that serves both Wyoming TTS and the HTTP/batch speech interfaces.
 
 **Purpose:** Provide a pluggable TTS backend abstraction, starting with Piper, so the system can generate speech audio once on `studio` and reuse it for both Home Assistant Wyoming TTS and batch consumers.
 
@@ -862,11 +869,13 @@ Current completion state:
 
 - Piper installation on macOS. Piper is primarily Linux-focused. May need to test building from source on ARM macOS or use a container.
 
-**Suggested implementation order:** Can start any time after C1. Not blocking M1.
+**Suggested implementation order:** Delivered.
 
 ---
 
 ### C16 -- Batch TTS Jobs
+
+**Implementation note (2026-03-13):** Delivered at the Voxhelm service/runtime layer. Voxhelm exposes `POST /v1/audio/speech` plus batch `synthesize` jobs and stores generated audio as artifacts. Archive-side article-to-audio consumer integration is still future work and should not be confused with missing service capability.
 
 **Purpose:** Enable producers (primarily Archive) to submit text-to-speech jobs that generate audio artifacts.
 
@@ -901,14 +910,14 @@ Current completion state:
 
 - A TTS job produces an audio file stored in MinIO
 - The synchronous endpoint returns audio for short text
-- Archive can submit a synthesis job and retrieve the resulting audio
+- The Voxhelm service can submit and complete a synthesis job and retrieve the resulting audio artifact
 - Output audio is valid and playable
 
 **Main risks:**
 
 - Long article synthesis may produce very large audio files. Mitigate with text length limits and chunked synthesis.
 
-**Suggested implementation order:** After C15 and the M1 Django Tasks infrastructure are stable.
+**Suggested implementation order:** Delivered at the service/runtime layer; Archive consumer follow-on remains future.
 
 ---
 
