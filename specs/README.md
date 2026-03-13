@@ -12,7 +12,8 @@ Current implementation snapshot as of 2026-03-13:
 - Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, and artifact download through the Voxhelm HTTP proxy.
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription, live batch jobs, direct Home Assistant STT, and the restored production debug-logging default have all been validated against the deployed service.
-- Remaining planned work is narrower now: interactive lane scheduling (C13), additional backend expansion beyond the current `whisper.cpp` + `mlx-whisper` STT set, Archive article-audio consumer follow-on, and M4/OpenClaw.
+- Remaining planned work is narrower now: optional backend expansion beyond the current `whisper.cpp` + `mlx-whisper` STT set, Archive article-audio consumer follow-on, and M4/OpenClaw.
+- The STT benchmark spike has already been recorded in [`2026-03-12_stt_backend_benchmark_studio.md`](./2026-03-12_stt_backend_benchmark_studio.md). Treat the `whisper.cpp` and `mlx-whisper` results as the main actionable evidence; the WhisperKit numbers are useful but still provisional.
 
 This directory currently contains both the original PRD and the planning package derived from it. The goal of this file is to make the document stack explicit, so readers know:
 

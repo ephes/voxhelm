@@ -76,6 +76,8 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 
 ### Spike 0a: STT Backend Benchmark
 
+**Implementation note (2026-03-12):** Delivered. The results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md` and support `whisper.cpp` as the current `studio` default while keeping WhisperKit out of the shipped runtime.
+
 - **Question:** Which backend (WhisperKit, mlx-whisper, whisper.cpp) should be the default for batch STT on `studio`? What are the real latency/quality/memory tradeoffs?
 - **Method:** Transcribe the same 3 audio files (short <1min, medium ~10min, long ~60min) with each backend on `studio`. Measure wall-clock time, peak memory, and compare transcript quality by manual inspection.
 - **Duration:** 1-2 days.
@@ -83,6 +85,8 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 - **Blocks:** Does not block M1a. Validates or revisits the initial backend choice later.
 
 ### Spike 0b: WhisperKit Server Mode
+
+**Implementation note (2026-03-12):** Partially explored, but not accepted into the runtime. Treat this as deferred until WhisperKit becomes a real follow-on target.
 
 - **Question:** Can WhisperKit serve an OpenAI-compatible HTTP endpoint natively, or does Voxhelm need to wrap it as a subprocess? What is the startup/teardown cost?
 - **Method:** Install WhisperKit on `studio`, attempt to run its server mode, test with a curl POST to `/audio/transcriptions`.
@@ -221,7 +225,7 @@ Completed on 2026-03-12:
 - **python-podcast / django-cast integration:** Wagtail-admin workflow in `django-cast` / `python-podcast` that lets privileged editors trigger transcript generation from the Wagtail admin UI for an episode or audio object, persists the existing `Transcript` artifacts, and does not require shell access.
 - **python-podcast / django-cast configuration:** Voxhelm API base URL, API token, and optional model/language preferences are manageable through Wagtail admin (for example via Wagtail settings or a protected snippet), not only through Django settings or environment variables.
 - Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
-- Second and third STT backend adapters (all three of whisperkit, mlx-whisper, whisper.cpp available, selectable via `model` or `backend` parameter)
+- The shipped STT backend set now includes both `whisper.cpp` and `mlx-whisper`; WhisperKit remains a future optional follow-on rather than part of the delivered milestone
 
 ### What is deferred
 

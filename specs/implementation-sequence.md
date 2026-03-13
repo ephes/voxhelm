@@ -29,6 +29,8 @@ Completed as of 2026-03-13                                   Remaining draft pha
 
 ### Spike 0a: STT Backend Benchmark
 
+**Implementation note (2026-03-12):** Delivered. Results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md`, and they support the current `whisper.cpp` default on `studio`.
+
 **Question:** Which STT backend should be the default for batch transcription on `studio`?
 
 **How to conduct:**
@@ -46,13 +48,15 @@ Completed as of 2026-03-13                                   Remaining draft pha
 
 **Expected duration:** 1-2 days (model download time dominates).
 
-**Expected outcome:** A ranked recommendation. Based on podcast-transcript's existing code, whisper.cpp and mlx-whisper are known to work. WhisperKit is the unknown. If WhisperKit is significantly faster on Apple Silicon, it becomes the default; otherwise mlx-whisper or whisper.cpp (both proven) are safe choices.
+**Expected outcome:** A ranked recommendation. This now exists in the recorded benchmark write-up: `whisper.cpp` and `mlx-whisper` are the shipped backends, while WhisperKit remains provisional.
 
 **What depends on the answer:**
-- M1a backend adapter selection
-- Whether to invest in WhisperKit integration or defer it
+- Whether to keep the current `whisper.cpp` default
+- Whether to invest in WhisperKit integration or keep deferring it
 
 ### Spike 0b: WhisperKit Server Mode
+
+**Implementation note (2026-03-12):** Partial evidence exists from the benchmark work, but WhisperKit was not accepted into the runtime. Treat this spike as deferred until WhisperKit becomes a real target again.
 
 **Question:** Does WhisperKit provide a stable HTTP server mode, or must Voxhelm wrap it as a subprocess?
 
@@ -223,12 +227,12 @@ The consumer integrations were largely independent and could be done in any orde
    - podcast-pipeline shells out to an external transcriber command, and now has the required compatibility for the Voxhelm-backed transcribe path
    - this remained a small compatibility step rather than a new Voxhelm backend
 
-#### Stream B: Additional STT backends (days 17-19)
+#### Stream B: Optional STT backend expansion (days 17-19)
 
-1. **Second backend adapter** (whichever of whisperkit/mlx/whisper.cpp was not the M1a default)
-2. **Third backend adapter**
-3. **Backend selection logic:** `auto` mode selects based on availability and job lane (interactive vs. batch)
-4. **Backend health checks:** verify each backend is functional on startup
+1. **Deliver the second shipped backend**: completed with `whisper.cpp` plus `mlx-whisper`
+2. **Optional future backend adapter**: WhisperKit only if the benchmark ambiguity is resolved and it becomes worth operating
+3. **Backend selection logic:** `auto` mode selects based on the configured default and fallback
+4. **Backend health checks:** verify each shipped backend is functional on startup
 
 **Can run in parallel with Stream A.**
 

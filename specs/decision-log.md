@@ -69,9 +69,11 @@
 | B. whisper.cpp | Most mature; strong Apple Silicon support via Metal; proven in podcast-transcript | Requires WAV conversion, CLI invocation, output format transformation; C++ dependency |
 | C. WhisperKit | Best Apple Silicon optimization; offers local server with OpenAI API | Least familiar; Swift-based; server mode evaluation needed |
 
-**Recommended default:** Option A (mlx-whisper) for initial implementation. It is the lowest-friction path: Python-native, already proven in podcast-transcript, matches the current local Apple Silicon workflow, and runs well on the planned worker host. whisper.cpp should be the second backend added. WhisperKit stays optional until there is a concrete reason to support it.
+**Recommended default:** Option A (mlx-whisper) for initial implementation. It is the lowest-friction path: Python-native, already proven in podcast-transcript, matches the current local Apple Silicon workflow, and runs well on the planned worker host. WhisperKit stays optional until there is a concrete reason to support it.
 
-**Blocks implementation:** No. The initial default is accepted; later benchmarks can validate or overturn it without changing the producer-facing API.
+**Implementation note (2026-03-13):** The initial bootstrap choice was later overtaken by real `studio` benchmarking and implementation work. Voxhelm now ships both `whisper.cpp` and `mlx-whisper`, and the deployed default STT backend is `whispercpp` with `mlx` as the configured fallback for `auto` requests. The benchmark report lives in `specs/2026-03-12_stt_backend_benchmark_studio.md`. WhisperKit remains unimplemented, and its benchmark results should be treated as provisional rather than as a deployment recommendation.
+
+**Blocks implementation:** No. The initial default was enough to unblock implementation, and later benchmarks were free to overturn it without changing the producer-facing API.
 
 ---
 
@@ -331,12 +333,14 @@ Voxhelm should persist its own producer-facing job record and store the returned
 - **Goal:** Compare mlx-whisper, whisper.cpp, and WhisperKit on representative podcast/video audio (German and English, short and long).
 - **Outputs:** Speed (real-time factor), peak memory, transcript quality comparison, Apple Silicon GPU utilization.
 - **Duration:** 1-2 days.
-- **Blocks:** No longer blocks implementation; informs later backend expansion and validation.
+- **Implementation note (2026-03-12):** Delivered. Results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md` and support the current `whisper.cpp` default on `studio`.
+- **Blocks:** No longer blocks implementation; now serves as recorded evidence for the current default and for any future WhisperKit decision.
 
 ### Spike 2: WhisperKit server evaluation
 - **Goal:** Determine whether WhisperKit's local OpenAI-compatible server is suitable as a Voxhelm backend (vs. wrapping WhisperKit as a library/CLI).
 - **Outputs:** API compatibility assessment, performance comparison with direct invocation, deployment complexity.
 - **Duration:** 0.5-1 day.
+- **Implementation note (2026-03-12):** Partial evidence exists from the benchmark spike, but WhisperKit is still not accepted as a production backend. Treat this spike as unfinished until WhisperKit becomes a real candidate again.
 - **Blocks:** No; only needed if WhisperKit becomes a real candidate.
 
 ### Spike 3: MinIO deployment and integration pattern on `studio`

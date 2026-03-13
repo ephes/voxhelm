@@ -42,7 +42,9 @@ Current completion state:
 
 ### S1 -- STT Backend Benchmark Spike
 
-**Purpose:** Benchmark backend expansion options on `studio` without blocking the accepted `mlx-whisper` starting point.
+**Implementation note (2026-03-12):** Delivered. Results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md`. The benchmark supports `whisper.cpp` as the current `studio` default, keeps `mlx-whisper` as the other shipped backend, and leaves WhisperKit as a deferred/provisional option.
+
+**Purpose:** Benchmark backend expansion options on `studio` without blocking implementation.
 
 **Included scope:**
 
@@ -76,7 +78,7 @@ Current completion state:
 - WhisperKit may not have a stable Python/CLI interface on macOS yet -- if so, document and defer it
 - mlx-whisper performance characteristics may differ significantly from published benchmarks
 
-**Suggested implementation order:** Optional. Can run in parallel with implementation.
+**Suggested implementation order:** Delivered. Re-run only if WhisperKit becomes a real candidate again or if the deployed hardware/model mix changes materially.
 
 ---
 
@@ -323,6 +325,8 @@ Current completion state:
 
 ### C5 -- STT Backend Adapter Layer
 
+**Implementation note (2026-03-13):** Delivered with two backends: `whisper.cpp` and `mlx-whisper`. WhisperKit remains outside the delivered scope.
+
 **Purpose:** Provide a pluggable backend abstraction so the rest of the system can request transcription without knowing which engine runs underneath.
 
 **Included scope:**
@@ -331,10 +335,10 @@ Current completion state:
 - `TranscribeOptions`: language, model, prompt, output formats requested, word timestamps flag
 - `TranscriptionResult`: segments (list of timed text segments), full text, metadata (backend, model, language, duration, processing time)
 - Backend implementations:
-  - `mlx-whisper` (accepted starting backend)
+  - `mlx-whisper`
   - `whisper.cpp` (subprocess-based, proven in podcast-transcript)
-  - `WhisperKit` (if spike S1 confirms viability)
-- Backend registry: lookup by identifier string (`auto`, `mlx`, `whispercpp`, `whisperkit`)
+  - `WhisperKit` only if a future follow-on slice accepts it
+- Backend registry: lookup by identifier string (`auto`, `mlx`, `whispercpp`; `whisperkit` only if a future slice adds it)
 - `auto` selection logic: configurable default per lane (batch vs interactive)
 - Audio preprocessing: resampling to 16kHz mono WAV via ffmpeg (reuse approach from podcast-transcript's WhisperCpp backend)
 - Output format: Whisper-native JSON with segments as canonical internal representation. Voxhelm can convert this server-side into plain text, DOTe, Podlove JSON, and WebVTT artifacts.
@@ -370,7 +374,7 @@ Current completion state:
 - Backend installation complexity. mlx-whisper requires Apple Silicon. whisper.cpp requires a compiled binary. Mitigate by documenting prerequisites and providing installation scripts.
 - Model download size and time. First run will download large models. Document this.
 
-**Suggested implementation order:** After C1. Can be developed in parallel with C3 and C4.
+**Suggested implementation order:** Delivered. The only remaining backend-expansion follow-on is WhisperKit or another future backend.
 
 ---
 
