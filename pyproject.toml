@@ -3,7 +3,7 @@ name = "voxhelm"
 version = "0.1.0"
 description = "Shared local transcription service"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.14,<3.15"
 dependencies = [
   "boto3>=1.42.66",
   "Django>=5.2,<5.3",
@@ -34,7 +34,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
@@ -43,7 +43,7 @@ select = ["E", "F", "I", "B"]
 "jobs/migrations/*.py" = ["E501", "I001"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true

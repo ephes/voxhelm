@@ -29,7 +29,7 @@ Completed as of 2026-03-13                                   Remaining draft pha
 
 ### Spike 0a: STT Backend Benchmark
 
-**Implementation note (2026-03-12):** Delivered. Results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md`, and they support the current `whisper.cpp` default on `studio`.
+**Implementation note (2026-03-13):** Delivered and re-run. The current record is `specs/2026-03-13_whisperkit_re_evaluation_studio.md`, which still supports the current `whisper.cpp` default on `studio` while upgrading WhisperKit from "provisional" to "real follow-on candidate" on the tuned `studio` path.
 
 **Question:** Which STT backend should be the default for batch transcription on `studio`?
 
@@ -48,15 +48,15 @@ Completed as of 2026-03-13                                   Remaining draft pha
 
 **Expected duration:** 1-2 days (model download time dominates).
 
-**Expected outcome:** A ranked recommendation. This now exists in the recorded benchmark write-up: `whisper.cpp` and `mlx-whisper` are the shipped backends, while WhisperKit remains provisional.
+**Expected outcome:** A ranked recommendation. This now exists in the recorded benchmark write-up: `whisper.cpp` and `mlx-whisper` are the shipped backends, and WhisperKit is now an evidence-backed but non-default follow-on candidate rather than merely a provisional curiosity.
 
 **What depends on the answer:**
 - Whether to keep the current `whisper.cpp` default
-- Whether to invest in WhisperKit integration or keep deferring it
+- Whether to keep deferring WhisperKit or start a smaller experimental integration slice
 
 ### Spike 0b: WhisperKit Server Mode
 
-**Implementation note (2026-03-12):** Partial evidence exists from the benchmark work, but WhisperKit was not accepted into the runtime. Treat this spike as deferred until WhisperKit becomes a real target again.
+**Implementation note (2026-03-13):** Revisited. WhisperKit server mode is viable today on `studio` and no longer needs to be treated as hypothetical. The remaining question is whether Voxhelm should operate it despite the observed long-form GPU recovery error.
 
 **Question:** Does WhisperKit provide a stable HTTP server mode, or must Voxhelm wrap it as a subprocess?
 
@@ -230,7 +230,7 @@ The consumer integrations were largely independent and could be done in any orde
 #### Stream B: Optional STT backend expansion (days 17-19)
 
 1. **Deliver the second shipped backend**: completed with `whisper.cpp` plus `mlx-whisper`
-2. **Optional future backend adapter**: WhisperKit only if the benchmark ambiguity is resolved and it becomes worth operating
+2. **Optional future backend adapter**: WhisperKit is now the leading candidate for backend expansion, but it should arrive first as an experimental/non-default path after a smaller stability-focused slice
 3. **Backend selection logic:** `auto` mode selects based on the configured default and fallback
 4. **Backend health checks:** verify each shipped backend is functional on startup
 

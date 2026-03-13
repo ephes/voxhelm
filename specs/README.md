@@ -13,7 +13,7 @@ Current implementation snapshot as of 2026-03-13:
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription, live batch jobs, direct Home Assistant STT, and the restored production debug-logging default have all been validated against the deployed service.
 - Remaining planned work is narrower now: optional backend expansion beyond the current `whisper.cpp` + `mlx-whisper` STT set, Archive article-audio consumer follow-on, and M4/OpenClaw.
-- The STT benchmark spike has already been recorded in [`2026-03-12_stt_backend_benchmark_studio.md`](./2026-03-12_stt_backend_benchmark_studio.md). Treat the `whisper.cpp` and `mlx-whisper` results as the main actionable evidence; the WhisperKit numbers are useful but still provisional.
+- The STT benchmark spike was re-run on `studio`, and the current source of truth is [`2026-03-13_whisperkit_re_evaluation_studio.md`](./2026-03-13_whisperkit_re_evaluation_studio.md). The revised evidence keeps `whisper.cpp` as the deployed default for now, but WhisperKit is no longer merely provisional: on the tuned `studio` path it is now a real follow-on candidate, with GPU stability caveats.
 
 This directory currently contains both the original PRD and the planning package derived from it. The goal of this file is to make the document stack explicit, so readers know:
 

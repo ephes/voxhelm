@@ -1,5 +1,7 @@
 # STT Backend Benchmark On Studio
 
+> Superseded for WhisperKit decision-making by [`2026-03-13_whisperkit_re_evaluation_studio.md`](./2026-03-13_whisperkit_re_evaluation_studio.md). Keep this document as the original 2026-03-12 spike record.
+
 **Date:** 2026-03-12
 **Status:** completed spike
 **Host:** `studio.tailde2ec.ts.net` (`macstudio`)

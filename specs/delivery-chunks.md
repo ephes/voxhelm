@@ -42,7 +42,7 @@ Current completion state:
 
 ### S1 -- STT Backend Benchmark Spike
 
-**Implementation note (2026-03-12):** Delivered. Results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md`. The benchmark supports `whisper.cpp` as the current `studio` default, keeps `mlx-whisper` as the other shipped backend, and leaves WhisperKit as a deferred/provisional option.
+**Implementation note (2026-03-13):** Delivered and re-run. The current record is `specs/2026-03-13_whisperkit_re_evaluation_studio.md`. It keeps `whisper.cpp` as the current `studio` default, corrects the MLX baseline upward under Python 3.14, and upgrades WhisperKit from deferred/provisional to evidence-backed follow-on candidate status.
 
 **Purpose:** Benchmark backend expansion options on `studio` without blocking implementation.
 
@@ -78,7 +78,7 @@ Current completion state:
 - WhisperKit may not have a stable Python/CLI interface on macOS yet -- if so, document and defer it
 - mlx-whisper performance characteristics may differ significantly from published benchmarks
 
-**Suggested implementation order:** Delivered. Re-run only if WhisperKit becomes a real candidate again or if the deployed hardware/model mix changes materially.
+**Suggested implementation order:** Delivered. The "WhisperKit becomes a real candidate again" condition is now met; any next step should be a small experimental backend slice rather than another purely speculative benchmark.
 
 ---
 
@@ -325,7 +325,7 @@ Current completion state:
 
 ### C5 -- STT Backend Adapter Layer
 
-**Implementation note (2026-03-13):** Delivered with two backends: `whisper.cpp` and `mlx-whisper`. WhisperKit remains outside the delivered scope.
+**Implementation note (2026-03-13):** Delivered with two backends: `whisper.cpp` and `mlx-whisper`. WhisperKit remains outside the delivered scope today, but the re-evaluation moved it into the next-slice candidate set rather than leaving it indefinitely deferred.
 
 **Purpose:** Provide a pluggable backend abstraction so the rest of the system can request transcription without knowing which engine runs underneath.
 
@@ -337,7 +337,7 @@ Current completion state:
 - Backend implementations:
   - `mlx-whisper`
   - `whisper.cpp` (subprocess-based, proven in podcast-transcript)
-  - `WhisperKit` only if a future follow-on slice accepts it
+  - `WhisperKit` as an experimental/non-default follow-on once the GPU-stability caveat is addressed well enough to operate
 - Backend registry: lookup by identifier string (`auto`, `mlx`, `whispercpp`; `whisperkit` only if a future slice adds it)
 - `auto` selection logic: configurable default per lane (batch vs interactive)
 - Audio preprocessing: resampling to 16kHz mono WAV via ffmpeg (reuse approach from podcast-transcript's WhisperCpp backend)

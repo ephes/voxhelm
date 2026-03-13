@@ -76,7 +76,7 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 
 ### Spike 0a: STT Backend Benchmark
 
-**Implementation note (2026-03-12):** Delivered. The results are recorded in `specs/2026-03-12_stt_backend_benchmark_studio.md` and support `whisper.cpp` as the current `studio` default while keeping WhisperKit out of the shipped runtime.
+**Implementation note (2026-03-13):** Delivered and re-run. The current record is `specs/2026-03-13_whisperkit_re_evaluation_studio.md`. The revised evidence still supports `whisper.cpp` as the current `studio` default, but it no longer supports deferring WhisperKit on performance grounds alone. Tuned WhisperKit is now a real follow-on candidate, with a remaining GPU-stability caveat.
 
 - **Question:** Which backend (WhisperKit, mlx-whisper, whisper.cpp) should be the default for batch STT on `studio`? What are the real latency/quality/memory tradeoffs?
 - **Method:** Transcribe the same 3 audio files (short <1min, medium ~10min, long ~60min) with each backend on `studio`. Measure wall-clock time, peak memory, and compare transcript quality by manual inspection.
@@ -86,7 +86,7 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 
 ### Spike 0b: WhisperKit Server Mode
 
-**Implementation note (2026-03-12):** Partially explored, but not accepted into the runtime. Treat this as deferred until WhisperKit becomes a real follow-on target.
+**Implementation note (2026-03-13):** Revisited. WhisperKit server mode is current and smoke-tested on `studio`, and should now be treated as a viable future integration path rather than as an unresolved feasibility question. The open issue is not server existence; it is whether the long-form GPU recovery error is acceptable operationally.
 
 - **Question:** Can WhisperKit serve an OpenAI-compatible HTTP endpoint natively, or does Voxhelm need to wrap it as a subprocess? What is the startup/teardown cost?
 - **Method:** Install WhisperKit on `studio`, attempt to run its server mode, test with a curl POST to `/audio/transcriptions`.
@@ -225,7 +225,7 @@ Completed on 2026-03-12:
 - **python-podcast / django-cast integration:** Wagtail-admin workflow in `django-cast` / `python-podcast` that lets privileged editors trigger transcript generation from the Wagtail admin UI for an episode or audio object, persists the existing `Transcript` artifacts, and does not require shell access.
 - **python-podcast / django-cast configuration:** Voxhelm API base URL, API token, and optional model/language preferences are manageable through Wagtail admin (for example via Wagtail settings or a protected snippet), not only through Django settings or environment variables.
 - Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
-- The shipped STT backend set now includes both `whisper.cpp` and `mlx-whisper`; WhisperKit remains a future optional follow-on rather than part of the delivered milestone
+- The shipped STT backend set now includes both `whisper.cpp` and `mlx-whisper`; WhisperKit is now the leading backend-expansion follow-on, but should enter first as an experimental non-default path rather than as a silent default replacement
 
 ### What is deferred
 
