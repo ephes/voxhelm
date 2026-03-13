@@ -11,6 +11,8 @@ from typing import Protocol
 
 from django.conf import settings
 
+from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+
 AUTO_BACKEND_MODEL_NAMES = {"auto", "piper", "tts-1", "tts-1-hd"}
 AUDIO_OUTPUT_FORMATS = {"wav", "mp3", "ogg"}
 MIN_TTS_SPEED = 0.25
@@ -28,6 +30,7 @@ class SynthesizeParams:
     voice: str | None
     language: str | None
     speed: float
+    scheduler_lane: str = LANE_NON_INTERACTIVE
 
 
 @dataclass(frozen=True)
@@ -191,8 +194,9 @@ def resolve_backend_name_for_model(request_model: str) -> str:
 
 
 def synthesize_text(text: str, params: SynthesizeParams) -> SynthesisResult:
-    backend = get_backend_service()
-    return backend.synthesize(text, params)
+    with admit_local_inference(params.scheduler_lane):
+        backend = get_backend_service()
+        return backend.synthesize(text, params)
 
 
 def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudio:

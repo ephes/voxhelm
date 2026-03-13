@@ -29,6 +29,7 @@ from wyoming.info import (
 from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import Synthesize
 
+from lane_scheduler import LANE_INTERACTIVE
 from synthesis.service import (
     SynthesizeParams,
     cleanup_paths,
@@ -241,6 +242,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
                         voice=requested_voice,
                         language=requested_language,
                         speed=1.0,
+                        scheduler_lane=LANE_INTERACTIVE,
                     ),
                 )
                 await self._write_synthesized_audio(speech_result.audio_path)
@@ -347,6 +349,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     request_model=self.request_model,
                     prompt=self.config.prompt,
                     language=self.request_language,
+                    scheduler_lane=LANE_INTERACTIVE,
                 ),
             )
         finally:

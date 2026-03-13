@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import wave
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -71,6 +72,28 @@ def test_upload_transcription_returns_json(client, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"text": "Hello world"}
     assert backend.calls[0][1].prompt == "context"
+
+
+def test_upload_transcription_uses_non_interactive_scheduler_lane(client, monkeypatch):
+    lanes: list[str] = []
+
+    @contextmanager
+    def fake_admit(lane: str):
+        lanes.append(lane)
+        yield object()
+
+    monkeypatch.setattr("transcriptions.service.admit_local_inference", fake_admit)
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "gpt-4o-mini-transcribe"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert lanes == ["non-interactive"]
 
 
 def test_upload_transcription_emits_debug_log(client, monkeypatch):
@@ -310,6 +333,47 @@ def test_speech_endpoint_returns_audio(client, monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response["Content-Type"] == "audio/wav"
     assert response.content == b"RIFFtest"
+
+
+def test_speech_endpoint_uses_non_interactive_scheduler_lane(client, monkeypatch, tmp_path):
+    lanes: list[str] = []
+    audio_path = tmp_path / "speech.wav"
+    audio_path.write_bytes(b"RIFFtest")
+
+    @contextmanager
+    def fake_admit(lane: str):
+        lanes.append(lane)
+        yield object()
+
+    monkeypatch.setattr("synthesis.service.admit_local_inference", fake_admit)
+    monkeypatch.setattr(
+        "synthesis.service.get_backend_service",
+        lambda: type(
+            "Backend",
+            (),
+            {
+                "synthesize": lambda self, text, params: DummySpeechResult(audio_path),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "synthesis.views.export_audio",
+        lambda result, output_format: type(
+            "ExportedAudio",
+            (),
+            {"path": result.audio_path, "format_name": output_format, "content_type": "audio/wav"},
+        )(),
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world", "response_format": "wav"}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert lanes == ["non-interactive"]
 
 
 def test_speech_endpoint_rejects_oversized_input(client, settings):

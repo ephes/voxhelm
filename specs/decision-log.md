@@ -347,6 +347,52 @@ Voxhelm should persist its own producer-facing job record and store the returned
 
 ---
 
+## D-19: What is the first accepted C13 lane-scheduling design on `studio`?
+
+**Context:** As of 2026-03-13, Voxhelm is live on one Apple Silicon host (`studio`) with three long-lived processes: the Django HTTP API, one Django Tasks worker, and the Wyoming STT/TTS sidecar. STT and TTS are each serialized today behind separate in-process Python locks, but those locks are modality-local rather than host-wide. STT and TTS can still overlap within one process, and there is no coordination across processes. That means a long transcription or synthesize run can still contend with the Wyoming sidecar for CPU, RAM, and model cache state.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Separate interactive worker/runtime | Stronger isolation, but adds new process topology, queueing, and deployment complexity immediately |
+| B. Reserved parallel slots per lane | Implies useful concurrent inference on one host; risky for memory pressure and not clearly needed on `studio` |
+| C. Host-wide admission control plus cooperative serialization | Minimal change: one shared runtime gate on `studio`, Wyoming gets priority when competing with HTTP/batch work, no preemption of running work |
+
+**Recommended default:** Option C.
+
+The first C13 slice should use a thin host-wide scheduler around local inference calls, not a new queueing system. Concretely:
+
+- keep the existing three-process deployment shape on `studio`
+- add one shared scheduler state/lock directory on local disk
+- classify **interactive lane** as Wyoming STT/TTS requests only
+- classify **non-interactive lane** as all non-Wyoming local inference on `studio`: batch `transcribe`, batch `synthesize`, `POST /v1/audio/transcriptions`, and `POST /v1/audio/speech`
+- allow only one local inference holder at a time across processes
+- use that same single admission slot for both STT and TTS inference
+- give Wyoming requests admission priority over queued non-interactive work
+- do **not** preempt a batch or HTTP request that is already running
+- do **not** expose `lane=interactive` on the public batch API in this slice; `Job.lane` remains `batch` for producer-submitted jobs, and the scheduler's `non-interactive` lane is an internal runtime concept only
+
+**Feasible guarantee on one host:** Voxhelm can prevent new batch/HTTP inference from starting ahead of a waiting Wyoming request, but it cannot guarantee a hard latency bound if a non-interactive inference is already in progress when the interactive request arrives.
+
+**Operator API decision:** `GET /v1/status` remains deferred. The first slice should rely on log-based verification and black-box live tests rather than broadening into a new status surface.
+
+**Config shape:** Add only the minimum knobs needed to operate the shared scheduler, for example:
+
+- enable/disable flag
+- shared state directory path
+- stale-lock timeout / recovery window
+
+**Recommended initial default:** `VOXHELM_LANE_SCHEDULER_STALE_SECONDS=1800`.
+
+That default is intentionally conservative because the first slice does not yet define a lease-heartbeat mechanism, and long non-interactive inference on `studio` can legitimately run for many minutes. Lower values are safer for crash recovery but raise the risk of falsely reclaiming a live holder.
+
+Do not add slot-count tuning in the first slice because the accepted design is single-slot cooperative serialization, not reserved parallel capacity.
+
+**Blocks implementation:** Yes -- this is the reviewed C13 design baseline.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:

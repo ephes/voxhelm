@@ -12,6 +12,8 @@ from typing import Any, Protocol
 
 from django.conf import settings
 
+from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 LEADING_FILLER_WORDS = {
     "de": ("okay", "ok", "und", "also", "äh", "ah", "hm", "hmm"),
@@ -37,6 +39,7 @@ class TranscribeParams:
     request_model: str
     prompt: str | None
     language: str | None
+    scheduler_lane: str = LANE_NON_INTERACTIVE
 
 
 @dataclass(frozen=True)
@@ -425,17 +428,18 @@ def resolve_whispercpp_model_path(model_name: str) -> Path:
 
 
 def transcribe_audio(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
-    # Local STT backends are not safe to run concurrently inside this long-lived process.
-    with _TRANSCRIPTION_LOCK:
-        unavailable_errors: list[str] = []
-        for invocation in get_backend_services_for_model(params.request_model):
-            try:
-                return invocation.service.transcribe(audio_path, params)
-            except BackendUnavailableError as exc:
-                unavailable_errors.append(f"{invocation.name}: {exc}")
+    with admit_local_inference(params.scheduler_lane):
+        # Local STT backends are not safe to run concurrently inside this long-lived process.
+        with _TRANSCRIPTION_LOCK:
+            unavailable_errors: list[str] = []
+            for invocation in get_backend_services_for_model(params.request_model):
+                try:
+                    return invocation.service.transcribe(audio_path, params)
+                except BackendUnavailableError as exc:
+                    unavailable_errors.append(f"{invocation.name}: {exc}")
 
-        joined = "; ".join(unavailable_errors)
-        raise RuntimeError(f"No configured STT backend is available. {joined}")
+            joined = "; ".join(unavailable_errors)
+            raise RuntimeError(f"No configured STT backend is available. {joined}")
 
 
 def serialize_health() -> str:

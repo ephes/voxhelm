@@ -277,7 +277,10 @@ Still pending:
 
 ### What is deferred
 
-- Interactive lane scheduling / resource reservation (C13)
+- Interactive lane scheduling beyond the reviewed first slice:
+  - no second worker pool or separate interactive host yet
+  - no preemption of already-running batch/HTTP inference
+  - no `GET /v1/status` operator endpoint yet
 - Archive article-audio consumer follow-on for the shared TTS runtime
 - Wake-word detection (out of scope per PRD)
 - OpenClaw voice turns (M4)
@@ -294,13 +297,13 @@ Still pending:
 
 - Home Assistant Assist pipeline uses `studio` for STT and TTS
 - At least one Assist turn succeeds end-to-end through the real Home Assistant Assist pipeline using Voxhelm
-- C13 remains the explicit next step because the current deployment still allows batch and Wyoming contention on `studio`
+- The reviewed C13 next slice is explicit: keep the same three-process runtime on `studio`, add a host-wide cooperative inference gate, and give Wyoming requests priority over queued HTTP/batch work
 - Operator docs accurately describe the live voice setup and the default-off debug-logging guidance
 
 ### Key risks
 
 - Latency budget: Home Assistant voice expects sub-second STT response for interactive use. If the chosen STT model is too large, interactive use will feel sluggish. Mitigation: use a smaller/turbo model for interactive lane, benchmark in Spike 0c.
-- Resource contention: running a batch transcription and an interactive voice request simultaneously on `studio` may cause memory pressure. Mitigation: batch workers pause or reduce concurrency when interactive requests are active.
+- Resource contention: running a batch transcription and an interactive voice request simultaneously on `studio` may cause memory pressure. Mitigation: the first C13 slice uses host-wide cooperative serialization so only one local inference admission runs at a time across processes, but this still cannot preempt work already in flight.
 
 ---
 

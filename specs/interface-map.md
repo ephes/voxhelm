@@ -19,7 +19,7 @@ Current implemented topology:
 
 Remaining planned topology work:
 
-- Add interactive lane scheduling / resource reservation so Wyoming traffic cannot be starved by batch work
+- Add the reviewed C13 first slice: one host-wide cooperative inference gate on `studio` so Wyoming traffic gets admission priority over queued HTTP/batch work without adding a new worker tier
 - Add future OpenClaw-facing consumers without changing the core service boundaries
 
 ```
@@ -253,6 +253,8 @@ The batch API is the stable producer contract. How jobs move from `queued` to `r
 
 The current implementation also persists the linked Django task/result identifier in the producer-facing job record and reconciles terminal state from the Django Tasks result backend when jobs are queried.
 
+**Reviewed C13 runtime rule:** Batch jobs continue to use Django Tasks, but any task step that enters local STT/TTS inference on `studio` must participate in the same host-wide lane scheduler as the HTTP API and Wyoming sidecar. C13 does not introduce a second task queue or a separate interactive worker host.
+
 **Future-compatible option:** if Voxhelm later needs remote workers or stricter process isolation beyond the current Django Tasks setup, it can add more explicit worker coordination without changing the producer-facing batch API.
 
 **Primary direct consumers:** python-podcast / django-cast and future integrations that need long-running or URL-based processing.
@@ -282,7 +284,16 @@ The current implementation also persists the linked Django task/result identifie
 
 **Workload lane:** Interactive. Must not be blocked by batch jobs.
 
-**v1 scope:** Milestone 2 (not v1). Architectural placeholder in Milestone 1.
+**Reviewed C13 lane definition:**
+
+| Lane | Traffic in scope now | Notes |
+|------|----------------------|-------|
+| `interactive` | Wyoming STT and Wyoming TTS only | Internal runtime classification; not exposed through `POST /v1/jobs` |
+| `non-interactive` | `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, batch `transcribe`, batch `synthesize` | Internal scheduler lane. This intentionally includes sync HTTP inference even though the producer-facing job model still only exposes `lane=batch` |
+
+**Reviewed C13 mechanism:** Host-wide admission control plus cooperative serialization. All local inference on `studio` shares one scheduler gate and one admission slot for both STT and TTS. A waiting Wyoming request jumps ahead of queued non-interactive work, but Voxhelm does not interrupt work that already holds the gate.
+
+**Feasible guarantee on one host:** Voxhelm can prevent new HTTP/batch inference from starting ahead of a waiting Wyoming request and can avoid simultaneous heavy inference across processes. It cannot guarantee sub-second latency if an earlier HTTP/batch inference is already running when the Wyoming request arrives.
 
 **Consumers:**
 - Home Assistant Assist pipeline.
@@ -326,7 +337,7 @@ voxhelm/
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/v1/health` | None | Liveness probe |
-| GET | `/v1/status` | Operator session or admin token | Queue depth, active jobs, worker liveness |
+| GET | `/v1/status` | Operator session or admin token | Deferred. Queue depth, active jobs, worker liveness remain a later operator surface |
 
 **Response (`/v1/health`):**
 ```json
@@ -336,6 +347,8 @@ voxhelm/
   "version": "0.1.0"
 }
 ```
+
+**Current scope note:** `GET /v1/health` is live. `GET /v1/status` is explicitly deferred out of the first C13 slice so the implementation can stay focused on runtime coordination.
 
 **Consumers:** Monitoring (nyxmon), operator tooling.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -168,6 +169,43 @@ def test_immediate_backend_executes_job_and_serves_artifacts(
 
 
 @pytest.mark.django_db
+def test_transcription_job_uses_non_interactive_scheduler_lane(
+    client, settings, monkeypatch, tmp_path
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    lanes: list[str] = []
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+
+    @contextmanager
+    def fake_admit(lane: str):
+        lanes.append(lane)
+        yield object()
+
+    monkeypatch.setattr("transcriptions.service.admit_local_inference", fake_admit)
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_job_payload()),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert lanes == ["non-interactive"]
+
+
+@pytest.mark.django_db
 def test_video_job_extracts_audio_before_transcription(client, settings, monkeypatch, tmp_path):
     configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
@@ -292,6 +330,62 @@ def test_synthesize_job_serves_audio_artifact(client, settings, monkeypatch, tmp
     )
     assert artifact_response.status_code == 200
     assert artifact_response.content == b"RIFFspeech"
+
+
+@pytest.mark.django_db
+def test_synthesize_job_uses_non_interactive_scheduler_lane(
+    client, settings, monkeypatch, tmp_path
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    lanes: list[str] = []
+    speech_path = tmp_path / "speech.wav"
+    speech_path.write_bytes(b"RIFFspeech")
+
+    @contextmanager
+    def fake_admit(lane: str):
+        lanes.append(lane)
+        yield object()
+
+    monkeypatch.setattr("synthesis.service.admit_local_inference", fake_admit)
+    monkeypatch.setattr(
+        "synthesis.service.get_backend_service",
+        lambda: type(
+            "Backend",
+            (),
+            {
+                "synthesize": lambda self, text, params: type(
+                    "SpeechResult",
+                    (),
+                    {
+                        "audio_path": speech_path,
+                        "backend_name": "piper",
+                        "model_name": "piper",
+                        "voice_name": "en_US-lessac-medium",
+                        "language": "en",
+                        "duration_seconds": 1.25,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "jobs.services.export_audio",
+        lambda result, output_format: type(
+            "ExportedAudio",
+            (),
+            {"path": result.audio_path, "format_name": output_format, "content_type": "audio/wav"},
+        )(),
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_synthesis_payload()),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert lanes == ["non-interactive"]
 
 
 @pytest.mark.django_db

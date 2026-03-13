@@ -31,7 +31,7 @@ Current completion state:
 | C11 | Deployment role (ops-library) | M1a+b | C1 |
 | C12 | Wyoming STT adapter | M2 | S2, C5 |
 | C13 | Interactive lane scheduling | M2 | C12, C3 |
-| C14 | Home Assistant integration | M2 | C12, C13, C11 |
+| C14 | Home Assistant integration | M2 | C12, C11 |
 | C15 | TTS backend adapter layer (Piper) | M3 | C1 |
 | C16 | Batch TTS jobs | M3 | C15, C3, C4 |
 | C17 | OpenClaw integration | M4 | C7 |
@@ -740,17 +740,28 @@ Current completion state:
 
 **Included scope:**
 
-- Lane-aware worker scheduling: interactive jobs preempt or run on a separate execution path from batch jobs
-- Option A: separate worker process for interactive lane
-- Option B: priority queue with interactive jobs jumping ahead of batch
-- Option C: resource reservation (e.g., interactive lane always has one processing slot reserved)
-- Configurable concurrency limits per lane
-- Monitoring: queue depth per lane visible via health/status endpoint
+- A shared host-local scheduler that is used by all long-lived Voxhelm processes on `studio`
+- Interactive-lane classification for Wyoming STT and Wyoming TTS only
+- Non-interactive-lane classification for all non-Wyoming local inference on `studio`:
+  - batch `transcribe`
+  - batch `synthesize`
+  - `POST /v1/audio/transcriptions`
+  - `POST /v1/audio/speech`
+- Cooperative single-slot serialization at inference-entry time across processes
+- One shared admission slot for both STT and TTS inference
+- Admission priority for waiting Wyoming work over queued non-interactive work
+- Shared scheduler state on local disk so the HTTP API, worker, and Wyoming sidecar can coordinate without introducing another service
+- Minimal operator-facing observability for lane handoff/wait decisions via existing process logs
+- Minimal deploy/runtime config for the shared scheduler directory and stale-lock recovery window
 
 **Explicitly excluded scope:**
 
-- GPU/memory isolation (out of scope for v1)
-- Preempting running batch jobs (too complex for v1)
+- GPU or cgroup-style resource isolation
+- Preempting running batch or HTTP inference after it has started
+- A second worker pool, a second Django Tasks queue, or a dedicated interactive service host
+- Public `lane=interactive` submission through `POST /v1/jobs`
+- `GET /v1/status`
+- Slot reservation or per-lane parallel-capacity tuning beyond the single-slot scheduler
 
 **Dependencies:** C3 (worker model), C12 (Wyoming adapter generates interactive workload)
 
@@ -758,18 +769,29 @@ Current completion state:
 
 **Primary interfaces:**
 
-- Configuration: `VOXHELM_INTERACTIVE_SLOTS`, `VOXHELM_BATCH_SLOTS`
-- `GET /v1/status` -- includes queue depth per lane
+- Configuration:
+  - `VOXHELM_LANE_SCHEDULER_ENABLED`
+  - `VOXHELM_LANE_SCHEDULER_DIR`
+  - `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
+- Internal runtime boundary:
+  - the shared scheduler wraps local inference entry points used by the HTTP API, Django Tasks worker, and Wyoming sidecar
+  - recommended initial default: `VOXHELM_LANE_SCHEDULER_STALE_SECONDS=1800`
 
 **Acceptance criteria:**
 
-- A running batch transcription job does not block an interactive STT request from completing within the latency target
-- Queue depth per lane is visible in the status endpoint
-- Configuration controls how many slots are reserved for each lane
+- When no other inference is already running, a new Wyoming request is admitted ahead of queued HTTP/batch inference
+- Voxhelm does not run simultaneous heavy local inference in multiple processes on `studio`
+- Voxhelm does not admit concurrent local STT and TTS inference through separate paths while the scheduler is enabled
+- A waiting Wyoming request is not starved by additional batch/HTTP admissions while it is pending
+- Batch transcription and synthesize still complete correctly after the scheduler is added
+- `/etc/voxhelm/voxhelm.env` renders the reviewed scheduler defaults on `studio`
+- Live verification shows the intended handoff behavior through a mixed-load test and log timestamps, without needing `/v1/status`
 
 **Main risks:**
 
-- On a single-GPU host, two simultaneous transcriptions may OOM. Mitigate by limiting total concurrency to 1 for the GPU and using separate CPU-based backends for interactive if needed.
+- A running batch inference can still delay a later Wyoming turn because the first slice does not preempt. Mitigate by keeping interactive backends fast and by preventing any additional non-interactive work from starting ahead of the waiting voice turn.
+- File-lock or state-file recovery bugs could leave the scheduler wedged after process crashes. Mitigate with a stale-lock timeout and explicit test coverage for recovery paths.
+- Folding sync HTTP requests into the non-interactive lane may increase their tail latency during heavy HA usage. This is acceptable in the first slice because the primary user-facing goal is protecting Assist responsiveness.
 
 **Suggested implementation order:** This is now the next concrete implementation step.
 

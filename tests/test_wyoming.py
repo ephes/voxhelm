@@ -12,6 +12,7 @@ from wyoming.event import read_event
 from wyoming.info import Describe, Info
 from wyoming.tts import Synthesize
 
+from synthesis.service import SynthesizeParams
 from transcriptions.service import TranscribeParams, TranscriptionResult
 from transcriptions.wyoming import (
     WyomingSttConfig,
@@ -161,6 +162,7 @@ def test_wyoming_handler_transcribes_audio(monkeypatch) -> None:
     assert transcript.text == "hallo welt"
     assert calls[0][1].request_model == "ggml-large-v3.bin"
     assert calls[0][1].language == "de"
+    assert calls[0][1].scheduler_lane == "interactive"
 
 
 def test_wyoming_handler_emits_debug_log(monkeypatch) -> None:
@@ -335,9 +337,15 @@ def test_wyoming_handler_synthesizes_audio(monkeypatch, tmp_path: Path) -> None:
         wav_file.setnchannels(1)
         wav_file.writeframes(b"\x01\x00" * 2205)
 
+    calls: list[tuple[str, SynthesizeParams]] = []
+
+    def fake_synthesize(text: str, params: SynthesizeParams):
+        calls.append((text, params))
+        return type("SpeechResult", (), {"audio_path": speech_path})()
+
     monkeypatch.setattr(
         "transcriptions.wyoming.synthesize_text",
-        lambda text, params: type("SpeechResult", (), {"audio_path": speech_path})(),
+        fake_synthesize,
     )
     monkeypatch.setattr(
         "transcriptions.wyoming.cleanup_paths",
@@ -366,6 +374,7 @@ def test_wyoming_handler_synthesizes_audio(monkeypatch, tmp_path: Path) -> None:
     assert len(events) >= 2
     assert AudioStart.is_type(events[0].type)
     assert AudioStop.is_type(events[-1].type)
+    assert calls[0][1].scheduler_lane == "interactive"
 
 
 def test_wyoming_handler_cleans_up_audio_after_synthesis_write_failure(

@@ -284,9 +284,16 @@ Before declaring M1 complete:
    - Configure port binding
 
 2. **Interactive lane scheduling** (day 22-24)
-   - If Option B: Voxhelm's backend adapter must prioritize interactive requests
-   - Mechanism: batch worker pauses/yields when interactive request arrives
-   - Simpler alternative if Option A: Wyoming processes have their own model instances, no contention with batch
+   - Keep the current three-process runtime on `studio`: HTTP API, Django Tasks worker, Wyoming sidecar
+   - Add one host-wide scheduler state/lock directory on local disk
+   - Treat Wyoming STT/TTS as the only interactive lane in this first slice
+   - Treat all HTTP and Django Tasks inference as the internal non-interactive lane
+   - Wrap local STT/TTS entry points with the same scheduler helper so admissions are coordinated across processes
+   - Use cooperative single-slot serialization with interactive-biased admission, not reserved parallel slots
+   - Use that same single slot for both STT and TTS inference
+   - Do not preempt already-running work; the first slice only controls what starts next
+   - Start with a conservative stale-lock default of 1800 seconds unless the implementation also refreshes the lease while work is active
+   - Defer `/v1/status`; verify the behavior with logs and black-box mixed-load tests instead
 
 3. **Home Assistant configuration** (day 24-26)
    - Add Wyoming STT provider in HA config
@@ -303,7 +310,9 @@ Before declaring M1 complete:
 
 - [x] Voice command through HA device works end-to-end for STT
 - [x] The Assist pipeline can use Voxhelm for TTS as well
-- [ ] Batch transcription jobs are not noticeably degraded during voice use, or C13 remains explicitly deferred because no concrete blocker was observed
+- [ ] Under mixed load, a new Wyoming turn is admitted ahead of queued HTTP/batch work when no earlier inference is already running
+- [ ] Logs and black-box verification make the lane handoff behavior defensible without requiring `/v1/status`
+- [ ] Batch transcription jobs are not noticeably degraded during voice use, or remaining degradation is explicitly attributed to the non-preemptive first-slice design
 
 ---
 
