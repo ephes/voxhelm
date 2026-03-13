@@ -8,6 +8,7 @@ from django.db import models
 class Job(models.Model):
     class JobType(models.TextChoices):
         TRANSCRIBE = "transcribe", "Transcribe"
+        SYNTHESIZE = "synthesize", "Synthesize"
 
     class Lane(models.TextChoices):
         BATCH = "batch", "Batch"
@@ -66,6 +67,9 @@ class JobArtifact(models.Model):
         TRANSCRIPT_TEXT = "transcript_text", "Transcript text"
         TRANSCRIPT_JSON = "transcript_json", "Transcript JSON"
         TRANSCRIPT_VTT = "transcript_vtt", "Transcript VTT"
+        SPEECH_WAV = "speech_wav", "Speech WAV"
+        SPEECH_MP3 = "speech_mp3", "Speech MP3"
+        SPEECH_OGG = "speech_ogg", "Speech OGG"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="artifacts")

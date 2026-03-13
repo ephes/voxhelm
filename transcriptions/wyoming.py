@@ -15,8 +15,25 @@ from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioChunkConverter, AudioStart, AudioStop
 from wyoming.error import Error
 from wyoming.event import Event
-from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info
+from wyoming.info import (
+    AsrModel,
+    AsrProgram,
+    Attribution,
+    Describe,
+    Info,
+    TtsProgram,
+    TtsVoice,
+    TtsVoiceSpeaker,
+)
 from wyoming.server import AsyncEventHandler, AsyncServer
+from wyoming.tts import Synthesize
+
+from synthesis.service import (
+    SynthesizeParams,
+    cleanup_paths,
+    discover_installed_voices,
+    synthesize_text,
+)
 
 from .service import TranscribeParams, resolve_model_name_for_backend, transcribe_audio
 
@@ -83,7 +100,39 @@ def build_wyoming_info(config: WyomingSttConfig) -> Info:
                     )
                 ],
             )
-        ]
+        ],
+        tts=[
+            TtsProgram(
+                name="voxhelm",
+                description="Voxhelm Wyoming text-to-speech",
+                attribution=Attribution(
+                    name="Voxhelm",
+                    url="https://github.com/jochen/Voxhelm",
+                ),
+                installed=True,
+                version="0.1.0",
+                voices=[
+                    TtsVoice(
+                        name=voice.key,
+                        description=voice.name,
+                        attribution=Attribution(
+                            name="Piper",
+                            url="https://github.com/OHF-Voice/piper1-gpl",
+                        ),
+                        installed=True,
+                        version="0.1.0",
+                        languages=list(voice.languages),
+                        speakers=[TtsVoiceSpeaker(name=speaker) for speaker in voice.speakers]
+                        or None,
+                    )
+                    for voice in discover_installed_voices(
+                        voice_dir=settings.VOXHELM_PIPER_VOICE_DIR,
+                        configured_voices=list(settings.VOXHELM_PIPER_VOICES),
+                    ).values()
+                ],
+                supports_synthesize_streaming=False,
+            )
+        ],
     )
 
 
@@ -106,6 +155,34 @@ class WyomingSttEventHandler(AsyncEventHandler):
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
             await self.write_event(self.info_event)
+            return True
+
+        if Synthesize.is_type(event.type):
+            synthesize = Synthesize.from_event(event)
+            requested_voice = None
+            requested_language = None
+            speech_result = None
+            if synthesize.voice is not None:
+                requested_voice = synthesize.voice.name
+                requested_language = synthesize.voice.language
+            try:
+                speech_result = await asyncio.to_thread(
+                    synthesize_text,
+                    synthesize.text,
+                    SynthesizeParams(
+                        request_model="auto",
+                        voice=requested_voice,
+                        language=requested_language,
+                        speed=1.0,
+                    ),
+                )
+                await self._write_synthesized_audio(speech_result.audio_path)
+            except Exception as exc:
+                _LOGGER.exception("Wyoming TTS synthesis failed")
+                await self.write_event(Error(text=str(exc), code="synthesis_failed").event())
+            finally:
+                if speech_result is not None:
+                    cleanup_paths(speech_result.audio_path)
             return True
 
         if Transcribe.is_type(event.type):
@@ -174,6 +251,36 @@ class WyomingSttEventHandler(AsyncEventHandler):
         finally:
             temp_path.unlink(missing_ok=True)
 
+    async def _write_synthesized_audio(self, audio_path: Path) -> None:
+        with wave.open(str(audio_path), "rb") as wav_reader:
+            rate = wav_reader.getframerate()
+            width = wav_reader.getsampwidth()
+            channels = wav_reader.getnchannels()
+
+            await self.write_event(
+                AudioStart(
+                    rate=rate,
+                    width=width,
+                    channels=channels,
+                ).event()
+            )
+
+            frames_per_chunk = settings.VOXHELM_WYOMING_SAMPLES_PER_CHUNK
+            while True:
+                chunk = wav_reader.readframes(frames_per_chunk)
+                if not chunk:
+                    break
+                await self.write_event(
+                    AudioChunk(
+                        audio=chunk,
+                        rate=rate,
+                        width=width,
+                        channels=channels,
+                    ).event()
+                )
+
+        await self.write_event(AudioStop().event())
+
 
 async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> None:
     resolved_config = config or get_wyoming_stt_config()
@@ -196,7 +303,7 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
 
     await server.start(handler_factory)
     _LOGGER.info(
-        "Wyoming STT listening on %s:%s using backend=%s model=%s language=%s",
+        "Wyoming STT/TTS listening on %s:%s using backend=%s model=%s language=%s",
         resolved_config.host,
         resolved_config.port,
         resolved_config.backend,

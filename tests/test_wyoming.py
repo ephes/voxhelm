@@ -10,6 +10,7 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.error import Error
 from wyoming.event import read_event
 from wyoming.info import Describe, Info
+from wyoming.tts import Synthesize
 
 from transcriptions.service import TranscribeParams, TranscriptionResult
 from transcriptions.wyoming import (
@@ -75,6 +76,7 @@ def test_build_wyoming_info_announces_model_and_languages() -> None:
     assert asr_program.name == "voxhelm"
     assert asr_program.models[0].name == "ggml-large-v3.bin"
     assert asr_program.models[0].languages == ["de", "en"]
+    assert info.tts[0].name == "voxhelm"
 
 
 def test_wyoming_handler_describe_returns_info() -> None:
@@ -182,3 +184,106 @@ def test_wyoming_handler_returns_error_for_empty_audio() -> None:
     assert event is not None
     assert Error.is_type(event.type)
     assert Error.from_event(event).code == "empty_audio"
+
+
+def test_wyoming_handler_synthesizes_audio(monkeypatch, tmp_path: Path) -> None:
+    writer = DummyWriter()
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="whispercpp",
+        model="ggml-large-v3.bin",
+        language="en",
+        languages=("en",),
+    )
+    speech_path = tmp_path / "speech.wav"
+    with wave.open(str(speech_path), "wb") as wav_file:
+        wav_file.setframerate(22050)
+        wav_file.setsampwidth(2)
+        wav_file.setnchannels(1)
+        wav_file.writeframes(b"\x01\x00" * 2205)
+
+    monkeypatch.setattr(
+        "transcriptions.wyoming.synthesize_text",
+        lambda text, params: type("SpeechResult", (), {"audio_path": speech_path})(),
+    )
+    monkeypatch.setattr(
+        "transcriptions.wyoming.cleanup_paths",
+        lambda *paths: None,
+    )
+
+    async def run_flow() -> None:
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+        )
+        await handler.handle_event(Synthesize(text="Hello world").event())
+
+    asyncio.run(run_flow())
+
+    stream = io.BytesIO(bytes(writer.buffer))
+    events = []
+    while True:
+        event = read_event(stream)
+        if event is None:
+            break
+        events.append(event)
+
+    assert len(events) >= 2
+    assert AudioStart.is_type(events[0].type)
+    assert AudioStop.is_type(events[-1].type)
+
+
+def test_wyoming_handler_cleans_up_audio_after_synthesis_write_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    writer = DummyWriter()
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="whispercpp",
+        model="ggml-large-v3.bin",
+        language="en",
+        languages=("en",),
+    )
+    speech_path = tmp_path / "speech.wav"
+    speech_path.write_bytes(b"RIFFboom")
+    cleaned_paths: list[Path] = []
+
+    monkeypatch.setattr(
+        "transcriptions.wyoming.synthesize_text",
+        lambda text, params: type("SpeechResult", (), {"audio_path": speech_path})(),
+    )
+
+    async def fail_write_audio(self, audio_path: Path) -> None:
+        del self, audio_path
+        raise RuntimeError("write exploded")
+
+    monkeypatch.setattr(
+        WyomingSttEventHandler,
+        "_write_synthesized_audio",
+        fail_write_audio,
+    )
+    monkeypatch.setattr(
+        "transcriptions.wyoming.cleanup_paths",
+        lambda *paths: cleaned_paths.extend(paths),
+    )
+
+    async def run_flow() -> None:
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+        )
+        await handler.handle_event(Synthesize(text="Hello world").event())
+
+    asyncio.run(run_flow())
+
+    event = decode_single_event(writer)
+    assert event is not None
+    assert Error.is_type(event.type)
+    assert Error.from_event(event).code == "synthesis_failed"
+    assert cleaned_paths == [speech_path]

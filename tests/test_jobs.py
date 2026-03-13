@@ -48,6 +48,22 @@ def build_job_payload(url: str = "https://media.example.com/episode.mp3") -> dic
     }
 
 
+def build_synthesis_payload(text: str = "Hello from Voxhelm") -> dict[str, object]:
+    return {
+        "job_type": "synthesize",
+        "priority": "normal",
+        "lane": "batch",
+        "backend": "auto",
+        "model": "tts-1",
+        "language": "en",
+        "voice": "en_US-lessac-medium",
+        "input": {"kind": "text", "text": text},
+        "output": {"formats": ["wav"]},
+        "context": {"producer": "archive", "item_id": 456},
+        "task_ref": "archive-item-456-audio-v1",
+    }
+
+
 @pytest.mark.django_db
 def test_jobs_endpoint_requires_bearer_token(client):
     response = client.post(
@@ -225,3 +241,93 @@ def test_failed_job_records_error(client, settings, monkeypatch, tmp_path):
     assert response.status_code == 201
     assert payload["state"] == "failed"
     assert payload["error"]["message"] == "backend exploded"
+
+
+@pytest.mark.django_db
+def test_synthesize_job_serves_audio_artifact(client, settings, monkeypatch, tmp_path):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    speech_path = tmp_path / "speech.wav"
+    speech_path.write_bytes(b"RIFFspeech")
+
+    monkeypatch.setattr(
+        "jobs.services.synthesize_text",
+        lambda text, params: type(
+            "SpeechResult",
+            (),
+            {
+                "audio_path": speech_path,
+                "backend_name": "piper",
+                "model_name": "piper",
+                "voice_name": "en_US-lessac-medium",
+                "language": "en",
+                "duration_seconds": 1.25,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "jobs.services.export_audio",
+        lambda result, output_format: type(
+            "ExportedAudio",
+            (),
+            {"path": result.audio_path, "format_name": output_format, "content_type": "audio/wav"},
+        )(),
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_synthesis_payload()),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["state"] == "succeeded"
+    assert payload["result"]["artifacts"]["wav"].endswith("/speech.wav")
+    assert payload["result"]["metadata"]["voice"] == "en_US-lessac-medium"
+
+    artifact_response = client.get(
+        payload["result"]["artifacts"]["wav"],
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert artifact_response.status_code == 200
+    assert artifact_response.content == b"RIFFspeech"
+
+
+@pytest.mark.django_db
+def test_synthesize_job_failure_records_error(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+
+    def fail_synthesis(text: str, params: object):
+        del text, params
+        raise RuntimeError("synthesis exploded")
+
+    monkeypatch.setattr("jobs.services.synthesize_text", fail_synthesis)
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_synthesis_payload()),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["state"] == "failed"
+    assert payload["error"]["message"] == "synthesis exploded"
+
+
+@pytest.mark.django_db
+def test_synthesize_job_rejects_out_of_range_speed(client):
+    payload = build_synthesis_payload()
+    payload["speed"] = 100
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "between 0.25 and 4.0" in response.json()["error"]["message"]

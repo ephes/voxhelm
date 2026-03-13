@@ -19,6 +19,19 @@ def env_bool(name: str, *, default: bool = False) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
+def env_map(name: str) -> dict[str, str]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    entries = (
+        entry.split("=", 1) for entry in raw.replace("\n", ",").split(",") if entry.strip()
+    )
+    return {
+        key.strip(): value.strip()
+        for key, value in entries
+    }
+
+
 def env_tokens(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -91,6 +104,9 @@ VOXHELM_WYOMING_STT_BACKEND = os.getenv("VOXHELM_WYOMING_STT_BACKEND", "").strip
 VOXHELM_WYOMING_STT_MODEL = os.getenv("VOXHELM_WYOMING_STT_MODEL", "").strip()
 VOXHELM_WYOMING_STT_LANGUAGE = os.getenv("VOXHELM_WYOMING_STT_LANGUAGE", "").strip()
 VOXHELM_WYOMING_STT_LANGUAGES = env_list("VOXHELM_WYOMING_STT_LANGUAGES")
+VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(
+    os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024")
+)
 VOXHELM_MAX_UPLOAD_BYTES = int(os.getenv("VOXHELM_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 VOXHELM_MAX_UPLOAD_MIB = VOXHELM_MAX_UPLOAD_BYTES // (1024 * 1024)
 VOXHELM_MAX_URL_DOWNLOAD_BYTES = int(
@@ -111,6 +127,20 @@ VOXHELM_ACCEPTED_MODELS = {
 VOXHELM_BATCH_ACCEPTED_MODELS = {
     "auto",
     *VOXHELM_ACCEPTED_MODELS,
+}
+VOXHELM_TTS_BACKEND = os.getenv("VOXHELM_TTS_BACKEND", "piper").strip()
+VOXHELM_PIPER_VOICE_DIR = Path(
+    os.getenv("VOXHELM_PIPER_VOICE_DIR", str(BASE_DIR / "var" / "piper"))
+)
+VOXHELM_PIPER_VOICES = env_list("VOXHELM_PIPER_VOICES")
+VOXHELM_PIPER_DEFAULT_VOICE = os.getenv("VOXHELM_PIPER_DEFAULT_VOICE", "").strip()
+VOXHELM_PIPER_LANGUAGE_VOICES = env_map("VOXHELM_PIPER_LANGUAGE_VOICES")
+VOXHELM_TTS_MAX_INPUT_CHARS = int(os.getenv("VOXHELM_TTS_MAX_INPUT_CHARS", "5000"))
+VOXHELM_ACCEPTED_SPEECH_MODELS = {
+    "auto",
+    "piper",
+    "tts-1",
+    "tts-1-hd",
 }
 VOXHELM_TASK_QUEUE = os.getenv("VOXHELM_TASK_QUEUE", "default")
 VOXHELM_FFMPEG_BIN = os.getenv("VOXHELM_FFMPEG_BIN", "ffmpeg")

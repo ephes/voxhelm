@@ -25,6 +25,11 @@ class DummyBackend:
         )
 
 
+class DummySpeechResult:
+    def __init__(self, audio_path: Path) -> None:
+        self.audio_path = audio_path
+
+
 def test_health_endpoint(client):
     response = client.get("/v1/health")
 
@@ -223,3 +228,69 @@ def test_upload_limit_is_enforced(client, settings):
     assert "25 MiB" in response.json()["error"]["message"] or "exceeded" in response.json()[
         "error"
     ]["message"]
+
+
+def test_speech_endpoint_requires_bearer_token(client):
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "authentication_error"
+
+
+def test_speech_endpoint_returns_audio(client, monkeypatch, tmp_path):
+    audio_path = tmp_path / "speech.wav"
+    audio_path.write_bytes(b"RIFFtest")
+
+    monkeypatch.setattr(
+        "synthesis.views.synthesize_text",
+        lambda text, params: DummySpeechResult(audio_path),
+    )
+    monkeypatch.setattr(
+        "synthesis.views.export_audio",
+        lambda result, output_format: type(
+            "ExportedAudio",
+            (),
+            {"path": result.audio_path, "format_name": output_format, "content_type": "audio/wav"},
+        )(),
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world", "response_format": "wav"}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "audio/wav"
+    assert response.content == b"RIFFtest"
+
+
+def test_speech_endpoint_rejects_oversized_input(client, settings):
+    settings.VOXHELM_TTS_MAX_INPUT_CHARS = 4
+
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world"}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "character limit" in response.json()["error"]["message"]
+
+
+def test_speech_endpoint_rejects_out_of_range_speed(client):
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world", "speed": 100}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "between 0.25 and 4.0" in response.json()["error"]["message"]
