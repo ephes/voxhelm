@@ -11,6 +11,7 @@ from transcriptions.service import (
     TranscriptionResult,
     TranscriptionSegment,
     get_backend_services_for_model,
+    normalize_interactive_transcript,
     normalize_whispercpp_payload,
     resolve_backend_name_for_model,
     resolve_whispercpp_binary,
@@ -191,6 +192,21 @@ def test_normalize_whispercpp_payload_builds_segments_and_language() -> None:
         TranscriptionSegment(id=0, start=1.25, end=2.5, text="Hallo"),
         TranscriptionSegment(id=1, start=2.5, end=3.75, text="Welt"),
     ]
+
+
+def test_normalize_interactive_transcript_strips_german_leading_fillers() -> None:
+    assert (
+        normalize_interactive_transcript(
+            "Okay, und wie ist denn die Temperatur im Wintergarten?",
+            language="de-DE",
+        )
+        == "wie ist die Temperatur im Wintergarten?"
+    )
+
+
+def test_normalize_interactive_transcript_preserves_unknown_or_empty_only_filler() -> None:
+    assert normalize_interactive_transcript("Okay.", language="de") == "Okay."
+    assert normalize_interactive_transcript("bonjour salon", language="fr") == "bonjour salon"
 
 
 def test_timestamp_to_seconds_accepts_dot_and_comma_formats() -> None:

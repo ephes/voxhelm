@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
+import wave
 from pathlib import Path
+from typing import Any, cast
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -28,6 +31,16 @@ class DummyBackend:
 class DummySpeechResult:
     def __init__(self, audio_path: Path) -> None:
         self.audio_path = audio_path
+
+
+def wav_bytes(*, frames: int = 320) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setframerate(16000)
+        wav_file.setsampwidth(2)
+        wav_file.setnchannels(1)
+        wav_file.writeframes(b"\x01\x00" * frames)
+    return buffer.getvalue()
 
 
 def test_health_endpoint(client):
@@ -58,6 +71,35 @@ def test_upload_transcription_returns_json(client, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"text": "Hello world"}
     assert backend.calls[0][1].prompt == "context"
+
+
+def test_upload_transcription_emits_debug_log(client, monkeypatch):
+    debug_calls: list[dict[str, object]] = []
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    monkeypatch.setattr(
+        "transcriptions.views.emit_transcription_debug_log",
+        lambda **kwargs: debug_calls.append(kwargs),
+    )
+    upload = SimpleUploadedFile("sample.wav", wav_bytes(), content_type="audio/wav")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisper-1", "language": "en"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert len(debug_calls) == 1
+    debug_payload = debug_calls[0]
+    audio_shape = cast(dict[str, Any], debug_payload["audio_shape"])
+    assert debug_payload["source"] == "http.audio_transcriptions"
+    assert debug_payload["request_model"] == "whisper-1"
+    assert debug_payload["request_language"] == "en"
+    assert debug_payload["prompt"] is None
+    assert "path" not in audio_shape
+    assert audio_shape["suffix"] == ".wav"
+    assert audio_shape["rate"] == 16000
+    assert audio_shape["channels"] == 1
 
 
 def test_text_response_format(client, monkeypatch):

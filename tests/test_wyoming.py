@@ -51,6 +51,7 @@ def test_get_wyoming_stt_config_uses_dedicated_defaults(settings) -> None:
     settings.VOXHELM_WYOMING_STT_MODEL = ""
     settings.VOXHELM_WYOMING_STT_LANGUAGE = "de"
     settings.VOXHELM_WYOMING_STT_LANGUAGES = ["de", "en"]
+    settings.VOXHELM_WYOMING_STT_PROMPT = "Home Assistant command"
 
     config = get_wyoming_stt_config()
 
@@ -58,6 +59,7 @@ def test_get_wyoming_stt_config_uses_dedicated_defaults(settings) -> None:
     assert config.model == "mlx-community/whisper-large-v3-mlx"
     assert config.language == "de"
     assert config.languages == ("de", "en")
+    assert config.prompt == "Home Assistant command"
 
 
 def test_build_wyoming_info_announces_model_and_languages() -> None:
@@ -69,6 +71,7 @@ def test_build_wyoming_info_announces_model_and_languages() -> None:
             model="ggml-large-v3.bin",
             language="de",
             languages=("de", "en"),
+            prompt=None,
         )
     )
 
@@ -88,6 +91,7 @@ def test_wyoming_handler_describe_returns_info() -> None:
         model="ggml-large-v3.bin",
         language="de",
         languages=("de",),
+        prompt=None,
     )
 
     async def run_flow() -> None:
@@ -115,6 +119,7 @@ def test_wyoming_handler_transcribes_audio(monkeypatch) -> None:
         model="ggml-large-v3.bin",
         language="de",
         languages=("de",),
+        prompt=None,
     )
     calls: list[tuple[Path, TranscribeParams]] = []
 
@@ -158,6 +163,131 @@ def test_wyoming_handler_transcribes_audio(monkeypatch) -> None:
     assert calls[0][1].language == "de"
 
 
+def test_wyoming_handler_emits_debug_log(monkeypatch) -> None:
+    writer = DummyWriter()
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="mlx",
+        model="mlx-community/whisper-large-v3-mlx",
+        language="en",
+        languages=("en",),
+        prompt="Home Assistant command",
+    )
+    debug_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "transcriptions.wyoming.transcribe_audio",
+        lambda audio_path, params: TranscriptionResult(
+            text="turn on the office light",
+            language="en",
+            segments=[],
+            backend_name="mlx-whisper",
+            model_name="mlx-community/whisper-large-v3-mlx",
+        ),
+    )
+    monkeypatch.setattr(
+        "transcriptions.wyoming.emit_transcription_debug_log",
+        lambda **kwargs: debug_calls.append(kwargs),
+    )
+
+    async def run_flow() -> None:
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+        )
+        await handler.handle_event(Transcribe(language="en").event())
+        await handler.handle_event(AudioStart(rate=8000, width=2, channels=2).event())
+        await handler.handle_event(
+            AudioChunk(
+                rate=8000,
+                width=2,
+                channels=2,
+                audio=b"\x01\x00\x01\x00" * 320,
+            ).event()
+        )
+        await handler.handle_event(AudioStop().event())
+
+    asyncio.run(run_flow())
+
+    assert len(debug_calls) == 1
+    debug_payload = debug_calls[0]
+    assert debug_payload["source"] == "wyoming"
+    assert debug_payload["request_model"] == "mlx-community/whisper-large-v3-mlx"
+    assert debug_payload["request_language"] == "en"
+    assert debug_payload["prompt"] == "Home Assistant command"
+    assert debug_payload["audio_shape"] == {
+        "input": {
+            "bytes": 1280,
+            "channels": 2,
+            "duration_seconds": 0.04,
+            "rate": 8000,
+            "width": 2,
+        },
+        "converted": {
+            "bytes": 1278,
+            "channels": 1,
+            "duration_seconds": 0.04,
+            "rate": 16000,
+            "width": 2,
+        },
+    }
+
+
+def test_wyoming_handler_normalizes_leading_fillers(monkeypatch, settings) -> None:
+    writer = DummyWriter()
+    settings.VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = True
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="mlx",
+        model="mlx-community/whisper-large-v3-mlx",
+        language="de",
+        languages=("de", "en"),
+        prompt=None,
+    )
+
+    monkeypatch.setattr(
+        "transcriptions.wyoming.transcribe_audio",
+        lambda audio_path, params: TranscriptionResult(
+            text="Okay wie ist denn die Temperatur im Wintergarten?",
+            language="de",
+            segments=[],
+            backend_name="mlx-whisper",
+            model_name="mlx-community/whisper-large-v3-mlx",
+        ),
+    )
+
+    async def run_flow() -> None:
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+        )
+        await handler.handle_event(Transcribe(language="de").event())
+        await handler.handle_event(AudioStart(rate=16000, width=2, channels=1).event())
+        await handler.handle_event(
+            AudioChunk(
+                rate=16000,
+                width=2,
+                channels=1,
+                audio=b"\x01\x00" * 320,
+            ).event()
+        )
+        await handler.handle_event(AudioStop().event())
+
+    asyncio.run(run_flow())
+
+    event = decode_single_event(writer)
+    assert event is not None
+    assert Transcript.is_type(event.type)
+    transcript = Transcript.from_event(event)
+    assert transcript.text == "wie ist die Temperatur im Wintergarten?"
+
+
 def test_wyoming_handler_returns_error_for_empty_audio() -> None:
     writer = DummyWriter()
     config = WyomingSttConfig(
@@ -167,6 +297,7 @@ def test_wyoming_handler_returns_error_for_empty_audio() -> None:
         model="ggml-large-v3.bin",
         language=None,
         languages=("en",),
+        prompt=None,
     )
 
     async def run_flow() -> None:
@@ -195,6 +326,7 @@ def test_wyoming_handler_synthesizes_audio(monkeypatch, tmp_path: Path) -> None:
         model="ggml-large-v3.bin",
         language="en",
         languages=("en",),
+        prompt=None,
     )
     speech_path = tmp_path / "speech.wav"
     with wave.open(str(speech_path), "wb") as wav_file:
@@ -247,6 +379,7 @@ def test_wyoming_handler_cleans_up_audio_after_synthesis_write_failure(
         model="ggml-large-v3.bin",
         language="en",
         languages=("en",),
+        prompt=None,
     )
     speech_path = tmp_path / "speech.wav"
     speech_path.write_bytes(b"RIFFboom")

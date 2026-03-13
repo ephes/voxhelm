@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,23 @@ from typing import Any, Protocol
 from django.conf import settings
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
+LEADING_FILLER_WORDS = {
+    "de": ("okay", "ok", "und", "also", "äh", "ah", "hm", "hmm"),
+    "en": ("okay", "ok", "and", "so", "well"),
+}
+LEADING_FILLER_PATTERNS = {
+    language: re.compile(
+        r"^(?:"
+        + "|".join(re.escape(word) for word in words)
+        + r")(?:[\s,.;:!?\-…]+|$)",
+        re.IGNORECASE,
+    )
+    for language, words in LEADING_FILLER_WORDS.items()
+}
+GERMAN_DISCOURSE_PARTICLE_PATTERN = re.compile(
+    r"^(?P<prefix>(?:wie|was)\s+ist)\s+(?P<particle>denn|eigentlich|mal)\s+",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +77,36 @@ class BackendUnavailableError(RuntimeError):
 
 class BackendProtocol(Protocol):
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult: ...
+
+
+def normalize_interactive_transcript(text: str, *, language: str | None) -> str:
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return normalized
+
+    language_key = normalize_language_code(language)
+    pattern = LEADING_FILLER_PATTERNS.get(language_key)
+    if pattern is None:
+        return normalized
+
+    candidate = normalized
+    while True:
+        stripped = pattern.sub("", candidate, count=1).lstrip(" ,.;:!?-…")
+        if not stripped or stripped == candidate:
+            candidate = normalized if not stripped else candidate
+            break
+        candidate = stripped
+
+    if language_key == "de":
+        candidate = GERMAN_DISCOURSE_PARTICLE_PATTERN.sub(r"\g<prefix> ", candidate)
+
+    return candidate
+
+
+def normalize_language_code(language: str | None) -> str:
+    if not language:
+        return ""
+    return language.strip().lower().replace("_", "-").split("-", 1)[0]
 
 
 class MlxWhisperBackend:

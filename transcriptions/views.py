@@ -4,6 +4,7 @@ import hmac
 import json
 import mimetypes
 import tempfile
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
+from .observability import emit_transcription_debug_log, summarize_audio_file
 from .service import (
     TranscribeParams,
     TranscriptionResult,
@@ -83,6 +85,7 @@ def audio_transcriptions(request: HttpRequest) -> HttpResponse:
         require_bearer_token(request)
         parsed_request = parse_transcription_request(request)
         temp_path = parsed_request.input_path
+        started_at = time.monotonic()
         result = transcribe_audio(
             parsed_request.input_path,
             TranscribeParams(
@@ -90,6 +93,15 @@ def audio_transcriptions(request: HttpRequest) -> HttpResponse:
                 prompt=parsed_request.prompt,
                 language=parsed_request.language,
             ),
+        )
+        emit_transcription_debug_log(
+            source="http.audio_transcriptions",
+            audio_shape=summarize_audio_file(parsed_request.input_path),
+            request_model=parsed_request.request_model,
+            request_language=parsed_request.language,
+            prompt=parsed_request.prompt,
+            result=result,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
         )
         return render_response(result=result, response_format=parsed_request.response_format)
     except ApiError as exc:

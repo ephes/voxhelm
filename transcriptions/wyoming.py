@@ -6,8 +6,9 @@ import logging
 import os
 import signal
 import tempfile
+import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from django.conf import settings
@@ -35,7 +36,13 @@ from synthesis.service import (
     synthesize_text,
 )
 
-from .service import TranscribeParams, resolve_model_name_for_backend, transcribe_audio
+from .observability import emit_transcription_debug_log
+from .service import (
+    TranscribeParams,
+    normalize_interactive_transcript,
+    resolve_model_name_for_backend,
+    transcribe_audio,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,10 +55,68 @@ class WyomingSttConfig:
     model: str
     language: str | None
     languages: tuple[str, ...]
+    prompt: str | None
 
     @property
     def uri(self) -> str:
         return f"tcp://{self.host}:{self.port}"
+
+
+@dataclass
+class WyomingAudioShape:
+    input_rate: int | None = None
+    input_width: int | None = None
+    input_channels: int | None = None
+    input_bytes: int = 0
+    converted_rate: int = 16000
+    converted_width: int = 2
+    converted_channels: int = 1
+    converted_bytes: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "converted": {
+                "bytes": self.converted_bytes,
+                "channels": self.converted_channels,
+                "duration_seconds": _audio_duration_seconds(
+                    byte_count=self.converted_bytes,
+                    rate=self.converted_rate,
+                    width=self.converted_width,
+                    channels=self.converted_channels,
+                ),
+                "rate": self.converted_rate,
+                "width": self.converted_width,
+            }
+        }
+        if self.input_rate is not None:
+            payload["input"] = {
+                "bytes": self.input_bytes,
+                "channels": self.input_channels,
+                "duration_seconds": _audio_duration_seconds(
+                    byte_count=self.input_bytes,
+                    rate=self.input_rate,
+                    width=self.input_width,
+                    channels=self.input_channels,
+                ),
+                "rate": self.input_rate,
+                "width": self.input_width,
+            }
+        return payload
+
+
+def _audio_duration_seconds(
+    *,
+    byte_count: int,
+    rate: int | None,
+    width: int | None,
+    channels: int | None,
+) -> float | None:
+    if not rate or not width or not channels:
+        return None
+    bytes_per_second = rate * width * channels
+    if bytes_per_second <= 0:
+        return None
+    return round(byte_count / bytes_per_second, 3)
 
 
 def get_wyoming_stt_config() -> WyomingSttConfig:
@@ -71,6 +136,7 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         model=model,
         language=language,
         languages=languages,
+        prompt=settings.VOXHELM_WYOMING_STT_PROMPT or None,
     )
 
 
@@ -151,6 +217,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
         self.audio_converter = AudioChunkConverter(rate=16000, width=2, channels=1)
         self.request_model = config.model
         self.request_language = config.language
+        self.audio_shape = WyomingAudioShape()
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
@@ -190,14 +257,24 @@ class WyomingSttEventHandler(AsyncEventHandler):
             self.request_model = (transcribe.name or self.config.model).strip()
             self.request_language = transcribe.language or self.config.language
             self.audio_buffer = io.BytesIO()
+            self.audio_shape = WyomingAudioShape()
             return True
 
         if AudioStart.is_type(event.type):
+            start = AudioStart.from_event(event)
+            self.audio_shape = WyomingAudioShape(
+                input_rate=start.rate,
+                input_width=start.width,
+                input_channels=start.channels,
+            )
             self.audio_buffer = io.BytesIO()
             return True
 
         if AudioChunk.is_type(event.type):
-            chunk = self.audio_converter.convert(AudioChunk.from_event(event))
+            raw_chunk = AudioChunk.from_event(event)
+            self.audio_shape.input_bytes += len(raw_chunk.audio)
+            chunk = self.audio_converter.convert(raw_chunk)
+            self.audio_shape.converted_bytes += len(chunk.audio)
             self.audio_buffer.write(chunk.audio)
             return True
 
@@ -209,17 +286,41 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 return False
 
             try:
+                started_at = time.monotonic()
                 result = await asyncio.to_thread(
                     self._transcribe_current_audio,
                     self.audio_buffer.getvalue(),
                 )
+                raw_transcript = result.text
+                if settings.VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT:
+                    normalized_text = normalize_interactive_transcript(
+                        result.text,
+                        language=result.language or self.request_language,
+                    )
+                    if normalized_text and normalized_text != result.text:
+                        result = replace(result, text=normalized_text)
             except Exception as exc:
-                _LOGGER.exception("Wyoming STT transcription failed")
+                _LOGGER.exception(
+                    "Wyoming STT transcription failed model=%s language=%s audio=%s",
+                    self.request_model,
+                    self.request_language or "auto",
+                    self.audio_shape.as_dict(),
+                )
                 await self.write_event(
                     Error(text=str(exc), code="transcription_failed").event()
                 )
                 return False
 
+            emit_transcription_debug_log(
+                source="wyoming",
+                audio_shape=self.audio_shape.as_dict(),
+                request_model=self.request_model,
+                request_language=self.request_language,
+                prompt=self.config.prompt,
+                result=result,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                raw_transcript=raw_transcript,
+            )
             await self.write_event(
                 Transcript(
                     text=result.text,
@@ -244,7 +345,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 temp_path,
                 TranscribeParams(
                     request_model=self.request_model,
-                    prompt=None,
+                    prompt=self.config.prompt,
                     language=self.request_language,
                 ),
             )

@@ -33,13 +33,15 @@ export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
 export VOXHELM_WHISPERCPP_MODEL="ggml-large-v3.bin"
 export VOXHELM_WHISPERCPP_BIN="/opt/homebrew/bin/whisper-cli"
 export VOXHELM_WHISPERCPP_PROCESSORS="4"
+export VOXHELM_STT_DEBUG_LOGGING="false"
 export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
 export VOXHELM_WYOMING_STT_HOST="0.0.0.0"
 export VOXHELM_WYOMING_STT_PORT="10300"
-export VOXHELM_WYOMING_STT_BACKEND=""
+export VOXHELM_WYOMING_STT_BACKEND="mlx"
 export VOXHELM_WYOMING_STT_MODEL=""
 export VOXHELM_WYOMING_STT_LANGUAGE=""
 export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
+export VOXHELM_WYOMING_STT_PROMPT=""
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 ```
@@ -73,8 +75,15 @@ uv run voxhelm-wyoming-stt
 ```
 
 The sidecar reuses Voxhelm's existing STT backend layer. If
-`VOXHELM_WYOMING_STT_BACKEND` and `VOXHELM_WYOMING_STT_MODEL` are unset, it
-falls back to the service-wide backend defaults.
+`VOXHELM_WYOMING_STT_MODEL` is unset, the sidecar uses the default model for
+the configured Wyoming backend. The recommended interactive default is
+`VOXHELM_WYOMING_STT_BACKEND=mlx`, which avoids the short-command silence
+hallucinations seen with the current `whisper.cpp` setup on `studio`.
+
+Set `VOXHELM_STT_DEBUG_LOGGING=true` when tuning the HA path. Voxhelm will emit
+one structured `stt_debug` log line per transcription with the input audio
+shape, requested and resolved backend/model/language, transcript preview, and
+latency.
 
 Current limitation: there is no cross-process lane scheduler yet. The Wyoming
 sidecar runs in its own process, but it can still contend with the HTTP API and
