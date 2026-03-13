@@ -2,13 +2,13 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C12, C14, C15, and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13; C13 lane scheduling, Archive article-audio follow-on, and C17/OpenClaw remain draft
+**Status:** C1-C15 and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13. Archive article-audio follow-on work and C17/OpenClaw remain draft.
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C14, C15
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15
 - Implemented at the Voxhelm service/runtime layer: C16
-- Not implemented yet: C13, Archive article-audio consumer follow-on, C17
+- Not implemented yet: Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -736,6 +736,8 @@ Current completion state:
 
 ### C13 -- Interactive Lane Scheduling
 
+**Implementation note (2026-03-13):** Delivered as the reviewed first slice. Voxhelm now uses one host-local cooperative scheduler across the HTTP API, Django Tasks worker, and Wyoming sidecar on `studio`, with Wyoming STT/TTS treated as `interactive` and all other local inference treated as internal `non-interactive` work.
+
 **Purpose:** Ensure that interactive voice requests (from Wyoming/HA) are not blocked by long-running batch transcription jobs.
 
 **Included scope:**
@@ -793,7 +795,7 @@ Current completion state:
 - File-lock or state-file recovery bugs could leave the scheduler wedged after process crashes. Mitigate with a stale-lock timeout and explicit test coverage for recovery paths.
 - Folding sync HTTP requests into the non-interactive lane may increase their tail latency during heavy HA usage. This is acceptable in the first slice because the primary user-facing goal is protecting Assist responsiveness.
 
-**Suggested implementation order:** This is now the next concrete implementation step.
+**Suggested implementation order:** Delivered. Remaining follow-on work, if needed, is stronger isolation or operator visibility beyond this first slice.
 
 ---
 
@@ -808,7 +810,7 @@ Current completion state:
 - Deploy Wyoming STT on `studio` (extend C11 deployment role)
 - Configure Home Assistant to use the Voxhelm Wyoming STT provider
 - Validate at least one real Assist turn through Home Assistant using Voxhelm STT
-- Document HA configuration (which Wyoming server to add, how to select it in Assist pipelines, and the current remaining no-scheduler limitation)
+- Document HA configuration (which Wyoming server to add, how to select it in Assist pipelines, and the remaining non-preemptive first-slice limitation)
 - Validate latency and reliability under normal conditions
 
 **Explicitly excluded scope:**
@@ -832,14 +834,14 @@ Current completion state:
 - The preferred Assist pipeline uses Voxhelm STT
 - At least one Assist turn succeeds end-to-end through the Home Assistant Assist pipeline using Voxhelm STT
 - Voice interactions complete within acceptable latency for STT-only validation
-- Operator docs accurately describe the live STT/TTS shape and the remaining no-scheduler limitation
+- Operator docs accurately describe the live STT/TTS shape and the remaining non-preemptive first-slice limitation
 
 **Main risks:**
 
 - HA pipeline quirks or version-specific requirements. Mitigate by testing against current HA version.
 - Network latency between HA (macmini) and Voxhelm (`studio`) over Tailscale.
 
-**Suggested implementation order:** Delivered. C13 remains the follow-on hardening step.
+**Suggested implementation order:** Delivered. Follow-on hardening, if needed, is now beyond the first delivered C13 slice.
 
 ---
 
@@ -1022,7 +1024,7 @@ C1/C6 ──> C11 (Deployment)
 ```
 S2 + C5 ──> C12 (Wyoming Adapter)
 C12 + C3 ──> C13 (Interactive Scheduling)
-C12 + C13 + C11 ──> C14 (HA Integration)
+C12 + C11 ──> C14 (HA Integration)
 ```
 
 ### M3-M4: TTS and Later

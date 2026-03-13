@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13; remaining planned work is C13 lane scheduling, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw
+**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -35,7 +35,7 @@ Implemented today:
 
 Not implemented yet:
 
-- interactive lane scheduling / capacity reservation between batch and Wyoming traffic
+- stronger runtime isolation beyond the first C13 slice (for example a dedicated interactive worker/host, preemption, or richer operator status surfaces)
 - additional STT backends beyond the current `whisper.cpp` and `mlx-whisper` set
 - Archive article-to-audio consumer integration
 - OpenClaw integration
@@ -262,7 +262,7 @@ Still pending:
 
 **Title:** Wyoming voice for Home Assistant
 
-**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a Wyoming STT/TTS sidecar on `studio`, and the Home Assistant deploy/config path provisions Wyoming plus declarative Assist pipelines. The remaining gap from the original M2 plan is C13 lane scheduling: the current deployment works, but it still shares host resources with the HTTP API and batch worker.
+**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a Wyoming STT/TTS sidecar on `studio`, the Home Assistant deploy/config path provisions Wyoming plus declarative Assist pipelines, and the reviewed first C13 lane-scheduling slice is live on the same host.
 
 ### What ships
 
@@ -270,14 +270,14 @@ Still pending:
 - Home Assistant integration that provisions the Wyoming provider and selects it in the Assist pipeline
 - Declarative multi-pipeline Assist configuration and preferred-pipeline selection
 - Area-registry alias and canonical-sensor updates for Assist-friendly room resolution
-- Interactive execution lane only if real HA use proves that batch work causes unacceptable contention
+- Host-wide cooperative lane scheduling so Wyoming requests get admission priority over queued non-interactive work on `studio`
 - Low-latency STT backend configuration (possibly a smaller/faster model for interactive use)
 - Deployment runbook for connecting Home Assistant to Voxhelm Wyoming endpoints
 - ops-library role for Wyoming companion processes (launchd services on `studio`)
 
 ### What is deferred
 
-- Interactive lane scheduling beyond the reviewed first slice:
+- Runtime isolation beyond the delivered first C13 slice:
   - no second worker pool or separate interactive host yet
   - no preemption of already-running batch/HTTP inference
   - no `GET /v1/status` operator endpoint yet
@@ -297,7 +297,7 @@ Still pending:
 
 - Home Assistant Assist pipeline uses `studio` for STT and TTS
 - At least one Assist turn succeeds end-to-end through the real Home Assistant Assist pipeline using Voxhelm
-- The reviewed C13 next slice is explicit: keep the same three-process runtime on `studio`, add a host-wide cooperative inference gate, and give Wyoming requests priority over queued HTTP/batch work
+- The first C13 slice is live: `studio` keeps the same three-process runtime, uses a host-wide cooperative inference gate, and gives Wyoming requests priority over queued HTTP/batch work
 - Operator docs accurately describe the live voice setup and the default-off debug-logging guidance
 
 ### Key risks
@@ -395,4 +395,4 @@ Still pending:
 
 **Critical observation:** M1a is the fastest path to production value. A single developer should target M1a as the first deliverable, which could be usable within 2 weeks of starting (including spikes). The full PRD Milestone 1 has been split into M1a/M1b/M1c to keep each increment deployable and testable.
 
-**Parallelization note:** The original M2 and M3 plan was executed as intended: Wyoming voice and then shared Piper/TTS were added without changing the producer-facing HTTP contracts. The next concrete implementation step is C13 lane scheduling so the live voice path remains responsive under mixed load.
+**Parallelization note:** The original M2 and M3 plan was executed as intended: Wyoming voice and then shared Piper/TTS were added without changing the producer-facing HTTP contracts. The first C13 slice is now live; any further follow-on work is stronger isolation or richer operator visibility beyond that slice.

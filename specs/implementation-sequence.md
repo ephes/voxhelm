@@ -1,7 +1,7 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13; remaining planned work is C13 lane scheduling, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw
+**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
@@ -12,15 +12,15 @@ Current implementation checkpoint:
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Batch jobs, MinIO-backed artifacts, video extraction, artifact proxy download, synchronous speech generation, and batch `synthesize` jobs are live.
 - Home Assistant is wired to Voxhelm STT/TTS through Wyoming and declarative Assist pipelines.
-- The remaining implementation gap with direct user impact is C13 lane scheduling so Wyoming traffic stays responsive under mixed batch load.
+- The first C13 lane-scheduling slice is live, so Wyoming traffic now gets cooperative admission priority over queued non-interactive work on `studio`.
 
 ## Execution Order Overview
 
 ```
-Completed as of 2026-03-13                          Remaining draft phases
+Completed as of 2026-03-13                                   Remaining draft phases
 ──────────────────────────────────────────────────── ───────────────────────────────────────
-[M1a: sync API] [M1b: jobs+minio] [M1c: consumers] [M2: Wyoming voice] [M3: shared TTS]
-[deploy + live verification]                        [C13: lane scheduling] [M4: OpenClaw]
+[M1a: sync API] [M1b: jobs+minio] [M1c: consumers] [M2: Wyoming voice] [C13: lane scheduling]
+[M3: shared TTS] [deploy + live verification]      [M4: OpenClaw]
 ```
 
 ---
@@ -272,7 +272,7 @@ Before declaring M1 complete:
 
 ## Phase 2: Wyoming / Home Assistant Voice (Days 20-30)
 
-**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a shared Wyoming STT/TTS sidecar on `studio`, and Home Assistant is wired to it through the deploy layer. The remaining follow-on from the original Phase 2 plan is C13 lane scheduling.
+**Implementation note (2026-03-13):** Delivered. Voxhelm now runs a shared Wyoming STT/TTS sidecar on `studio`, Home Assistant is wired to it through the deploy layer, and the reviewed first C13 slice is live on `studio`.
 
 ### Implementation sequence
 
@@ -283,7 +283,7 @@ Before declaring M1 complete:
    - Launchd plist for Wyoming STT service
    - Configure port binding
 
-2. **Interactive lane scheduling** (day 22-24)
+2. **Interactive lane scheduling** (day 22-24, delivered 2026-03-13)
    - Keep the current three-process runtime on `studio`: HTTP API, Django Tasks worker, Wyoming sidecar
    - Add one host-wide scheduler state/lock directory on local disk
    - Treat Wyoming STT/TTS as the only interactive lane in this first slice
@@ -310,9 +310,9 @@ Before declaring M1 complete:
 
 - [x] Voice command through HA device works end-to-end for STT
 - [x] The Assist pipeline can use Voxhelm for TTS as well
-- [ ] Under mixed load, a new Wyoming turn is admitted ahead of queued HTTP/batch work when no earlier inference is already running
-- [ ] Logs and black-box verification make the lane handoff behavior defensible without requiring `/v1/status`
-- [ ] Batch transcription jobs are not noticeably degraded during voice use, or remaining degradation is explicitly attributed to the non-preemptive first-slice design
+- [x] Under mixed load, a new Wyoming turn is admitted ahead of queued HTTP/batch work when no earlier inference is already running
+- [x] Logs and black-box verification make the lane handoff behavior defensible without requiring `/v1/status`
+- [x] Batch transcription jobs are not noticeably degraded during voice use, or remaining degradation is explicitly attributed to the non-preemptive first-slice design
 
 ---
 

@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; M1-M3 core runtime slices are implemented as of 2026-03-13, with C13 lane scheduling and M4/OpenClaw still planned
+**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, are implemented as of 2026-03-13. Later backend expansion, Archive article-audio follow-on work, and M4/OpenClaw remain planned.
 
 ---
 
