@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C16 and C18 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts. C19, C20, Archive article-audio consumer work, and C17/OpenClaw remain draft.
+**Status:** C1-C16, C18, and C19 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts and the follow-on async Wagtail transcript-completion slice. C20, Archive article-audio consumer work, and C17/OpenClaw remain draft.
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18
-- Not implemented yet: C19, C20, Archive article-audio consumer follow-on, C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18, C19
+- Not implemented yet: C20, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -638,6 +638,8 @@ Current completion state:
 
 ### C19 -- Async Wagtail Transcript Completion
 
+**Implementation note (2026-03-14):** Delivered. `django-cast` now uses a narrow consumer-local `TranscriptGeneration` status model plus `django-tasks` database-backed background completion. Wagtail Episode and Audio transcript actions return after Voxhelm job submission / local enqueue, editors see queued/running/succeeded/failed status on those same admin surfaces, the background task polls Voxhelm and persists `podlove` / `dote` / `vtt` onto the existing `Transcript` model, duplicate clicks remain bounded by the stable per-audio `task_ref`, and the Audio edit-view action now posts through a dedicated form that returns cleanly to a usable edit surface.
+
 **Purpose:** Remove the long-lived blocking admin POST from the `python-podcast` / `django-cast` transcript workflow so editors can start transcript generation from Wagtail without waiting on the full Voxhelm job inside one browser request.
 
 **Included scope:**
@@ -687,7 +689,11 @@ Current completion state:
 - Status UX can sprawl if this turns into a generic job system instead of a narrow transcript workflow
 - The current Audio edit-view action path may hide a separate admin integration bug, so the follow-on should verify UI behavior on both Episode and Audio surfaces instead of treating them as interchangeable
 
-**Suggested implementation order:** Next consumer follow-on after the current shipped Wagtail flow; decide the execution substrate at implementation time instead of freezing it prematurely in the backlog.
+**Chosen execution substrate:** `django-tasks` with the database backend on the consumer side.
+
+**Why this fit the delivered slice:** it was already present in the consumer stack, provided a small persistent queue/worker path without designing a broader job framework, and kept the implementation scoped to transcript completion rather than inventing generic background-job abstractions in `django-cast`.
+
+**Suggested implementation order:** Delivered.
 
 ---
 

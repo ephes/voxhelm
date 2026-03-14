@@ -447,6 +447,8 @@ The follow-on slice should be defined as:
 
 ## D-21: How should python-podcast / django-cast make Wagtail transcript generation non-blocking?
 
+**Implementation note (2026-03-14):** Delivered. The consumer chose option A in a narrow form: `django-cast` / `python-podcast` now use `django-tasks` with the database backend for transcript completion only. Wagtail Episode and Audio transcript actions submit to Voxhelm, persist a local one-to-one `TranscriptGeneration` status record on `Audio`, enqueue background completion, and return editors immediately to a usable admin surface. The background task polls Voxhelm, downloads `podlove` / `dote` / `vtt`, persists them onto the existing `Transcript` model, and updates local queued/running/succeeded/failed state. The Audio edit-view hardening follow-on is part of the same delivered slice: transcript generation now uses a dedicated POST form rather than piggybacking on the main audio edit form.
+
 **Context:** The current Wagtail `Generate transcript` action in `python-podcast` / `django-cast` still waits inside one admin POST while Voxhelm transcribes, polls, downloads artifacts, and persists the `Transcript`. That is tolerable for short jobs, but it is poor editor UX for longer episodes and can lose to request timeouts even when Voxhelm itself finishes correctly. Staging validation also showed that the Audio edit-view action/refresh path needs hardening: after transcript generation, the Wagtail admin UI can render in a broken state instead of returning cleanly to a usable editor surface.
 
 **Options:**
@@ -459,6 +461,8 @@ The follow-on slice should be defined as:
 
 **Recommended default:** treat this as the next consumer follow-on and keep the execution substrate open until implementation. The spec should require bounded background completion plus editor-visible status/results, but should not prematurely force either `django-tasks` or Django's built-in task mechanism before the consumer repo chooses the better fit.
 
+**Chosen implementation shape:** a narrow `django-tasks` database-backed worker path plus a consumer-local `TranscriptGeneration` record holding per-audio queued/running/succeeded/failed status, Voxhelm job linkage, and last error for editor-visible feedback. This stayed inside the transcript workflow and did not broaden into a generic job framework.
+
 **Minimum shape for the follow-on:**
 
 - Wagtail transcript generation returns quickly after enqueue/submission instead of holding the browser open for the full transcription duration
@@ -468,7 +472,7 @@ The follow-on slice should be defined as:
 - retries and duplicate submissions remain bounded and coherent with Voxhelm `task_ref`
 - the management command remains optional operator tooling, not the editor-facing solution
 
-**Blocks implementation:** No -- this is a backlog/prioritization decision for the next consumer UX slice, not a prerequisite for the current shipped workflow.
+**Blocks implementation:** No -- delivered on 2026-03-14.
 
 ---
 
