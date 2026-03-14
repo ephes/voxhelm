@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C16 and C18 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts. Archive article-audio consumer work and C17/OpenClaw remain draft.
+**Status:** C1-C16 and C18 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts. C19, C20, Archive article-audio consumer work, and C17/OpenClaw remain draft.
 
 Current completion state:
 
 - Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18
-- Not implemented yet: Archive article-audio consumer follow-on, C17
+- Not implemented yet: C19, C20, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -34,6 +34,8 @@ Current completion state:
 | C15 | TTS backend adapter layer (Piper) | M3 | C1 |
 | C16 | Batch TTS jobs | M3 | C15, C3, C4 |
 | C18 | Operator transcript UI + shared transcript outputs | Post-M3 follow-on | C6, C7, C10, C11 |
+| C19 | Async Wagtail transcript completion | Consumer follow-on | C10, C18 |
+| C20 | Large-media batch input + service-owned chunking | Core media follow-on | C6, C7 |
 | C17 | OpenClaw integration | M4 | C7 |
 
 ---
@@ -631,6 +633,118 @@ Current completion state:
 - Storing a Voxhelm token in Wagtail-admin-managed configuration requires careful permissions and auditability.
 
 **Suggested implementation order:** After C6 and C7 are working. This is a lower-priority M1 chunk that can slide to early M2 if needed.
+
+---
+
+### C19 -- Async Wagtail Transcript Completion
+
+**Purpose:** Remove the long-lived blocking admin POST from the `python-podcast` / `django-cast` transcript workflow so editors can start transcript generation from Wagtail without waiting on the full Voxhelm job inside one browser request.
+
+**Included scope:**
+
+- A consumer-side background completion path for Wagtail-triggered transcript generation that:
+  1. returns control to the editor quickly after enqueue/submission
+  2. tracks queued/running/succeeded/failed state locally for editor-visible status
+  3. polls Voxhelm for completion outside the original browser request
+  4. downloads `podlove`, `dote`, and `vtt` artifacts and updates the existing `Transcript` model
+- Wagtail-admin feedback/status surfaces so editors can see whether transcript generation is still running, succeeded, or failed
+- A cleanup/fix of the current Audio edit-view action UX so transcript generation does not leave the Wagtail form in a broken or partially rendered state after submission/completion
+- Idempotent/duplicate-safe behavior aligned with the existing Voxhelm `task_ref` contract
+- An implementation decision on the execution substrate:
+  - `django-tasks` or an equivalent app-level task runner, or
+  - Django's built-in task primitives if the consumer stack/runtime fit is good enough
+
+**Explicitly excluded scope:**
+
+- Changes to the Voxhelm producer-facing batch API
+- Redesigning the `Transcript` model schema
+- General-purpose job dashboards beyond the transcript workflow
+- Automatic transcript generation triggers on upload/publish
+
+**Dependencies:** C10 (current Wagtail workflow), C18 (shared server-owned transcript artifacts and operator-facing precedent)
+
+**Consumer(s):** `python-podcast` / `django-cast` Wagtail editors
+
+**Primary interfaces:**
+
+- Wagtail admin Episode/Audio transcript actions
+- Existing Voxhelm batch job API
+- A new consumer-local async execution mechanism still to be chosen
+
+**Acceptance criteria:**
+
+- Starting transcript generation from Wagtail no longer keeps the admin browser request open for the full transcription duration
+- The transcript action returns editors to a usable Wagtail surface on both Episode and Audio edit views; it does not leave the Audio form in a broken state after transcript generation
+- Editors can see a meaningful queued/running/completed/failed state after submission
+- Long-running transcripts complete successfully even when they outlive the old request timeout budget
+- Artifact persistence semantics stay unchanged: the existing `Transcript` model still ends up with valid `podlove`, `dote`, and `vtt` files
+- Duplicate editor clicks do not create incoherent local state or unnecessary duplicate Voxhelm work
+
+**Main risks:**
+
+- Adding a consumer-side async runner may be more operational surface than desired if the wrong substrate is chosen
+- Django version/runtime details may make the built-in task path more or less attractive than a separate dependency such as `django-tasks`
+- Status UX can sprawl if this turns into a generic job system instead of a narrow transcript workflow
+- The current Audio edit-view action path may hide a separate admin integration bug, so the follow-on should verify UI behavior on both Episode and Audio surfaces instead of treating them as interchangeable
+
+**Suggested implementation order:** Next consumer follow-on after the current shipped Wagtail flow; decide the execution substrate at implementation time instead of freezing it prematurely in the backlog.
+
+---
+
+### C20 -- Large-Media Batch Input + Service-Owned Chunking
+
+**Purpose:** Let Voxhelm accept oversized/private/local transcription media through an explicit batch path so consumers do not need their own chunking, transcoding, or stitching logic just to get media past the sync upload ceiling.
+
+**Included scope:**
+
+- An explicit large-input contract for batch transcription, most likely one of:
+  - `input.kind=upload`, or
+  - a narrow staged-upload handle that resolves to local object storage before execution
+- Clear support statements for which batch inputs already work versus which ones are new in this slice:
+  - URL audio (already supported today; retained)
+  - URL video (already supported today via existing download + video-to-audio extraction)
+  - uploaded audio (new in C20)
+  - uploaded video (new in C20 unless implementation explicitly defers it)
+- Once media is local inside Voxhelm, a worker-owned processing path for:
+  1. media normalization
+  2. existing video-to-audio extraction when needed
+  3. chunking/transcoding for oversized media after local staging/extraction
+  4. per-chunk transcription
+  5. final transcript stitching into the canonical transcript outputs
+- Whole-job failure semantics for staging, extraction, chunking, backend, or stitching failures unless resumability is designed explicitly
+- Documentation that keeps the sync `/v1/audio/transcriptions` path framed as the small-file convenience contract
+
+**Explicitly excluded scope:**
+
+- Raising the sync upload ceiling as the primary solution
+- Archive-specific chunking logic
+- Redesigning unrelated auth, operator UI, or artifact proxying
+- Wyoming, TTS, or OpenClaw work
+
+**Dependencies:** C6 (worker-owned media handling and transcript artifacts), C7 (keep the sync contract stable)
+
+**Consumer(s):** Archive first, then any consumer with oversized/private/local media that cannot rely on public URLs
+
+**Primary interfaces:**
+
+- Existing batch job API with a new explicit large-input mode
+- Existing worker media pipeline after local staging
+
+**Acceptance criteria:**
+
+- The sync upload path still rejects oversized uploads at the existing ceiling
+- Voxhelm exposes a deliberate batch large-input contract instead of requiring consumer-side chunking
+- Oversized/private/local media can be staged into Voxhelm and transcribed without the consumer implementing chunk splitting
+- Voxhelm owns normalization, extraction, chunking/transcoding, and stitching once media is local
+- Failures in staging, extraction, chunking, backend execution, or stitching produce explicit whole-job failure rather than silent partial success
+
+**Main risks:**
+
+- Batch upload/staging broadens the media-input surface and needs clear size/retention/operator guidance
+- Chunk stitching quality can degrade if the split/rejoin strategy is underspecified
+- Supporting uploaded video in the same slice may be materially more work than uploaded audio; the implementation may need to defer one path explicitly
+
+**Suggested implementation order:** After the current shipped M1/M3/C18 runtime is stable in production and before any consumer implements its own large-media workaround.
 
 ---
 

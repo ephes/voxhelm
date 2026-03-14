@@ -81,7 +81,7 @@ Archive's enrichment worker (`run_metadata_worker.py`) is a management command t
 
 **Recommendation:** Option 1 for Milestone 1. It unblocks Archive integration immediately. The async batch API can be built alongside it for python-podcast and podcast-pipeline, which do not have existing API contracts to preserve.
 
-**25 MiB limit concern:** Archive downloads media and enforces a 25 MiB limit *before* sending to the API. Many podcast episodes exceed 25 MiB. This means Archive currently cannot transcribe long-form content. If Voxhelm accepts a URL reference instead of an uploaded file, this limit goes away on the Voxhelm side. But Archive's code would need modification to pass a URL instead of uploading bytes.
+**25 MiB limit concern:** Archive downloads media and enforces a 25 MiB limit *before* sending to the API. Many podcast episodes exceed 25 MiB. This means Archive currently cannot transcribe long-form content through the sync upload path. Passing a URL can avoid that for directly reachable remote media, but it does not solve private/local archived media. The correct long-term fix is an explicit Voxhelm batch large-input path so Voxhelm, not Archive, owns chunking/transcoding once media is local.
 
 ### 3.2 python-podcast / django-cast: greenfield integration, artifact format compatibility is the real requirement
 

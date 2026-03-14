@@ -91,6 +91,8 @@
 
 **Recommended default:** Option C. The sync endpoint should accept both `file` (multipart) and `url` (JSON field) inputs from the start. Archive can switch over immediately with file-upload compatibility, then move to URL-based submission to avoid redundant downloading and the upload-size limit.
 
+**Implementation note (2026-03-14):** The sync endpoint now accepts both multipart upload and JSON URL input as planned, but the large-media problem is not solved by that alone. Oversized/private/local media still needs an explicit batch large-input path so consumers do not have to invent chunking/transcoding around the 25 MiB sync ceiling.
+
 **Blocks implementation:** No.
 
 ---
@@ -440,6 +442,60 @@ The follow-on slice should be defined as:
 **django-cast recommendation:** keep the local `render_dote(...)` and `render_podlove(...)` code until the Voxhelm web flow and server-owned outputs are working, then do the `django-cast` simplification as the next follow-up in the same epic.
 
 **Blocks implementation:** No -- the runtime foundation already exists. This decision only gates the next follow-on planning slice.
+
+---
+
+## D-21: How should python-podcast / django-cast make Wagtail transcript generation non-blocking?
+
+**Context:** The current Wagtail `Generate transcript` action in `python-podcast` / `django-cast` still waits inside one admin POST while Voxhelm transcribes, polls, downloads artifacts, and persists the `Transcript`. That is tolerable for short jobs, but it is poor editor UX for longer episodes and can lose to request timeouts even when Voxhelm itself finishes correctly. Staging validation also showed that the Audio edit-view action/refresh path needs hardening: after transcript generation, the Wagtail admin UI can render in a broken state instead of returning cleanly to a usable editor surface.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Add `django-tasks` (or an equivalent app-level task runner) to `django-cast` / `python-podcast` | Reuses a known async pattern and gives explicit task records, but adds a new consumer-side dependency/runtime surface |
+| B. Use Django's newer built-in task primitives once the consumer stack/runtime fit is clear | Avoids committing to a third-party task dependency too early, but depends on framework/version fit and still needs concrete persistence/execution design |
+| C. Keep the current synchronous Wagtail action | No new consumer runtime, but editor UX remains poor and long transcripts stay exposed to request timeouts |
+
+**Recommended default:** treat this as the next consumer follow-on and keep the execution substrate open until implementation. The spec should require bounded background completion plus editor-visible status/results, but should not prematurely force either `django-tasks` or Django's built-in task mechanism before the consumer repo chooses the better fit.
+
+**Minimum shape for the follow-on:**
+
+- Wagtail transcript generation returns quickly after enqueue/submission instead of holding the browser open for the full transcription duration
+- the consumer persists enough local state to show queued/running/succeeded/failed status back to editors
+- the background path is responsible for polling Voxhelm, downloading artifacts, and updating the existing `Transcript` model
+- the Wagtail admin flow remains usable on both Episode and Audio edit views after submission/completion instead of leaving the editor on a broken or partially rendered form state
+- retries and duplicate submissions remain bounded and coherent with Voxhelm `task_ref`
+- the management command remains optional operator tooling, not the editor-facing solution
+
+**Blocks implementation:** No -- this is a backlog/prioritization decision for the next consumer UX slice, not a prerequisite for the current shipped workflow.
+
+---
+
+## D-22: How should Voxhelm handle oversized or private/local media without pushing chunking into consumers?
+
+**Context:** The sync OpenAI-compatible endpoint intentionally keeps its 25 MiB upload ceiling and remains the convenience path for smaller files. Batch transcription already owns media download, normalization, extraction, and execution once media is local, but the producer-facing contract is still URL-only. That leaves consumers with oversized private/local media tempted to implement their own chunking/transcoding or to expose public URLs just to reach Voxhelm.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Raise the sync upload limit | Smallest code change, but breaks the intended sync-small/batch-large boundary and still keeps long jobs inside one request |
+| B. Let each consumer chunk/transcode locally and keep Voxhelm URL-only | Avoids changing Voxhelm's API, but duplicates media-processing logic and creates long-term contract drift across consumers |
+| C. Add an explicit large-media batch input path in Voxhelm | Preserves the small sync API, keeps large/private/local media on a deliberate batch path, and centralizes chunking/transcoding/stitching once media is local |
+
+**Recommended default:** Option C.
+
+**Recommended shape:**
+
+- keep `POST /v1/audio/transcriptions` unchanged as the small-file convenience path
+- keep the current sync upload limit in place rather than silently broadening it
+- extend the batch contract with an explicit large-input path, most likely `input.kind=upload` and/or a staged-upload handle that resolves to local object storage before work starts
+- once media is local inside Voxhelm, the worker owns normalization, existing video-to-audio extraction where applicable, oversized-media chunking/transcoding, per-chunk transcription, and final transcript stitching
+- whole-job failure is preferred over silent partial success when a chunk fails unless a stronger resumability design is introduced deliberately later
+- the consumer contract should be reusable across Archive and future consumers, not Archive-specific
+
+**Blocks implementation:** No -- this is a backlog and contract decision for the next Voxhelm media-input follow-on.
 
 ---
 

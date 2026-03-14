@@ -1,7 +1,7 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is the consumer async transcript-completion follow-on, the large-media batch-input follow-on, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
@@ -17,10 +17,12 @@ Current implementation checkpoint:
 ## Execution Order Overview
 
 ```
-Completed as of 2026-03-13                                   Remaining draft phases
-──────────────────────────────────────────────────── ───────────────────────────────────────
-[M1a: sync API] [M1b: jobs+minio] [M1c: consumers] [M2: Wyoming voice] [C13: lane scheduling]
-[M3: shared TTS] [deploy + live verification]      [M4: OpenClaw]
+Completed as of 2026-03-14:
+[M1a: sync API] [M1b: jobs+minio] [M1c: consumers] [M2: Wyoming voice] [C13: lane scheduling] [M3: shared TTS]
+[deploy + live verification]
+
+Remaining draft phases:
+[C19: async Wagtail completion] [C20: large-media batch input] [M4: OpenClaw]
 ```
 
 ---
@@ -423,7 +425,9 @@ M1a (sync endpoint) -> M1b (jobs) -> M1c (consumers)
           └-> M2 (Wyoming STT) -┴----> M3 (shared Piper TTS + batch)
 
 M1c (consumers) ---------------------------------> post-M3 follow-on (operator transcript UI + shared outputs)
-                                                   (scheduled after M3, but not technically blocked by it)
+          \                                        (scheduled after M3, but not technically blocked by it)
+           \-------------------------------------> consumer async transcript-completion follow-on
+M1b/C6 media pipeline --------------------------> large-media batch-input follow-on
 ```
 
 The critical path to first production value is:
@@ -452,6 +456,8 @@ Everything else can follow incrementally.
 | M2: Wyoming STT | M1a + Spike 0c | M1b, M1c |
 | M3: Shared TTS | M1b + M2 STT path | M1c |
 | Post-M3 operator transcript follow-on | M1a + M1b + M1c | M2, M3, M4 |
+| Consumer async transcript-completion follow-on | M1c | M2, M3, M4 |
+| Large-media batch-input follow-on | M1b + C6 + C7 | M2, M3, M4 |
 | M4: OpenClaw | M1a + M3 | M1c, post-M3 operator transcript follow-on |
 
 ---
@@ -464,3 +470,5 @@ Everything else can follow incrementally.
 4. Start M2 once M1a is stable; verify Wyoming STT and the Home Assistant Assist STT path first.
 5. Start M3 after M1b and the M2 STT path are stable; implement Piper once on `studio`, reuse it for Wyoming TTS, then verify batch synthesize jobs before wiring Archive article-audio usage.
 6. Deliver the post-M3 operator transcript follow-on before M4: finish the shared `dote`/`podlove` batch outputs, add the session-authenticated Voxhelm UI, then add the Homelab tile as a metadata-only companion step. This slice is technically unblocked after M1c; it is simply sequenced after M3 in the current plan.
+7. Deliver the consumer async transcript-completion follow-on after the current Wagtail workflow is proven in production: keep the scope narrow to editor-facing enqueue/status/artifact persistence, and decide the execution substrate (`django-tasks` versus Django's built-in task path) at implementation time.
+8. Deliver the large-media batch-input follow-on before any consumer adds its own chunking workaround: keep sync uploads capped, add an explicit batch large-input contract, and centralize chunking/transcoding/stitching inside Voxhelm once media is local.

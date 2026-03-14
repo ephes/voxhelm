@@ -178,9 +178,9 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 **Job types (later):** `extract_audio`, `analyze_media`, `diarize`
 
 **Input kinds (current M1b):** `url`
-**Input kinds (later):** `upload`, `minio_ref`
+**Input kinds (planned follow-ons):** `upload`, `minio_ref`
 
-The shipped operator UI intentionally stays within this current boundary: batch transcription remains URL-driven in the first slice, so uploaded-video async and other large-upload batch flows stay deferred until `input.kind=upload` exists in the job contract.
+The shipped operator UI intentionally stays within this current boundary: batch transcription remains URL-driven in the first slice, so uploaded-video async and other large-upload batch flows stay deferred until `input.kind=upload` exists in the job contract. The next large-media follow-on is expected to add an explicit batch large-input path so private/local oversized media can be handed to Voxhelm without pushing chunking/transcoding into each consumer.
 
 **Output formats for `transcribe`:**
 
@@ -260,7 +260,7 @@ The current implementation also persists the linked Django task/result identifie
 
 **Future-compatible option:** if Voxhelm later needs remote workers or stricter process isolation beyond the current Django Tasks setup, it can add more explicit worker coordination without changing the producer-facing batch API.
 
-**Primary direct consumers:** python-podcast / django-cast and future integrations that need long-running or URL-based processing.
+**Primary direct consumers:** python-podcast / django-cast and future integrations that need long-running processing, including the current URL-based batch path and the planned large-input follow-on.
 
 **Indirect or non-batch consumers:** Archive uses the synchronous STT endpoint; podcast-pipeline reaches Voxhelm indirectly through podcast-transcript.
 

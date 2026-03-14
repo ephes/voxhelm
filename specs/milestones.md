@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is an async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, a large-media batch-input follow-on for oversized/private media, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -37,6 +37,7 @@ Implemented today:
 Not implemented yet:
 
 - stronger runtime isolation beyond the first C13 slice (for example a dedicated interactive worker/host, preemption, or richer operator status surfaces)
+- explicit large-media batch input for oversized/private/local transcription sources; batch is still URL-only today
 - backend follow-on work beyond the current `whisper.cpp` and `mlx-whisper` set plus the experimental non-default WhisperKit path
 - Archive article-to-audio consumer integration
 - OpenClaw integration
@@ -210,6 +211,7 @@ Completed on 2026-03-12:
 - SQLite WAL mode contention if the sync endpoint (M1a) and Django Tasks workers both write simultaneously (mitigation: keep writes minimal, use `PRAGMA busy_timeout`)
 - MinIO connectivity from `studio` (mitigation: test MinIO access early, during M1a deployment)
 - Unnecessary custom worker orchestration could add complexity without solving a real v1 problem (mitigation: start with stock Django Tasks database backend plus launchd supervision)
+- Batch transcription is still URL-only, which leaves oversized private/local consumer media without a reusable Voxhelm handoff path. The next follow-on should add an explicit large-input contract instead of pushing chunking into consumers or broadening the sync upload path.
 
 ---
 
@@ -235,6 +237,9 @@ Completed on 2026-03-12:
 - OpenClaw (M4)
 - Diarization
 - Automatic transcript generation triggers (consumers poll or call explicitly)
+- Async editor completion/status for long-running Wagtail-triggered transcript jobs; the current admin action still blocks on one request/response cycle
+- Hardening the Wagtail Audio edit-view transcript action so it returns to a usable admin UI after generation instead of leaving a broken form/render state
+- Large-media batch upload/staging for oversized private/local media; the current reusable large-input contract gap is what still pushes consumers toward custom workarounds
 
 ### Dependencies
 
@@ -260,6 +265,9 @@ Still pending:
 - podcast-transcript's `TranscriptionBackend` protocol expects `(audio_file: Path, transcript_path: Path)` -- the Voxhelm backend either uploads the file or passes a URL, which is a different flow than local execution. Mitigation: the Voxhelm backend class handles this internally.
 - podcast-pipeline's current transcriber command contract was narrower than assumed in the initial plan. Mitigation: treat it as a small follow-on integration step instead of assuming zero-change compatibility.
 - Storing a Voxhelm API token in Wagtail-admin-managed configuration requires careful permissions and auditability. Mitigation: restrict editing to privileged Wagtail admins and use the Wagtail admin surface rather than Django admin.
+- The current Wagtail transcript action is still request-blocking. Long jobs can keep the admin POST open until Voxhelm finishes or the frontend/Gunicorn timeout wins, so editor-facing async completion/status is now a separate backlog item.
+- The Wagtail Audio edit-view transcript action showed a broken post-submit render during staging validation, so the next consumer follow-on should verify both Episode and Audio admin surfaces explicitly.
+- Oversized/private/local media still lacks a batch upload/staging path, so the next reusable consumer-facing fix should land in Voxhelm rather than in Archive-specific chunking code.
 
 ---
 
@@ -473,6 +481,8 @@ Still pending:
 | M2 | Wyoming Voice | Home Assistant | M0 Spike 0c, M1a | delivered |
 | M3 | TTS Runtime + Batch | Home Assistant, future Archive article audio | M1b, M2 | delivered at service/runtime layer |
 | Follow-on | Operator transcript UI + shared outputs | Homelab operators, later django-cast simplification | M1a, M1b, M1c | planned after M3; not a numbered milestone |
+| Follow-on | Async Wagtail transcript completion | python-podcast / django-cast editors | M1c, C18 | planned after the current shipped Wagtail transcript flow |
+| Follow-on | Large-media batch input + service-owned chunking | Archive, future private/local media consumers | M1b, C6, C7 | planned before any consumer-side chunking workaround |
 | M4 | OpenClaw | OpenClaw | M1a, M3 | 1 week |
 
 **Critical observation:** M1a is the fastest path to production value. A single developer should target M1a as the first deliverable, which could be usable within 2 weeks of starting (including spikes). The full PRD Milestone 1 has been split into M1a/M1b/M1c to keep each increment deployable and testable.
