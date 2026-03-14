@@ -18,6 +18,8 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
+from config.settings import get_accepted_stt_models
+
 from .observability import emit_transcription_debug_log, summarize_audio_file
 from .service import (
     TranscribeParams,
@@ -196,8 +198,9 @@ def validate_model(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ApiError("The 'model' field is required.")
     normalized = value.strip()
-    if normalized not in settings.VOXHELM_ACCEPTED_MODELS:
-        accepted = ", ".join(sorted(settings.VOXHELM_ACCEPTED_MODELS))
+    accepted_models = get_accepted_stt_models()
+    if normalized not in accepted_models:
+        accepted = ", ".join(sorted(accepted_models))
         raise ApiError(f"Unsupported model '{normalized}'. Accepted values: {accepted}.")
     return normalized
 

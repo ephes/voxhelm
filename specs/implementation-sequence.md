@@ -48,7 +48,7 @@ Completed as of 2026-03-13                                   Remaining draft pha
 
 **Expected duration:** 1-2 days (model download time dominates).
 
-**Expected outcome:** A ranked recommendation. This now exists in the recorded benchmark write-up: `whisper.cpp` and `mlx-whisper` are the shipped backends, and WhisperKit is now an evidence-backed but non-default follow-on candidate rather than merely a provisional curiosity.
+**Expected outcome:** A ranked recommendation. This now exists in the recorded benchmark write-up: `whisper.cpp` and `mlx-whisper` are the stable shipped backends, and WhisperKit is now implemented as an evidence-backed but still experimental non-default path rather than merely a provisional curiosity.
 
 **What depends on the answer:**
 - Whether to keep the current `whisper.cpp` default
@@ -230,7 +230,7 @@ The consumer integrations were largely independent and could be done in any orde
 #### Stream B: Optional STT backend expansion (days 17-19)
 
 1. **Deliver the second shipped backend**: completed with `whisper.cpp` plus `mlx-whisper`
-2. **Optional future backend adapter**: WhisperKit is now the leading candidate for backend expansion, but it should arrive first as an experimental/non-default path after a smaller stability-focused slice
+2. **Experimental backend follow-on**: WhisperKit is now implemented as the leading non-default backend expansion path, and any later work should focus on stability/operations rather than on silently making it the default
 3. **Backend selection logic:** `auto` mode selects based on the configured default and fallback
 4. **Backend health checks:** verify each shipped backend is functional on startup
 

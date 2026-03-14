@@ -36,7 +36,7 @@ Implemented today:
 Not implemented yet:
 
 - stronger runtime isolation beyond the first C13 slice (for example a dedicated interactive worker/host, preemption, or richer operator status surfaces)
-- additional STT backends beyond the current `whisper.cpp` and `mlx-whisper` set
+- backend follow-on work beyond the current `whisper.cpp` and `mlx-whisper` set plus the experimental non-default WhisperKit path
 - Archive article-to-audio consumer integration
 - OpenClaw integration
 
@@ -225,7 +225,7 @@ Completed on 2026-03-12:
 - **python-podcast / django-cast integration:** Wagtail-admin workflow in `django-cast` / `python-podcast` that lets privileged editors trigger transcript generation from the Wagtail admin UI for an episode or audio object, persists the existing `Transcript` artifacts, and does not require shell access.
 - **python-podcast / django-cast configuration:** Voxhelm API base URL, API token, and optional model/language preferences are manageable through Wagtail admin (for example via Wagtail settings or a protected snippet), not only through Django settings or environment variables.
 - Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
-- The shipped STT backend set now includes both `whisper.cpp` and `mlx-whisper`; WhisperKit is now the leading backend-expansion follow-on, but should enter first as an experimental non-default path rather than as a silent default replacement
+- The shipped STT backend set now includes `whisper.cpp`, `mlx-whisper`, and an experimental WhisperKit path. WhisperKit remains non-default and should not silently replace the current deployed `whisper.cpp` default.
 
 ### What is deferred
 

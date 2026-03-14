@@ -279,6 +279,46 @@ def test_invalid_model_is_rejected(client):
     assert response.json()["error"]["type"] == "invalid_request_error"
 
 
+def test_whisperkit_model_is_accepted_when_backend_is_enabled(client, monkeypatch, settings):
+    settings.VOXHELM_WHISPERKIT_ENABLED = True
+    settings.VOXHELM_WHISPERKIT_MODEL = "large-v3-v20240930"
+    monkeypatch.setattr(
+        "transcriptions.views.transcribe_audio",
+        lambda audio_path, params: TranscriptionResult(
+            text="Hallo Welt",
+            language="de",
+            segments=[TranscriptionSegment(id=0, start=0.0, end=1.0, text="Hallo Welt")],
+            backend_name="whisperkit",
+            model_name="large-v3-v20240930",
+        ),
+    )
+    upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisperkit"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "Hallo Welt"}
+
+
+def test_whisperkit_model_is_rejected_when_backend_is_disabled(client, settings):
+    settings.VOXHELM_WHISPERKIT_ENABLED = False
+    settings.VOXHELM_WHISPERKIT_MODEL = "large-v3-v20240930"
+    upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisperkit"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported model 'whisperkit'" in response.json()["error"]["message"]
+
+
 def test_upload_limit_is_enforced(client, settings):
     settings.VOXHELM_MAX_UPLOAD_BYTES = 4
     upload = SimpleUploadedFile("sample.mp3", b"12345", content_type="audio/mpeg")

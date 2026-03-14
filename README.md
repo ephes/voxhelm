@@ -33,6 +33,16 @@ export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
 export VOXHELM_WHISPERCPP_MODEL="ggml-large-v3.bin"
 export VOXHELM_WHISPERCPP_BIN="/opt/homebrew/bin/whisper-cli"
 export VOXHELM_WHISPERCPP_PROCESSORS="4"
+export VOXHELM_WHISPERKIT_ENABLED="false"
+export VOXHELM_WHISPERKIT_HOST="127.0.0.1"
+export VOXHELM_WHISPERKIT_PORT="50060"
+export VOXHELM_WHISPERKIT_BASE_URL="http://127.0.0.1:50060/v1"
+export VOXHELM_WHISPERKIT_MODEL="large-v3-v20240930"
+export VOXHELM_WHISPERKIT_AUDIO_ENCODER_COMPUTE_UNITS="cpuAndGPU"
+export VOXHELM_WHISPERKIT_TEXT_DECODER_COMPUTE_UNITS="cpuAndGPU"
+export VOXHELM_WHISPERKIT_CONCURRENT_WORKER_COUNT="8"
+export VOXHELM_WHISPERKIT_CHUNKING_STRATEGY="vad"
+export VOXHELM_WHISPERKIT_TIMEOUT_SECONDS="900"
 export VOXHELM_STT_DEBUG_LOGGING="false"
 export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
 export VOXHELM_WYOMING_STT_HOST="0.0.0.0"
@@ -85,6 +95,36 @@ one structured `stt_debug` log line per transcription with the input audio
 shape, requested and resolved backend/model/language, transcript preview, and
 latency.
 
-Current limitation: there is no cross-process lane scheduler yet. The Wyoming
-sidecar runs in its own process, but it can still contend with the HTTP API and
-batch worker for CPU, memory, and model cache usage on `studio`.
+## Experimental WhisperKit Backend
+
+WhisperKit is now available as an experimental STT backend, but it is still
+non-default. Enable it explicitly with `VOXHELM_WHISPERKIT_ENABLED=true`, run a
+local `whisperkit-cli serve` instance, and request either the explicit
+`whisperkit` model alias or the configured WhisperKit model name. `whisper-1`,
+`gpt-4o-mini-transcribe`, `auto`, and the deployed default still resolve to
+`whisper.cpp` unless you intentionally reconfigure the backend.
+
+The intended `studio` shape is the local server mode rather than a direct CLI
+wrapper. The tuned sidecar settings currently map to:
+
+```bash
+whisperkit-cli serve \
+  --host 127.0.0.1 \
+  --port 50060 \
+  --model large-v3-v20240930 \
+  --audio-encoder-compute-units cpuAndGPU \
+  --text-decoder-compute-units cpuAndGPU \
+  --concurrent-worker-count 8 \
+  --chunking-strategy vad
+```
+
+Operational caveat: keep treating WhisperKit as experimental on `studio`. The
+benchmark follow-on kept it competitive, but the tuned long-form run still
+logged a Metal GPU recovery error, so the deployed default remains
+`whispercpp`.
+
+Current limitation: the first C13 lane scheduler slice is cross-process and
+does gate Voxhelm's HTTP, batch, and Wyoming entry points, but it does not
+reach inside the WhisperKit sidecar itself. Once Voxhelm has admitted a
+WhisperKit request, the sidecar's internal inference concurrency remains
+outside that scheduler's direct control.

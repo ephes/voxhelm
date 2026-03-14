@@ -54,6 +54,24 @@ def env_tokens(name: str) -> dict[str, str]:
     return tokens
 
 
+def get_accepted_stt_models() -> set[str]:
+    from django.conf import settings as django_settings
+
+    models = {
+        "gpt-4o-mini-transcribe",
+        "whisper-1",
+        django_settings.VOXHELM_MLX_MODEL,
+        django_settings.VOXHELM_WHISPERCPP_MODEL,
+    }
+    if django_settings.VOXHELM_WHISPERKIT_ENABLED:
+        models.update({"whisperkit", django_settings.VOXHELM_WHISPERKIT_MODEL})
+    return models
+
+
+def get_batch_accepted_stt_models() -> set[str]:
+    return {"auto", *get_accepted_stt_models()}
+
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 ALLOWED_HOSTS = env_list("VOXHELM_ALLOWED_HOSTS", default="localhost,127.0.0.1")
@@ -95,6 +113,32 @@ VOXHELM_MLX_MODEL = os.getenv("VOXHELM_MLX_MODEL", "mlx-community/whisper-large-
 VOXHELM_WHISPERCPP_MODEL = os.getenv("VOXHELM_WHISPERCPP_MODEL", "ggml-large-v3.bin").strip()
 VOXHELM_WHISPERCPP_BIN = os.getenv("VOXHELM_WHISPERCPP_BIN", "/opt/homebrew/bin/whisper-cli")
 VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "4"))
+VOXHELM_WHISPERKIT_ENABLED = env_bool("VOXHELM_WHISPERKIT_ENABLED", default=False)
+VOXHELM_WHISPERKIT_HOST = os.getenv("VOXHELM_WHISPERKIT_HOST", "127.0.0.1").strip()
+VOXHELM_WHISPERKIT_PORT = int(os.getenv("VOXHELM_WHISPERKIT_PORT", "50060"))
+VOXHELM_WHISPERKIT_BASE_URL = os.getenv(
+    "VOXHELM_WHISPERKIT_BASE_URL",
+    f"http://127.0.0.1:{VOXHELM_WHISPERKIT_PORT}/v1",
+).strip()
+VOXHELM_WHISPERKIT_MODEL = os.getenv("VOXHELM_WHISPERKIT_MODEL", "large-v3-v20240930").strip()
+VOXHELM_WHISPERKIT_AUDIO_ENCODER_COMPUTE_UNITS = os.getenv(
+    "VOXHELM_WHISPERKIT_AUDIO_ENCODER_COMPUTE_UNITS",
+    "cpuAndGPU",
+).strip()
+VOXHELM_WHISPERKIT_TEXT_DECODER_COMPUTE_UNITS = os.getenv(
+    "VOXHELM_WHISPERKIT_TEXT_DECODER_COMPUTE_UNITS",
+    "cpuAndGPU",
+).strip()
+VOXHELM_WHISPERKIT_CONCURRENT_WORKER_COUNT = int(
+    os.getenv("VOXHELM_WHISPERKIT_CONCURRENT_WORKER_COUNT", "8")
+)
+VOXHELM_WHISPERKIT_CHUNKING_STRATEGY = os.getenv(
+    "VOXHELM_WHISPERKIT_CHUNKING_STRATEGY",
+    "vad",
+).strip()
+VOXHELM_WHISPERKIT_TIMEOUT_SECONDS = int(
+    os.getenv("VOXHELM_WHISPERKIT_TIMEOUT_SECONDS", "900")
+)
 VOXHELM_STT_DEBUG_LOGGING = env_bool("VOXHELM_STT_DEBUG_LOGGING", default=False)
 VOXHELM_MODEL_CACHE_DIR = Path(
     os.getenv("VOXHELM_MODEL_CACHE_DIR", str(BASE_DIR / "var" / "models"))
@@ -131,16 +175,8 @@ VOXHELM_BATCH_MAX_DOWNLOAD_BYTES = int(
 )
 VOXHELM_ALLOWED_URL_HOSTS = set(env_list("VOXHELM_ALLOWED_URL_HOSTS"))
 VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
-VOXHELM_ACCEPTED_MODELS = {
-    "gpt-4o-mini-transcribe",
-    "whisper-1",
-    VOXHELM_MLX_MODEL,
-    VOXHELM_WHISPERCPP_MODEL,
-}
-VOXHELM_BATCH_ACCEPTED_MODELS = {
-    "auto",
-    *VOXHELM_ACCEPTED_MODELS,
-}
+VOXHELM_ACCEPTED_MODELS = get_accepted_stt_models()
+VOXHELM_BATCH_ACCEPTED_MODELS = get_batch_accepted_stt_models()
 VOXHELM_TTS_BACKEND = os.getenv("VOXHELM_TTS_BACKEND", "piper").strip()
 VOXHELM_PIPER_VOICE_DIR = Path(
     os.getenv("VOXHELM_PIPER_VOICE_DIR", str(BASE_DIR / "var" / "piper"))

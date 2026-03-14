@@ -325,7 +325,7 @@ Current completion state:
 
 ### C5 -- STT Backend Adapter Layer
 
-**Implementation note (2026-03-13):** Delivered with two backends: `whisper.cpp` and `mlx-whisper`. WhisperKit remains outside the delivered scope today, but the re-evaluation moved it into the next-slice candidate set rather than leaving it indefinitely deferred.
+**Implementation note (2026-03-14):** Delivered with three backends in distinct roles: `whisper.cpp` remains the deployed default, `mlx-whisper` remains available, and WhisperKit is now implemented as an experimental opt-in backend using local server mode on `studio`.
 
 **Purpose:** Provide a pluggable backend abstraction so the rest of the system can request transcription without knowing which engine runs underneath.
 

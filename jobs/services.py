@@ -14,6 +14,7 @@ from django_tasks import default_task_backend
 from django_tasks.base import TaskResultStatus
 from django_tasks.exceptions import TaskResultDoesNotExist
 
+from config.settings import get_batch_accepted_stt_models
 from jobs.artifacts import get_artifact_store
 from jobs.media import (
     DownloadedMedia,
@@ -270,8 +271,9 @@ def ensure_transcription_model(value: object) -> str:
     if not isinstance(value, str):
         raise ApiError("model must be a string.")
     normalized = value.strip()
-    if normalized not in settings.VOXHELM_BATCH_ACCEPTED_MODELS:
-        accepted = ", ".join(sorted(settings.VOXHELM_BATCH_ACCEPTED_MODELS))
+    accepted_models = get_batch_accepted_stt_models()
+    if normalized not in accepted_models:
+        accepted = ", ".join(sorted(accepted_models))
         raise ApiError(f"Unsupported model '{normalized}'. Accepted values: {accepted}.")
     return normalized
 

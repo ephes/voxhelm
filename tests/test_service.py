@@ -10,10 +10,12 @@ from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
     TranscriptionSegment,
+    WhisperKitBackend,
     get_backend_services_for_model,
     normalize_interactive_transcript,
     normalize_whispercpp_payload,
     resolve_backend_name_for_model,
+    resolve_model_name_for_backend,
     resolve_whispercpp_binary,
     resolve_whispercpp_model_path,
     timestamp_to_seconds,
@@ -121,12 +123,31 @@ def test_resolve_backend_name_for_model_uses_aliases_and_explicit_models(setting
     settings.VOXHELM_STT_BACKEND = "whispercpp"
     settings.VOXHELM_MLX_MODEL = "mlx-community/whisper-large-v3-mlx"
     settings.VOXHELM_WHISPERCPP_MODEL = "ggml-large-v3.bin"
+    settings.VOXHELM_WHISPERKIT_MODEL = "large-v3-v20240930"
 
     assert resolve_backend_name_for_model("auto") == "whispercpp"
     assert resolve_backend_name_for_model("whisper-1") == "whispercpp"
     assert resolve_backend_name_for_model("gpt-4o-mini-transcribe") == "whispercpp"
     assert resolve_backend_name_for_model(settings.VOXHELM_MLX_MODEL) == "mlx"
     assert resolve_backend_name_for_model(settings.VOXHELM_WHISPERCPP_MODEL) == "whispercpp"
+    assert resolve_backend_name_for_model("whisperkit") == "whisperkit"
+    assert resolve_backend_name_for_model(settings.VOXHELM_WHISPERKIT_MODEL) == "whisperkit"
+
+
+def test_resolve_model_name_for_backend_maps_whisperkit_alias_to_configured_model(settings) -> None:
+    settings.VOXHELM_WHISPERKIT_MODEL = "large-v3-v20240930"
+
+    assert (
+        resolve_model_name_for_backend(request_model="whisperkit", backend_name="whisperkit")
+        == "large-v3-v20240930"
+    )
+    assert (
+        resolve_model_name_for_backend(
+            request_model="auto",
+            backend_name="whisperkit",
+        )
+        == "large-v3-v20240930"
+    )
 
 
 def test_get_backend_services_for_model_only_adds_fallback_for_auto_requests(
@@ -146,9 +167,11 @@ def test_get_backend_services_for_model_only_adds_fallback_for_auto_requests(
     settings.VOXHELM_STT_FALLBACK_BACKEND = "mlx"
     settings.VOXHELM_MLX_MODEL = "mlx-community/whisper-large-v3-mlx"
     settings.VOXHELM_WHISPERCPP_MODEL = "ggml-large-v3.bin"
+    settings.VOXHELM_WHISPERKIT_MODEL = "large-v3-v20240930"
 
     auto_services = get_backend_services_for_model("whisper-1")
     explicit_services = get_backend_services_for_model(settings.VOXHELM_MLX_MODEL)
+    whisperkit_services = get_backend_services_for_model("whisperkit")
     settings.VOXHELM_STT_FALLBACK_BACKEND = "whispercpp"
     no_extra_services = get_backend_services_for_model("auto")
     settings.VOXHELM_STT_FALLBACK_BACKEND = ""
@@ -156,15 +179,107 @@ def test_get_backend_services_for_model_only_adds_fallback_for_auto_requests(
 
     assert [service.name for service in auto_services] == ["whispercpp", "mlx"]
     assert [service.name for service in explicit_services] == ["mlx"]
+    assert [service.name for service in whisperkit_services] == ["whisperkit"]
     assert [service.name for service in no_extra_services] == ["whispercpp"]
     assert [service.name for service in empty_fallback_services] == ["whispercpp"]
     assert calls == [
         ("whispercpp", "whisper-1"),
         ("mlx", "whisper-1"),
         ("mlx", settings.VOXHELM_MLX_MODEL),
+        ("whisperkit", "whisperkit"),
         ("whispercpp", "auto"),
         ("whispercpp", "auto"),
     ]
+
+
+def test_whisperkit_backend_normalizes_verbose_json_payload(monkeypatch) -> None:
+    backend = WhisperKitBackend(
+        enabled=True,
+        base_url="http://127.0.0.1:50060/v1",
+        model_name="large-v3-v20240930",
+        timeout_seconds=900,
+    )
+    call_args: list[tuple[Path, str | None, str | None]] = []
+
+    def fake_call(**kwargs) -> dict[str, object]:
+        call_args.append(
+            (
+                kwargs["audio_path"],
+                kwargs["language"],
+                kwargs["prompt"],
+            )
+        )
+        return {
+            "language": "de",
+            "text": "Hallo Welt",
+            "segments": [
+                {"id": 0, "start": 0.0, "end": 1.0, "text": "Hallo"},
+                {"id": 1, "start": 1.0, "end": 2.0, "text": "Welt"},
+            ],
+        }
+
+    monkeypatch.setattr("transcriptions.service.call_whisperkit_server", fake_call)
+
+    result = backend.transcribe(
+        Path("/tmp/sample.wav"),
+        TranscribeParams(
+            request_model="whisperkit",
+            prompt="Podcast transcript",
+            language="de",
+        ),
+    )
+
+    assert call_args == [(Path("/tmp/sample.wav"), "de", "Podcast transcript")]
+    assert result.text == "Hallo Welt"
+    assert result.language == "de"
+    assert result.backend_name == "whisperkit"
+    assert result.model_name == "large-v3-v20240930"
+    assert result.segments == [
+        TranscriptionSegment(id=0, start=0.0, end=1.0, text="Hallo"),
+        TranscriptionSegment(id=1, start=1.0, end=2.0, text="Welt"),
+    ]
+
+
+def test_whisperkit_backend_reports_unreachable_server_as_unavailable(monkeypatch) -> None:
+    backend = WhisperKitBackend(
+        enabled=True,
+        base_url="http://127.0.0.1:50060/v1",
+        model_name="large-v3-v20240930",
+        timeout_seconds=900,
+    )
+    monkeypatch.setattr(
+        "transcriptions.service.call_whisperkit_server",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+
+    try:
+        backend.transcribe(
+            Path("/tmp/sample.wav"),
+            TranscribeParams(request_model="whisperkit", prompt=None, language="de"),
+        )
+    except BackendUnavailableError as exc:
+        assert "not reachable" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected unreachable WhisperKit server to raise.")
+
+
+def test_whisperkit_backend_rejects_disabled_backend() -> None:
+    backend = WhisperKitBackend(
+        enabled=False,
+        base_url="http://127.0.0.1:50060/v1",
+        model_name="large-v3-v20240930",
+        timeout_seconds=900,
+    )
+
+    try:
+        backend.transcribe(
+            Path("/tmp/sample.wav"),
+            TranscribeParams(request_model="whisperkit", prompt=None, language="de"),
+        )
+    except BackendUnavailableError as exc:
+        assert "WhisperKit is disabled" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected disabled WhisperKit backend to raise.")
 
 
 def test_normalize_whispercpp_payload_builds_segments_and_language() -> None:
