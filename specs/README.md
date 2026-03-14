@@ -5,15 +5,16 @@ Current implementation snapshot as of 2026-03-14:
 - M1a, M1b, and the current M1c consumer slices are implemented and deployed.
 - M2 Home Assistant voice wiring is implemented: Voxhelm now runs a Wyoming sidecar on `studio`, Home Assistant can use Voxhelm STT/TTS through Assist pipelines, and area-registry aliases can be managed from deploy config.
 - The core M3 service/runtime slice is implemented: Piper-backed TTS, `POST /v1/audio/speech`, and batch `synthesize` jobs are live in Voxhelm.
+- The post-M3 operator transcript follow-on is also implemented: Voxhelm now ships the session-authenticated operator UI at `/`, mixed sync/batch operator routing, and server-owned `dote` / `podlove` transcript artifacts.
 - The live production shape is a Django HTTP process plus a Django Tasks worker and a Wyoming STT/TTS sidecar on `studio`, with private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Implemented endpoints: `GET /v1/health`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, and `GET /v1/jobs/{id}/artifacts/{name}`.
 - Implemented sync STT contract: bearer auth, multipart upload, JSON URL mode, accepted models `gpt-4o-mini-transcribe` and `whisper-1`, plus the explicit `whisperkit` opt-in path when that backend is enabled, and response formats `json`, `text`, `verbose_json`, and `vtt`.
 - Implemented TTS contract: Piper-backed synchronous speech generation plus batch `synthesize` jobs with artifact storage.
-- Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, artifact download through the Voxhelm HTTP proxy, and canonical batch transcript artifacts for `json`, `text`, and `vtt`.
-- DOTe and Podlove transcript conversion are still consumer-local today (for example in `django-cast`); they are planned as a shared Voxhelm follow-on rather than a currently shipped server-side output.
+- Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, artifact download through the Voxhelm HTTP proxy, and canonical batch transcript artifacts for `json`, `text`, `vtt`, `dote`, and `podlove`.
+- The same-epic `django-cast` consumer cleanup is now complete: it requests and persists Voxhelm-owned `podlove`, `dote`, and `vtt` artifacts directly instead of converting `dote` / `podlove` locally.
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription, live batch jobs, direct Home Assistant STT, and the restored production debug-logging default have all been validated against the deployed service.
-- Remaining planned work is narrower now: a post-M3 operator transcript UI plus shared DOTe/Podlove output follow-on, operational work beyond the current `whisper.cpp` + `mlx-whisper` STT set plus the experimental non-default WhisperKit path, Archive article-audio consumer follow-on, and M4/OpenClaw.
+- Remaining planned work is narrower now: operational work beyond the current `whisper.cpp` + `mlx-whisper` STT set plus the experimental non-default WhisperKit path, Archive article-audio consumer follow-on, and M4/OpenClaw.
 - The STT benchmark spike was re-run on `studio`, and the current source of truth is [`2026-03-13_whisperkit_re_evaluation_studio.md`](./2026-03-13_whisperkit_re_evaluation_studio.md). The revised evidence keeps `whisper.cpp` as the deployed default for now, but WhisperKit is no longer merely provisional: on the tuned `studio` path it is now a real follow-on candidate, with GPU stability caveats.
 
 This directory currently contains both the original PRD and the planning package derived from it. The goal of this file is to make the document stack explicit, so readers know:

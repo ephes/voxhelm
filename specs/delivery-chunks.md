@@ -2,13 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C15 and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13. A new post-M3 C18 operator transcript follow-on is now planned; Archive article-audio consumer work and C17/OpenClaw remain draft.
+**Status:** C1-C16 and C18 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts. Archive article-audio consumer work and C17/OpenClaw remain draft.
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15
-- Implemented at the Voxhelm service/runtime layer: C16
-- Not implemented yet: C18, Archive article-audio consumer follow-on, C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18
+- Not implemented yet: Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -954,6 +953,8 @@ Current completion state:
 
 ### C18 -- Operator Transcript UI + Shared Transcript Outputs
 
+**Implementation note (2026-03-14):** Delivered. Voxhelm now ships the operator transcript UI at `/`, server-owned `dote` / `podlove` batch artifacts, and the same-epic `django-cast` follow-up that consumes those artifacts directly.
+
 **Purpose:** Add the first human-facing transcript UI to Voxhelm and finish the shared transcript-output boundary so DOTe and Podlove are produced once in Voxhelm instead of separately in each consumer.
 
 **Included scope:**
@@ -977,7 +978,7 @@ Current completion state:
 - UI result surface with inline transcript text plus download links for the first-slice transcript outputs
 - Recent-transcripts list for submissions created by the authenticated operator
 - Homelab service entry metadata pointing to `https://voxhelm.home.xn--wersdrfer-47a.de/`
-- Clear migration guidance for `django-cast` to drop local `render_dote(...)` and `render_podlove(...)` once it consumes Voxhelm-owned outputs in the next same-epic follow-up
+- The same-epic `django-cast` cleanup that consumes Voxhelm-owned outputs and drops local `render_dote(...)` / `render_podlove(...)`
 
 **Explicitly excluded scope:**
 
@@ -988,9 +989,9 @@ Current completion state:
 - Archive article-audio/TTS work
 - OpenClaw integration
 
-**Dependencies:** C6 (batch transcript pipeline), C7 (sync transcription endpoint), C10 (proved current consumer-local conversion boundary), C11 (deployed private ingress)
+**Dependencies:** C6 (batch transcript pipeline), C7 (sync transcription endpoint), C10 (established the initial consumer boundary), C11 (deployed private ingress)
 
-**Consumer(s):** Homelab operators, `django-cast` as a later simplification consumer
+**Consumer(s):** Homelab operators, `django-cast`
 
 **Primary interfaces:**
 
@@ -998,7 +999,7 @@ Current completion state:
 - `POST /v1/jobs`
 - `GET /v1/jobs/{id}`
 - `GET /v1/jobs/{id}/artifacts/{name}`
-- planned HTML route: `/`
+- HTML route: `/`
 
 **Acceptance criteria:**
 
@@ -1011,7 +1012,7 @@ Current completion state:
 - Voxhelm can expose `text`, `json`, `vtt`, `dote`, and `podlove` for the first slice without duplicating conversion logic in the UI
 - Uploaded-video async is still explicitly deferred
 - Homelab links to the Voxhelm UI but does not redefine Voxhelm product behavior
-- `django-cast` has a clear same-epic follow-on path to remove local DOTe/Podlove conversion after the web flow works
+- `django-cast` consumes Voxhelm-owned `dote` / `podlove` outputs and no longer duplicates conversion logic locally
 
 **Main risks:**
 

@@ -1,7 +1,7 @@
 # Voxhelm Interface Map
 
 **Date:** 2026-03-11
-**Status:** Active architecture doc; M1-M3 core runtime slices are implemented as of 2026-03-13, and a post-M3 operator transcript UI plus shared transcript-output follow-on remains planned
+**Status:** Active architecture doc; M1-M3 core runtime slices, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14
 
 This document is the active source of truth for Voxhelm's architecture boundaries, interface contracts, artifact access model, and auth domains.
 
@@ -40,7 +40,7 @@ Home Assistant now reaches a separate Wyoming listener on `studio`.
 |-----------|------------------|
 | Django HTTP process (implemented in M1a) | Authenticate producers, validate requests, fetch allowed URL inputs, invoke the configured sync STT backend, render OpenAI-compatible responses, expose health, accept batch jobs, proxy artifact downloads |
 | Django Tasks workers (implemented in M1b) | Execute queued transcription work, fetch media, extract audio from video, invoke STT backends, upload artifacts, and report status/results back into the control plane |
-| Consumers | Submit sync or batch requests, poll for status where needed, consume returned text or artifact references, and apply consumer-local persistence or presentation only. Today `django-cast` still performs DOTe/Podlove conversion locally, but that conversion is planned to move into Voxhelm's published batch artifacts. |
+| Consumers | Submit sync or batch requests, poll for status where needed, consume returned text or artifact references, and apply consumer-local persistence or presentation only. Shared transcript conversions now ship from Voxhelm's published batch artifacts, so consumers such as `django-cast` no longer duplicate DOTe/Podlove rendering. |
 | Artifact store (implemented in M1b) | Hold source inputs, intermediates, and final artifacts; never exposed directly to consumers |
 
 ---
@@ -55,7 +55,7 @@ Voxhelm exposes five producer/operator-facing interface surfaces:
 | 2 | Batch job API | HTTP | inbound + poll | yes | python-podcast |
 | 3 | Wyoming STT/TTS | TCP (Wyoming) | inbound | yes | Home Assistant |
 | 4 | Artifact storage API | S3 (MinIO) | bidirectional | yes | Voxhelm workers and control plane only (consumers access artifacts via Voxhelm HTTP proxy) |
-| 5 | Health / operator HTTP surface | HTTP | inbound | yes | ops tooling, monitoring, operator UI (planned follow-on) |
+| 5 | Health / operator HTTP surface | HTTP | inbound | yes | ops tooling, monitoring, operator UI |
 
 The worker execution path is intentionally not part of the producer-facing contract. In the current production deployment, the HTTP process and the Django Tasks worker run as separate launchd services on `studio`.
 
@@ -180,7 +180,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 **Input kinds (current M1b):** `url`
 **Input kinds (later):** `upload`, `minio_ref`
 
-The planned operator UI intentionally stays within this current boundary: batch transcription remains URL-driven in the first slice, so uploaded-video async and other large-upload batch flows stay deferred until `input.kind=upload` exists in the job contract.
+The shipped operator UI intentionally stays within this current boundary: batch transcription remains URL-driven in the first slice, so uploaded-video async and other large-upload batch flows stay deferred until `input.kind=upload` exists in the job contract.
 
 **Output formats for `transcribe`:**
 
@@ -189,10 +189,10 @@ The planned operator UI intentionally stays within this current boundary: batch 
 | `text` | Plain text string | Archive (via sync endpoint), podcast-pipeline (indirect) | implemented |
 | `json` | Whisper-style `{"segments": [{"id", "start", "end", "text", ...}]}` | podcast-transcript, python-podcast | implemented |
 | `vtt` / `webvtt` | WebVTT text | subtitle and transcript consumers | implemented |
-| `dote` | DOTe JSON | django-cast, operator UI exports | planned post-M3 follow-on |
-| `podlove` | Podlove transcript JSON | django-cast, operator UI exports | planned post-M3 follow-on |
+| `dote` | DOTe JSON | django-cast, operator UI exports | implemented |
+| `podlove` | Podlove transcript JSON | django-cast, operator UI exports | implemented |
 
-Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current implementation stores `text`, `json`, and `vtt` artifacts. The planned operator transcript follow-on completes D-06 by adding server-side `dote` and `podlove` batch artifacts so `django-cast` and the UI do not duplicate conversion logic.
+Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current implementation stores `text`, `json`, `vtt`, `dote`, and `podlove` artifacts. `django-cast` and the operator UI now consume those shared server-owned outputs instead of duplicating conversion logic.
 
 **Response:** `201 Created`
 
@@ -352,7 +352,7 @@ voxhelm/
 }
 ```
 
-**Current scope note:** `GET /v1/health` is live. The planned first operator UI is intentionally small: the root route becomes a session-authenticated login/submit/results surface with a recent-transcripts list for the authenticated operator. `GET /v1/status` remains explicitly deferred so this follow-on does not broaden into a general operator dashboard.
+**Current scope note:** `GET /v1/health` is live. The shipped first operator UI is intentionally small: the root route is a session-authenticated login/submit/results surface with a recent-transcripts list for the authenticated operator. `GET /v1/status` remains explicitly deferred so this follow-on does not broaden into a general operator dashboard.
 
 **Consumers:** Monitoring (nyxmon), operator tooling, operators using the transcript UI.
 

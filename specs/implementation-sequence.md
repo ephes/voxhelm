@@ -1,13 +1,13 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is a post-M3 operator transcript UI plus shared transcript-output follow-on, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
 
 - Phases 1a and 1b are complete.
-- The current Phase 1c consumer slices are complete: `podcast-transcript`, `podcast-pipeline`, and the Wagtail-admin `django-cast` / `python-podcast` integration.
+- The current Phase 1c consumer slices are complete: `podcast-transcript`, `podcast-pipeline`, and the Wagtail-admin `django-cast` / `python-podcast` integration, including the follow-up that switched `django-cast` to Voxhelm-owned `dote` / `podlove` artifacts.
 - The deployed runtime is a Django + `uvicorn` HTTP process plus a Django Tasks worker and a Wyoming STT/TTS sidecar on `studio`.
 - Private HTTPS ingress is live on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
 - Batch jobs, MinIO-backed artifacts, video extraction, artifact proxy download, synchronous speech generation, and batch `synthesize` jobs are live.
@@ -238,7 +238,7 @@ The consumer integrations were largely independent and could be done in any orde
 
 #### Stream C: python-podcast / django-cast integration (days 19-23)
 
-**Implementation note (2026-03-12):** Delivered. `django-cast` reuses the existing Voxhelm service and transcript persistence plumbing, keeps Podlove JSON and DOTe conversion local for now, adds Wagtail-admin actions on Episode and Audio edit views, and exposes site-scoped Voxhelm settings in Wagtail admin. The existing `generate_transcripts` management command remains available as fallback operator tooling.
+**Implementation note (2026-03-14):** Delivered. `django-cast` reuses the existing Voxhelm service and transcript persistence plumbing, requests/persists Voxhelm-owned `podlove`, `dote`, and `vtt` artifacts directly, adds Wagtail-admin actions on Episode and Audio edit views, and exposes site-scoped Voxhelm settings in Wagtail admin. The existing `generate_transcripts` management command remains available as fallback operator tooling.
 
 1. **Voxhelm client library** (or inline HTTP client in django-cast)
    - Submit batch transcription job with audio URL
@@ -246,10 +246,9 @@ The consumer integrations were largely independent and could be done in any orde
    - Download artifacts
 
 2. **Transcript format conversion** (consumer integration)
-   - Voxhelm normalizes backend output into Whisper-native JSON internally and exposes canonical JSON + WebVTT artifacts
-   - django-cast converts the JSON into Podlove JSON and DOTe locally
-   - Create/update django-cast `Transcript` model with the returned/generated artifacts
-   - planned follow-on: once Voxhelm owns `dote`/`podlove` batch artifacts, `django-cast` can drop this local conversion path
+   - Voxhelm normalizes backend output into Whisper-native JSON internally and exposes canonical `json`, `vtt`, `dote`, and `podlove` artifacts
+   - django-cast creates/updates its existing `Transcript` model directly from the returned server-owned artifacts
+   - the local consumer-side DOTe/Podlove conversion path is removed
 
 3. **Wagtail admin integration**
    - Wagtail admin action/button on Episode and/or Audio to generate a transcript with Voxhelm
@@ -393,9 +392,8 @@ Before declaring M1 complete:
    - Deployment provisions one initial operator account for `jochen`
    - Keep auth otherwise on standard Django staff/superuser accounts
 
-6. **Consumer simplification follow-on** (day 40 or later, same epic)
-   - After the Voxhelm web flow and server-owned `dote`/`podlove` outputs are working, update `django-cast` to request/consume them and drop local conversion helpers
-   - Keep this as the next follow-up after the web slice works, not in parallel before the UI contract is proven
+6. **Consumer simplification follow-on** (same epic)
+   - Completed on 2026-03-14: `django-cast` now requests/consumes Voxhelm-owned `dote` / `podlove` outputs and no longer carries local conversion helpers
 
 ### Decision gate: Operator transcript slice acceptance
 

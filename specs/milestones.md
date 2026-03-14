@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is a post-M3 operator transcript UI plus shared transcript-output follow-on, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -9,7 +9,8 @@
 Implemented today:
 
 - M1a and M1b
-- M1c consumer work: `podcast-transcript --backend voxhelm`, `podcast-pipeline` compatibility, and `python-podcast` / `django-cast` Wagtail-admin transcript workflow
+- M1c consumer work: `podcast-transcript --backend voxhelm`, `podcast-pipeline` compatibility, and `python-podcast` / `django-cast` Wagtail-admin transcript workflow, including the follow-up that switched `django-cast` to Voxhelm-owned `dote` / `podlove` artifacts
+- post-M3 operator transcript UI plus shared transcript-output follow-on
 - M2 Home Assistant voice wiring: Wyoming STT/TTS sidecar on `studio`, Home Assistant integration, declarative Assist pipelines, and area-registry alias updates
 - core M3 runtime: Piper-backed TTS, `POST /v1/audio/speech`, and batch `synthesize` jobs
 - Django + `uvicorn` HTTP process plus Django Tasks worker on `studio`
@@ -224,7 +225,7 @@ Completed on 2026-03-12:
 - **podcast-pipeline follow-on:** Delivered. The pipeline now provides the required audio-input compatibility for the Voxhelm-backed `podcast-transcript` path.
 - **python-podcast / django-cast integration:** Wagtail-admin workflow in `django-cast` / `python-podcast` that lets privileged editors trigger transcript generation from the Wagtail admin UI for an episode or audio object, persists the existing `Transcript` artifacts, and does not require shell access.
 - **python-podcast / django-cast configuration:** Voxhelm API base URL, API token, and optional model/language preferences are manageable through Wagtail admin (for example via Wagtail settings or a protected snippet), not only through Django settings or environment variables.
-- Structured output format negotiation is only partially delivered today: shipped batch transcript artifacts are `["text", "json", "vtt"]`, while `dote` and `podlove` remain consumer-local in `django-cast` pending the post-M3 operator transcript follow-on
+- Structured output format negotiation is now delivered for the batch path: shipped batch transcript artifacts are `["text", "json", "vtt", "dote", "podlove"]`, and `django-cast` now consumes the server-owned `dote` / `podlove` outputs directly
 - The shipped STT backend set now includes `whisper.cpp`, `mlx-whisper`, and an experimental WhisperKit path. WhisperKit remains non-default and should not silently replace the current deployed `whisper.cpp` default.
 
 ### What is deferred
@@ -255,7 +256,7 @@ Still pending:
 
 ### Key risks
 
-- Output format differences between backends (whisper.cpp produces different JSON than mlx-whisper) -- mitigation: normalize in Voxhelm before returning canonical JSON/VTT outputs, with consumer-local Podlove/DOTe conversion where needed
+- Output format differences between backends (whisper.cpp produces different JSON than mlx-whisper) -- mitigation: normalize in Voxhelm before returning canonical batch outputs, including server-owned Podlove/DOTe artifacts where needed
 - podcast-transcript's `TranscriptionBackend` protocol expects `(audio_file: Path, transcript_path: Path)` -- the Voxhelm backend either uploads the file or passes a URL, which is a different flow than local execution. Mitigation: the Voxhelm backend class handles this internally.
 - podcast-pipeline's current transcriber command contract was narrower than assumed in the initial plan. Mitigation: treat it as a small follow-on integration step instead of assuming zero-change compatibility.
 - Storing a Voxhelm API token in Wagtail-admin-managed configuration requires careful permissions and auditability. Mitigation: restrict editing to privileged Wagtail admins and use the Wagtail admin surface rather than Django admin.
@@ -419,7 +420,7 @@ Still pending:
 - After login, the operator can see a recent-transcripts list for submissions they created
 - Voxhelm becomes the canonical batch producer of `dote` and `podlove`
 - The Homelab tile lands as part of the same follow-on, but only as service metadata pointing at the Voxhelm-owned UI
-- `django-cast` has a clear same-epic follow-up path: once the Voxhelm web/UI slice works, it switches to Voxhelm-owned `dote`/`podlove` and can drop local conversion code
+- `django-cast` now consumes Voxhelm-owned `dote` / `podlove` outputs and no longer duplicates that conversion logic locally
 - Archive article-audio remains explicitly out of scope for this slice
 
 ### Key risks

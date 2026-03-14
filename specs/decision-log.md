@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, are implemented as of 2026-03-13. A post-M3 operator transcript UI plus shared transcript-output follow-on is now planned alongside later backend expansion, Archive article-audio consumer work, and M4/OpenClaw.
+**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14. Remaining planned work is later backend expansion, Archive article-audio consumer work, and M4/OpenClaw.
 
 ---
 
@@ -109,7 +109,7 @@
 
 **Recommended default:** Option C with Whisper-native JSON as the internal canonical transcript representation. The sync OpenAI-compatible endpoint still returns `{"text": "..."}` (or `verbose_json` with segments) to match Archive's and podcast-transcript's expectations, but the batch/job layer should be the place where Voxhelm owns shared transcript conversions. Producer-requested output formats should converge on plain text, Whisper JSON, WebVTT, DOTe, and Podlove JSON so multiple consumers can rely on one service contract instead of duplicating conversion logic.
 
-**Implementation note (2026-03-14):** This decision is only partially implemented today. Voxhelm currently exposes/stores `json`, `text`, and `vtt` batch artifacts; `django-cast` still renders DOTe and Podlove locally from the JSON artifact. The next follow-on slice should finish D-06 by moving DOTe/Podlove conversion into Voxhelm's shared batch output layer while keeping the sync OpenAI-compatible contract unchanged.
+**Implementation note (2026-03-14):** This decision is now implemented on the batch path. Voxhelm exposes/stores `json`, `text`, `vtt`, `dote`, and `podlove` batch artifacts, while the sync OpenAI-compatible contract remains unchanged. `django-cast` now consumes the server-owned `dote` / `podlove` artifacts directly instead of rendering them locally from the JSON artifact.
 
 **Blocks implementation:** No — the sync endpoint format is clear (OpenAI-compatible), and the async artifact/output model is now explicit.
 
@@ -367,6 +367,8 @@ Voxhelm should persist its own producer-facing job record and store the returned
 
 **Recommended default:** Option C.
 
+**Implementation note (2026-03-14):** Delivered. Voxhelm now ships the session-authenticated operator UI at `/`, mixed sync/batch input routing, and server-owned `dote` / `podlove` batch outputs. The same-epic `django-cast` cleanup that consumes those outputs is also complete.
+
 The first C13 slice should use a thin host-wide scheduler around local inference calls, not a new queueing system. Concretely:
 
 - keep the existing three-process deployment shape on `studio`
@@ -401,7 +403,7 @@ Do not add slot-count tuning in the first slice because the accepted design is s
 
 ## D-20: What is the smallest sensible operator transcript slice after M3?
 
-**Context:** Voxhelm already has the sync and batch STT primitives, but no human HTML UI. A second transcript consumer now wants the same DOTe/Podlove shapes that `django-cast` currently renders locally, which changes the boundary: a consumer-local conversion decision now creates duplication instead of preserving a clean service contract.
+**Context:** At the time of this decision, Voxhelm already had the sync and batch STT primitives, but no human HTML UI. A second transcript consumer wanted the same DOTe/Podlove shapes that `django-cast` then rendered locally, which changed the boundary: a consumer-local conversion decision would create duplication instead of preserving a clean service contract.
 
 **Options:**
 
