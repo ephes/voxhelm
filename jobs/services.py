@@ -34,6 +34,8 @@ from synthesis.service import (
     export_audio,
     synthesize_text,
 )
+from transcriptions.errors import ApiError
+from transcriptions.formats import render_dote, render_podlove, render_text
 from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
@@ -41,15 +43,15 @@ from transcriptions.service import (
     render_vtt,
     transcribe_audio,
 )
-from transcriptions.views import ApiError
 
 PRIORITY_TO_TASK_PRIORITY = {
     Job.Priority.LOW: -10,
     Job.Priority.NORMAL: 0,
     Job.Priority.HIGH: 10,
 }
-TRANSCRIPTION_OUTPUT_FORMATS = {"json", "text", "vtt", "webvtt"}
+TRANSCRIPTION_OUTPUT_FORMATS = {"json", "text", "vtt", "webvtt", "dote", "podlove"}
 DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS = ("text", "json")
+OPERATOR_TRANSCRIPTION_OUTPUT_FORMATS = ("text", "json", "vtt", "dote", "podlove")
 DEFAULT_SPEECH_OUTPUT_FORMATS = ("wav",)
 
 
@@ -68,6 +70,15 @@ class JobRequest:
 
 
 def create_job_from_payload(*, producer: str, payload: dict[str, Any]) -> tuple[Job, bool]:
+    return create_job_from_payload_for_actor(producer=producer, payload=payload, operator=None)
+
+
+def create_job_from_payload_for_actor(
+    *,
+    producer: str,
+    payload: dict[str, Any],
+    operator,
+) -> tuple[Job, bool]:
     request = parse_job_request(payload)
     from jobs.tasks import run_synthesis_job, run_transcription_job
 
@@ -89,9 +100,11 @@ def create_job_from_payload(*, producer: str, payload: dict[str, Any]) -> tuple[
     with transaction.atomic():
         job = Job.objects.create(
             producer=producer,
+            operator=operator,
             task_ref=request.task_ref,
             job_type=request.job_type,
             lane=request.lane,
+            dispatch_mode=Job.DispatchMode.BATCH,
             priority=request.priority,
             backend=request.backend,
             model=request.model,
@@ -111,6 +124,59 @@ def create_job_from_payload(*, producer: str, payload: dict[str, Any]) -> tuple[
     job.refresh_from_db()
     reconcile_job_state(job)
     return job, True
+
+
+def create_operator_sync_transcription(
+    *,
+    operator,
+    source_path: Path,
+    source_name: str,
+    input_data: dict[str, Any],
+    language: str | None,
+    prompt: str | None = None,
+    request_model: str = "gpt-4o-mini-transcribe",
+) -> Job:
+    job = Job.objects.create(
+        producer=settings.VOXHELM_OPERATOR_PRODUCER_LABEL,
+        operator=operator,
+        task_ref="",
+        job_type=Job.JobType.TRANSCRIBE,
+        lane=Job.Lane.BATCH,
+        dispatch_mode=Job.DispatchMode.SYNC,
+        priority=Job.Priority.NORMAL,
+        backend="auto",
+        model=request_model,
+        language=language or "",
+        input_data=input_data,
+        output_data={"formats": list(OPERATOR_TRANSCRIPTION_OUTPUT_FORMATS)},
+        context_data={"source_name": source_name},
+        state=Job.State.RUNNING,
+        started_at=timezone.now(),
+    )
+    started = monotonic()
+    try:
+        result = transcribe_audio(
+            source_path,
+            TranscribeParams(
+                request_model=request_model,
+                prompt=prompt,
+                language=language,
+            ),
+        )
+        metadata = build_transcription_metadata(
+            requested_model=request_model,
+            requested_language=language,
+            result=result,
+            processing_seconds=round(monotonic() - started, 3),
+            source_url=str(input_data.get("url") or ""),
+            source_content_type=str(input_data.get("content_type") or ""),
+        )
+        persist_transcription_output_artifacts(job=job, result=result)
+        mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
+    except Exception as exc:
+        mark_job_failed(job=job, exc=exc)
+        raise
+    return job
 
 
 def parse_job_request(payload: dict[str, Any]) -> JobRequest:
@@ -232,7 +298,7 @@ def validate_transcription_output_formats(output: dict[str, Any]) -> list[str]:
             raise ApiError("output.formats entries must be strings.")
         normalized = raw.strip().lower()
         if normalized not in TRANSCRIPTION_OUTPUT_FORMATS:
-            raise ApiError("Unsupported output format. Use text, json, or vtt.")
+            raise ApiError("Unsupported output format. Use text, json, vtt, dote, or podlove.")
         if normalized == "webvtt":
             normalized = "vtt"
         if normalized not in output_formats:
@@ -448,18 +514,37 @@ def build_transcription_result_metadata(
     result: TranscriptionResult,
     processing_seconds: float,
 ) -> dict[str, Any]:
+    return build_transcription_metadata(
+        requested_model=job.model or "auto",
+        requested_language=job.language or None,
+        result=result,
+        processing_seconds=processing_seconds,
+        source_url=media.source_url,
+        source_content_type=media.content_type,
+    )
+
+
+def build_transcription_metadata(
+    *,
+    requested_model: str,
+    requested_language: str | None,
+    result: TranscriptionResult,
+    processing_seconds: float,
+    source_url: str,
+    source_content_type: str,
+) -> dict[str, Any]:
     duration_seconds = 0.0
     if result.segments:
         duration_seconds = max(segment.end for segment in result.segments)
     return {
         "backend": result.backend_name or settings.VOXHELM_STT_BACKEND,
-        "requested_model": job.model or "auto",
-        "model": result.model_name or job.model or "auto",
-        "language": result.language or job.language or "",
+        "requested_model": requested_model or "auto",
+        "model": result.model_name or requested_model or "auto",
+        "language": result.language or requested_language or "",
         "duration_seconds": duration_seconds,
         "processing_seconds": processing_seconds,
-        "source_url": media.source_url,
-        "source_content_type": media.content_type,
+        "source_url": source_url,
+        "source_content_type": source_content_type,
     }
 
 
@@ -491,7 +576,7 @@ def persist_transcription_output_artifacts(*, job: Job, result: TranscriptionRes
             kind=JobArtifact.Kind.TRANSCRIPT_TEXT,
             format_name="text",
             content_type="text/plain; charset=utf-8",
-            payload=result.text.encode("utf-8"),
+            payload=render_text(result).encode("utf-8"),
             exposed=True,
         )
     if "json" in requested_formats:
@@ -513,6 +598,28 @@ def persist_transcription_output_artifacts(*, job: Job, result: TranscriptionRes
             format_name="vtt",
             content_type="text/vtt; charset=utf-8",
             payload=render_vtt(result).encode("utf-8"),
+            exposed=True,
+        )
+    if "dote" in requested_formats:
+        dote_payload = json.dumps(render_dote(result), ensure_ascii=True, indent=2)
+        create_or_replace_artifact(
+            job=job,
+            name="transcript.dote.json",
+            kind=JobArtifact.Kind.TRANSCRIPT_DOTE,
+            format_name="dote",
+            content_type="application/json",
+            payload=dote_payload.encode("utf-8"),
+            exposed=True,
+        )
+    if "podlove" in requested_formats:
+        podlove_payload = json.dumps(render_podlove(result), ensure_ascii=True, indent=2)
+        create_or_replace_artifact(
+            job=job,
+            name="transcript.podlove.json",
+            kind=JobArtifact.Kind.TRANSCRIPT_PODLOVE,
+            format_name="podlove",
+            content_type="application/json",
+            payload=podlove_payload.encode("utf-8"),
             exposed=True,
         )
 

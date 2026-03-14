@@ -11,7 +11,8 @@ from django.views.decorators.http import require_GET, require_POST
 from jobs.artifacts import get_artifact_store
 from jobs.models import Job, JobArtifact
 from jobs.services import create_job_from_payload, serialize_job
-from transcriptions.views import ApiError, openai_error_response, require_bearer_token
+from transcriptions.errors import ApiError
+from transcriptions.views import openai_error_response, require_bearer_token
 
 
 @csrf_exempt

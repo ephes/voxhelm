@@ -10,6 +10,8 @@ from typing import Any, cast
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 
+from config.settings import env_tokens
+from transcriptions.errors import ApiError
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
@@ -173,6 +175,43 @@ def test_vtt_response_format(client, monkeypatch):
     assert "00:00:00.000 --> 00:00:01.500" in text
 
 
+def test_sync_contract_rejects_dote_response_format(client):
+    upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisper-1", "response_format": "dote"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "json, text, verbose_json, or vtt" in response.json()["error"]["message"]
+
+
+def test_sync_contract_rejects_podlove_response_format(client):
+    upload = SimpleUploadedFile("sample.mp3", b"mp3-bytes", content_type="audio/mpeg")
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisper-1", "response_format": "podlove"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "json, text, verbose_json, or vtt" in response.json()["error"]["message"]
+
+
+def test_env_tokens_rejects_reserved_label_in_json_syntax(monkeypatch):
+    monkeypatch.setenv("VOXHELM_BEARER_TOKENS", '{"__operator_ui__": "secret"}')
+
+    try:
+        env_tokens("VOXHELM_BEARER_TOKENS")
+    except ValueError as exc:
+        assert "reserved label" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected reserved bearer token label to be rejected")
+
+
 def test_url_mode_uses_allowlist(client, monkeypatch, settings):
     backend = DummyBackend()
     monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: backend)
@@ -247,13 +286,15 @@ def test_url_download_cleanup_on_size_limit(monkeypatch, settings, tmp_path):
         created_paths.append(Path(handle.name))
         return handle
 
-    monkeypatch.setattr("transcriptions.views.urlopen", lambda request, timeout: DummyResponse())
     monkeypatch.setattr(
-        "transcriptions.views.tempfile.NamedTemporaryFile",
+        "transcriptions.input_media.urlopen",
+        lambda request, timeout: DummyResponse(),
+    )
+    monkeypatch.setattr(
+        "transcriptions.input_media.tempfile.NamedTemporaryFile",
         fake_named_temporary_file,
     )
-
-    from transcriptions.views import ApiError, download_allowed_url_to_tempfile
+    from transcriptions.input_media import download_allowed_url_to_tempfile
 
     try:
         download_allowed_url_to_tempfile(source_url="https://media.example.com/file.mp3")

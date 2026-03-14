@@ -2,13 +2,13 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C15 and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13. Archive article-audio follow-on work and C17/OpenClaw remain draft.
+**Status:** C1-C15 and the Voxhelm service/runtime slice of C16 are implemented as of 2026-03-13. A new post-M3 C18 operator transcript follow-on is now planned; Archive article-audio consumer work and C17/OpenClaw remain draft.
 
 Current completion state:
 
 - Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15
 - Implemented at the Voxhelm service/runtime layer: C16
-- Not implemented yet: Archive article-audio consumer follow-on, C17
+- Not implemented yet: C18, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -34,6 +34,7 @@ Current completion state:
 | C14 | Home Assistant integration | M2 | C12, C11 |
 | C15 | TTS backend adapter layer (Piper) | M3 | C1 |
 | C16 | Batch TTS jobs | M3 | C15, C3, C4 |
+| C18 | Operator transcript UI + shared transcript outputs | Post-M3 follow-on | C6, C7, C10, C11 |
 | C17 | OpenClaw integration | M4 | C7 |
 
 ---
@@ -946,6 +947,79 @@ Current completion state:
 - Long article synthesis may produce very large audio files. Mitigate with text length limits and chunked synthesis.
 
 **Suggested implementation order:** Delivered at the service/runtime layer; Archive consumer follow-on remains future.
+
+---
+
+## Post-M3 Follow-On Chunks
+
+### C18 -- Operator Transcript UI + Shared Transcript Outputs
+
+**Purpose:** Add the first human-facing transcript UI to Voxhelm and finish the shared transcript-output boundary so DOTe and Podlove are produced once in Voxhelm instead of separately in each consumer.
+
+**Included scope:**
+
+- A small operator web UI inside Voxhelm's existing Django app
+- Django-session auth for the UI on the existing private ingress
+- Root route `/` as login first and authenticated operator home second
+- Initial deployment account for `jochen`
+- First-slice input routing:
+  - audio URL -> sync `POST /v1/audio/transcriptions`
+  - uploaded audio -> sync `POST /v1/audio/transcriptions`
+  - video URL -> batch `POST /v1/jobs`
+- Keep the shipped sync upload limit for uploaded audio (currently 25 MiB); long-form podcast episodes should use URL input and the batch path
+- Shared transcript conversion from canonical Whisper-style JSON into:
+  - `text`
+  - `json`
+  - `vtt`
+  - `dote`
+  - `podlove`
+- Batch `transcribe` artifact support for `dote` and `podlove`
+- UI result surface with inline transcript text plus download links for the first-slice transcript outputs
+- Recent-transcripts list for submissions created by the authenticated operator
+- Homelab service entry metadata pointing to `https://voxhelm.home.xn--wersdrfer-47a.de/`
+- Clear migration guidance for `django-cast` to drop local `render_dote(...)` and `render_podlove(...)` once it consumes Voxhelm-owned outputs in the next same-epic follow-up
+
+**Explicitly excluded scope:**
+
+- Batch upload support for transcription jobs (`input.kind=upload`)
+- Uploaded-video async support
+- Large async file uploads of any kind
+- A general operator dashboard or `/v1/status`
+- Archive article-audio/TTS work
+- OpenClaw integration
+
+**Dependencies:** C6 (batch transcript pipeline), C7 (sync transcription endpoint), C10 (proved current consumer-local conversion boundary), C11 (deployed private ingress)
+
+**Consumer(s):** Homelab operators, `django-cast` as a later simplification consumer
+
+**Primary interfaces:**
+
+- `POST /v1/audio/transcriptions`
+- `POST /v1/jobs`
+- `GET /v1/jobs/{id}`
+- `GET /v1/jobs/{id}/artifacts/{name}`
+- planned HTML route: `/`
+
+**Acceptance criteria:**
+
+- Operators can log into Voxhelm and submit audio URLs, video URLs, and uploaded audio through the new UI
+- The root route serves login first and then the authenticated transcript home
+- The UI uses sync for audio inputs and batch for video URL inputs
+- Uploaded audio stays within the shipped sync upload budget; long-form podcast episodes use URL/batch instead
+- The UI shows transcript text inline and download links for `text`, `json`, `vtt`, `dote`, and `podlove`
+- The UI shows recent transcripts created by the authenticated operator
+- Voxhelm can expose `text`, `json`, `vtt`, `dote`, and `podlove` for the first slice without duplicating conversion logic in the UI
+- Uploaded-video async is still explicitly deferred
+- Homelab links to the Voxhelm UI but does not redefine Voxhelm product behavior
+- `django-cast` has a clear same-epic follow-on path to remove local DOTe/Podlove conversion after the web flow works
+
+**Main risks:**
+
+- Pulling async file uploads into this chunk would broaden it into new ingestion/storage work
+- Mixed sync/batch UX can confuse operators if the UI does not make the routing visible
+- Letting the Homelab tile carry behavior details would split the source of truth across repos
+
+**Suggested implementation order:** After the current M3 runtime slice, before C17/OpenClaw. Finish the shared transcript conversion boundary first, then add the UI, then add the Homelab tile metadata.
 
 ---
 

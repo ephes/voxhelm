@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 
@@ -11,6 +12,10 @@ class Job(models.Model):
         SYNTHESIZE = "synthesize", "Synthesize"
 
     class Lane(models.TextChoices):
+        BATCH = "batch", "Batch"
+
+    class DispatchMode(models.TextChoices):
+        SYNC = "sync", "Sync"
         BATCH = "batch", "Batch"
 
     class Priority(models.TextChoices):
@@ -28,9 +33,21 @@ class Job(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     producer = models.CharField(max_length=64)
+    operator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="voxhelm_jobs",
+    )
     task_ref = models.CharField(max_length=255, blank=True)
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     lane = models.CharField(max_length=32, choices=Lane.choices, default=Lane.BATCH)
+    dispatch_mode = models.CharField(
+        max_length=16,
+        choices=DispatchMode.choices,
+        default=DispatchMode.BATCH,
+    )
     priority = models.CharField(
         max_length=32,
         choices=Priority.choices,
@@ -56,6 +73,7 @@ class Job(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["producer", "task_ref"]),
+            models.Index(fields=["operator", "created_at"]),
             models.Index(fields=["state"]),
         ]
 
@@ -67,6 +85,8 @@ class JobArtifact(models.Model):
         TRANSCRIPT_TEXT = "transcript_text", "Transcript text"
         TRANSCRIPT_JSON = "transcript_json", "Transcript JSON"
         TRANSCRIPT_VTT = "transcript_vtt", "Transcript VTT"
+        TRANSCRIPT_DOTE = "transcript_dote", "Transcript DOTe"
+        TRANSCRIPT_PODLOVE = "transcript_podlove", "Transcript Podlove"
         SPEECH_WAV = "speech_wav", "Speech WAV"
         SPEECH_MP3 = "speech_mp3", "Speech MP3"
         SPEECH_OGG = "speech_ogg", "Speech OGG"

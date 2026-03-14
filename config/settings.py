@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+VOXHELM_OPERATOR_PRODUCER_LABEL = "__operator_ui__"
+VOXHELM_RESERVED_BEARER_TOKEN_LABELS = {VOXHELM_OPERATOR_PRODUCER_LABEL}
 
 
 def env_list(name: str, *, default: str = "") -> list[str]:
@@ -40,7 +42,10 @@ def env_tokens(name: str) -> dict[str, str]:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError(f"{name} must be a JSON object when JSON syntax is used.")
-        return {str(key): str(value) for key, value in parsed.items()}
+        return validate_bearer_token_labels(
+            name,
+            {str(key): str(value) for key, value in parsed.items()},
+        )
 
     tokens: dict[str, str] = {}
     for entry in raw.replace("\n", ",").split(","):
@@ -51,6 +56,14 @@ def env_tokens(name: str) -> dict[str, str]:
             raise ValueError(f"Invalid {name} entry '{normalized}'. Use label=token pairs.")
         label, token = normalized.split("=", 1)
         tokens[label.strip()] = token.strip()
+    return validate_bearer_token_labels(name, tokens)
+
+
+def validate_bearer_token_labels(name: str, tokens: dict[str, str]) -> dict[str, str]:
+    reserved = sorted(VOXHELM_RESERVED_BEARER_TOKEN_LABELS.intersection(tokens))
+    if reserved:
+        labels = ", ".join(reserved)
+        raise ValueError(f"{name} contains reserved label(s): {labels}.")
     return tokens
 
 
@@ -81,18 +94,37 @@ ASGI_APPLICATION = "config.asgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 INSTALLED_APPS = [
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
     "django_tasks",
     "django_tasks_db",
+    "operators",
     "transcriptions",
     "jobs",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
 ]
 
-TEMPLATES: list[dict[str, object]] = []
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+            ]
+        },
+    }
+]
 
 DATABASES = {
     "default": {
@@ -105,6 +137,10 @@ LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
+
+LOGIN_URL = "/"
+LOGIN_REDIRECT_URL = "/"
+LOGOUT_REDIRECT_URL = "/"
 
 VOXHELM_BEARER_TOKENS = env_tokens("VOXHELM_BEARER_TOKENS")
 VOXHELM_STT_BACKEND = os.getenv("VOXHELM_STT_BACKEND", "whispercpp").strip()

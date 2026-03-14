@@ -8,6 +8,13 @@ Archive:
 - `GET /v1/health`
 - `POST /v1/audio/transcriptions`
 
+The current slice also adds the first Voxhelm-owned operator UI:
+
+- `/` browser login and operator transcript console
+- sync routing for audio URLs and uploaded audio
+- batch routing for video URLs
+- transcript downloads for `text`, `json`, `vtt`, `dote`, and `podlove`
+
 ## Local Development
 
 ```bash
@@ -54,7 +61,18 @@ export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
+export VOXHELM_BOOTSTRAP_OPERATOR_USERNAME="jochen"
+export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
+export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
+
+Bootstrap the initial operator account after migrations:
+
+```bash
+uv run python manage.py bootstrap_operator --username jochen --password "replace-me"
+```
+
+Deploy-time note: the deployment layer should call the same in-app command with the real secret rather than creating the operator directly in a separate repo.
 
 ## OpenAI-Compatible API
 

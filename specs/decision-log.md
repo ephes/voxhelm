@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, are implemented as of 2026-03-13. Later backend expansion, Archive article-audio follow-on work, and M4/OpenClaw remain planned.
+**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, are implemented as of 2026-03-13. A post-M3 operator transcript UI plus shared transcript-output follow-on is now planned alongside later backend expansion, Archive article-audio consumer work, and M4/OpenClaw.
 
 ---
 
@@ -107,7 +107,9 @@
 | B. Voxhelm-specific schema | Normalize all backend outputs into one Voxhelm schema; backends differ in what they return |
 | C. Consumer-requested format | `output.formats` field in job request; Voxhelm performs conversion server-side |
 
-**Recommended default:** Option C with Whisper-native JSON as the internal canonical transcript representation. The sync OpenAI-compatible endpoint still returns `{"text": "..."}` (or `verbose_json` with segments) to match Archive's and podcast-transcript's expectations, but the async job API should support producer-requested output formats such as plain text, Whisper JSON, DOTe, Podlove JSON, and WebVTT. Voxhelm should normalize backend output internally and perform the required format conversions server-side so different consumers can rely on one service contract.
+**Recommended default:** Option C with Whisper-native JSON as the internal canonical transcript representation. The sync OpenAI-compatible endpoint still returns `{"text": "..."}` (or `verbose_json` with segments) to match Archive's and podcast-transcript's expectations, but the batch/job layer should be the place where Voxhelm owns shared transcript conversions. Producer-requested output formats should converge on plain text, Whisper JSON, WebVTT, DOTe, and Podlove JSON so multiple consumers can rely on one service contract instead of duplicating conversion logic.
+
+**Implementation note (2026-03-14):** This decision is only partially implemented today. Voxhelm currently exposes/stores `json`, `text`, and `vtt` batch artifacts; `django-cast` still renders DOTe and Podlove locally from the JSON artifact. The next follow-on slice should finish D-06 by moving DOTe/Podlove conversion into Voxhelm's shared batch output layer while keeping the sync OpenAI-compatible contract unchanged.
 
 **Blocks implementation:** No — the sync endpoint format is clear (OpenAI-compatible), and the async artifact/output model is now explicit.
 
@@ -394,6 +396,48 @@ That default is intentionally conservative because the first slice does not yet 
 Do not add slot-count tuning in the first slice because the accepted design is single-slot cooperative serialization, not reserved parallel capacity.
 
 **Blocks implementation:** Yes -- this is the reviewed C13 design baseline.
+
+---
+
+## D-20: What is the smallest sensible operator transcript slice after M3?
+
+**Context:** Voxhelm already has the sync and batch STT primitives, but no human HTML UI. A second transcript consumer now wants the same DOTe/Podlove shapes that `django-cast` currently renders locally, which changes the boundary: a consumer-local conversion decision now creates duplication instead of preserving a clean service contract.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Separate operator app; keep DOTe/Podlove consumer-local | Avoids touching Voxhelm's HTML/auth surface, but duplicates transcript conversion logic across the operator UI and `django-cast` |
+| B. Voxhelm-owned operator UI plus immediate async upload support for all file types | One product surface, but broadens the slice into a new upload pipeline before the current batch contract is ready |
+| C. Voxhelm-owned operator UI with mixed sync/batch routing, server-owned DOTe/Podlove batch outputs, and async uploads deferred | Smallest coherent slice that reuses the shipped APIs, fixes the shared-output boundary, and avoids inventing a new large-upload path prematurely |
+
+**Recommended default:** Option C.
+
+The follow-on slice should be defined as:
+
+- the operator web UI lives inside Voxhelm's existing Django app, not as a separate service
+- auth for that UI uses Django session auth on the existing private ingress; browsers do not use producer bearer tokens directly
+- the root route `/` should be the operator login/landing flow; after login it becomes the place where operators submit work and see their recent transcripts
+- the first UI slice is **mixed**, not sync-only or batch-only:
+  - URL audio -> sync `POST /v1/audio/transcriptions`
+  - uploaded audio -> sync `POST /v1/audio/transcriptions`
+  - URL video -> batch `POST /v1/jobs`
+  - uploaded video -> deferred until batch upload support exists
+- the current 25 MiB sync upload limit remains in place for uploaded-audio convenience because it matches the shipped sync API contract; this does **not** make sense as the long-form podcast path, so long audio/video should use URL input and the batch path instead
+- large async file uploads are explicitly **deferred**; the first slice should tell operators to use a fetchable URL when work needs the batch path
+- Voxhelm becomes the canonical producer of DOTe and Podlove for batch transcription outputs, using Whisper-native JSON as the internal canonical representation
+- the sync API contract stays OpenAI-compatible (`json`, `text`, `verbose_json`, `vtt`) rather than growing new sync response formats for DOTe/Podlove
+- the first UI result surface should show the transcript inline plus download links for the available output formats instead of only returning raw files
+- the first UI should also show a recent-transcripts list scoped to the authenticated operator's submissions
+- the Homelab tile is part of the same follow-on slice as a tiny discoverability step once the UI route exists, but Homelab stores only service metadata (name, URL, description), not Voxhelm product behavior
+- deployment should provision one initial operator account for Jochen so the UI is usable immediately after rollout
+- Archive article-audio remains a separate TTS consumer follow-on and is intentionally not grouped into this transcript/UI slice
+
+**Recommended Homelab tile target:** name `Voxhelm`, URL `https://voxhelm.home.xn--wersdrfer-47a.de/`, description `Operator UI for local audio/video transcription and transcript exports`.
+
+**django-cast recommendation:** keep the local `render_dote(...)` and `render_podlove(...)` code until the Voxhelm web flow and server-owned outputs are working, then do the `django-cast` simplification as the next follow-up in the same epic.
+
+**Blocks implementation:** No -- the runtime foundation already exists. This decision only gates the next follow-on planning slice.
 
 ---
 

@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, and the core M2/M3 runtime work are implemented as of 2026-03-13, including the first C13 lane-scheduling slice. Remaining planned work is a post-M3 operator transcript UI plus shared transcript-output follow-on, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -224,7 +224,7 @@ Completed on 2026-03-12:
 - **podcast-pipeline follow-on:** Delivered. The pipeline now provides the required audio-input compatibility for the Voxhelm-backed `podcast-transcript` path.
 - **python-podcast / django-cast integration:** Wagtail-admin workflow in `django-cast` / `python-podcast` that lets privileged editors trigger transcript generation from the Wagtail admin UI for an episode or audio object, persists the existing `Transcript` artifacts, and does not require shell access.
 - **python-podcast / django-cast configuration:** Voxhelm API base URL, API token, and optional model/language preferences are manageable through Wagtail admin (for example via Wagtail settings or a protected snippet), not only through Django settings or environment variables.
-- Structured output format negotiation: job submission can request `["text", "json", "dote", "podlove", "vtt"]` output formats
+- Structured output format negotiation is only partially delivered today: shipped batch transcript artifacts are `["text", "json", "vtt"]`, while `dote` and `podlove` remain consumer-local in `django-cast` pending the post-M3 operator transcript follow-on
 - The shipped STT backend set now includes `whisper.cpp`, `mlx-whisper`, and an experimental WhisperKit path. WhisperKit remains non-default and should not silently replace the current deployed `whisper.cpp` default.
 
 ### What is deferred
@@ -354,6 +354,82 @@ Still pending:
 
 ---
 
+## Post-M3 Follow-On Chunk: Operator Transcript UI And Shared Transcript Outputs
+
+**Title:** Human-facing transcript UI, Voxhelm-owned DOTe/Podlove, and Homelab entry
+
+**Planning decision:** This is a named follow-on chunk under the existing plan, not a new numbered milestone. The service/runtime foundation is already live; this slice mainly adds a human-facing surface and completes the shared transcript-format boundary.
+
+### What ships
+
+- A simple operator web UI inside Voxhelm's existing Django app at `https://voxhelm.home.xn--wersdrfer-47a.de/`
+- Django-session auth for that UI on the existing private ingress; no browser use of producer bearer tokens
+- The root route acts as login first, then as the transcript submission/home surface after authentication
+- Deployment provisions one initial operator account for `jochen`
+- A mixed first slice rather than a pure sync-only or pure batch-only UI:
+  - URL audio uses sync `POST /v1/audio/transcriptions`
+  - uploaded audio uses sync `POST /v1/audio/transcriptions`
+  - URL video uses batch `POST /v1/jobs`
+  - uploaded video is deferred
+- Uploaded audio in the first slice keeps the shipped sync upload limit (`VOXHELM_MAX_UPLOAD_BYTES`, currently 25 MiB). That is a convenience path for smaller files, not the intended path for long podcast episodes.
+- Shared transcript conversion owned by Voxhelm from canonical Whisper-style JSON into:
+  - `text`
+  - `json`
+  - `vtt`
+  - `dote`
+  - `podlove`
+- Batch `transcribe` outputs extended so `dote` and `podlove` become first-class server-produced artifacts alongside the already shipped `text`, `json`, and `vtt`
+- UI result/download surface that shows the transcript inline and offers download links for the first-slice transcript outputs without reimplementing conversion logic in a second repo
+- Recent-transcripts list on the authenticated home page so an operator can revisit recent submissions they created
+- Homelab tile metadata that points to the UI once it exists:
+  - name: `Voxhelm`
+  - URL: `https://voxhelm.home.xn--wersdrfer-47a.de/`
+  - description: `Operator UI for local audio/video transcription and transcript exports`
+
+### What is deferred
+
+- Batch upload inputs for transcription jobs (`input.kind=upload`)
+- Uploaded-video async support
+- Large async file uploads of any kind; operators should use a fetchable URL when work needs the batch path
+- A broader status/dashboard surface such as `GET /v1/status`
+- Public or end-user auth flows
+- Archive article-audio consumer integration
+- OpenClaw integration (M4)
+
+### Dependencies
+
+- M1a sync STT contract
+- M1b batch jobs and artifact proxying
+- M1c consumer integrations, which proved the current JSON/VTT boundary and exposed the DOTe/Podlove duplication
+- Existing private ingress and Django deployment shape from the shipped service
+
+**Sequencing note:** this follow-on is intentionally scheduled after the current M3 runtime slice, but it is not technically blocked on TTS. Its real implementation dependencies are the shipped M1 surfaces above.
+
+### Success criteria
+
+- An operator can log into Voxhelm and submit:
+  - audio URL
+  - video URL
+  - uploaded audio
+- The first UI slice uses the intended path per input type:
+  - sync for audio URL and uploaded audio
+  - batch for video URL
+- Uploaded audio remains limited to the shipped sync upload budget; long-form podcast episodes use URL input and the batch path instead of trying to expand sync uploads
+- After login, the operator can see the transcript result inline plus download links for `text`, `json`, `vtt`, `dote`, and `podlove`
+- After login, the operator can see a recent-transcripts list for submissions they created
+- Voxhelm becomes the canonical batch producer of `dote` and `podlove`
+- The Homelab tile lands as part of the same follow-on, but only as service metadata pointing at the Voxhelm-owned UI
+- `django-cast` has a clear same-epic follow-up path: once the Voxhelm web/UI slice works, it switches to Voxhelm-owned `dote`/`podlove` and can drop local conversion code
+- Archive article-audio remains explicitly out of scope for this slice
+
+### Key risks
+
+- Mixing sync and batch UX can be confusing if the UI does not clearly explain why some inputs return immediately and others become jobs
+- Pulling async file uploads into this slice would broaden it into new storage and ingestion work before the batch contract is ready
+- Session-authenticated operator UI must stay narrowly scoped so the slice does not turn into a generic admin/dashboard project
+
+---
+
 ## Milestone 4: OpenClaw Integration
 
 **Title:** Stable API contract for OpenClaw plugins
@@ -395,6 +471,7 @@ Still pending:
 | M1c | Consumer Integrations | podcast-transcript, python-podcast, podcast-pipeline | M1b | 1-2 weeks |
 | M2 | Wyoming Voice | Home Assistant | M0 Spike 0c, M1a | delivered |
 | M3 | TTS Runtime + Batch | Home Assistant, future Archive article audio | M1b, M2 | delivered at service/runtime layer |
+| Follow-on | Operator transcript UI + shared outputs | Homelab operators, later django-cast simplification | M1a, M1b, M1c | planned after M3; not a numbered milestone |
 | M4 | OpenClaw | OpenClaw | M1a, M3 | 1 week |
 
 **Critical observation:** M1a is the fastest path to production value. A single developer should target M1a as the first deliverable, which could be usable within 2 weeks of starting (including spikes). The full PRD Milestone 1 has been split into M1a/M1b/M1c to keep each increment deployable and testable.

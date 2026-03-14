@@ -169,6 +169,49 @@ def test_immediate_backend_executes_job_and_serves_artifacts(
 
 
 @pytest.mark.django_db
+def test_transcription_job_accepts_dote_and_podlove_outputs(
+    client, settings, monkeypatch, tmp_path
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    payload = build_job_payload()
+    payload["output"] = {"formats": ["text", "json", "vtt", "dote", "podlove"]}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 201
+    assert set(result["artifacts"]) == {"text", "json", "vtt", "dote", "podlove"}
+
+    dote_response = client.get(result["artifacts"]["dote"], HTTP_AUTHORIZATION="Bearer test-token")
+    assert dote_response.status_code == 200
+    assert dote_response.json()["lines"][0]["startTime"] == "00:00:00,000"
+
+    podlove_response = client.get(
+        result["artifacts"]["podlove"],
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert podlove_response.status_code == 200
+    assert podlove_response.json()["transcripts"][1]["text"] == "world"
+
+
+@pytest.mark.django_db
 def test_transcription_job_uses_non_interactive_scheduler_lane(
     client, settings, monkeypatch, tmp_path
 ):

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voxhelm Operator</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #64748b;
+      --bg: #f5efe4;
+      --panel: #fffdf8;
+      --line: #d7ccb8;
+      --accent: #9c4f2f;
+      --accent-2: #255f55;
+      --danger: #a11d33;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Iowan Old Style", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(156, 79, 47, 0.12), transparent 28%),
+        linear-gradient(180deg, #fbf7ef 0%, var(--bg) 100%);
+    }
+    a { color: var(--accent-2); }
+    .shell {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.6rem);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+    }
+    .hero p {
+      max-width: 48rem;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+    .logout {
+      margin-top: 8px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(23, 32, 51, 0.05);
+    }
+    .panel h2, .panel h3 {
+      margin-top: 0;
+    }
+    .stack > * + * {
+      margin-top: 14px;
+    }
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    input[type="text"],
+    input[type="url"],
+    input[type="password"],
+    input[type="file"] {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font: inherit;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 18px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    .hint, .meta, .empty {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .errors {
+      color: var(--danger);
+      margin: 0;
+      padding-left: 18px;
+    }
+    .downloads, .recent {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+    .downloads a, .recent a {
+      text-decoration: none;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 8px 12px;
+      color: var(--ink);
+      background: #fff;
+    }
+    .transcript {
+      white-space: pre-wrap;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      min-height: 160px;
+      margin: 0;
+      font-size: 0.98rem;
+      line-height: 1.55;
+    }
+    .recent-list {
+      display: grid;
+      gap: 12px;
+    }
+    .recent-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .recent-card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    @media (max-width: 840px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .hero {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    {% if request.user.is_authenticated %}
+      <section class="hero">
+        <div>
+          <p class="meta">Voxhelm operator transcript console</p>
+          <h1>Route media, inspect transcripts, export once.</h1>
+          <p>Audio URLs and uploaded audio run through the sync transcription path. Video URLs stay on the existing batch job path and surface their transcript artifacts here when ready.</p>
+        </div>
+        <form class="logout" method="post" action="{% url 'logout' %}">
+          {% csrf_token %}
+          <button class="secondary" type="submit">Log out</button>
+        </form>
+      </section>
+
+      <section class="grid">
+        <div class="stack">
+          <article class="panel">
+            <h2>Submit Transcript</h2>
+            <p class="hint">Provide exactly one input. Uploaded video is intentionally out of scope for this slice.</p>
+            {% if form.non_field_errors %}
+              <ul class="errors">
+                {% for error in form.non_field_errors %}
+                  <li>{{ error }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+            <form method="post" enctype="multipart/form-data" class="stack">
+              {% csrf_token %}
+              <div>
+                <label for="{{ form.audio_url.id_for_label }}">Audio URL</label>
+                {{ form.audio_url }}
+                {% for error in form.audio_url.errors %}<div class="errors">{{ error }}</div>{% endfor %}
+              </div>
+              <div>
+                <label for="{{ form.video_url.id_for_label }}">Video URL</label>
+                {{ form.video_url }}
+                {% for error in form.video_url.errors %}<div class="errors">{{ error }}</div>{% endfor %}
+              </div>
+              <div>
+                <label for="{{ form.audio_file.id_for_label }}">Uploaded audio file</label>
+                {{ form.audio_file }}
+                {% for error in form.audio_file.errors %}<div class="errors">{{ error }}</div>{% endfor %}
+              </div>
+              <div>
+                <label for="{{ form.language.id_for_label }}">Language hint</label>
+                {{ form.language }}
+              </div>
+              <button type="submit">Run transcript</button>
+            </form>
+          </article>
+
+          <article class="panel">
+            <h2>Selected Result</h2>
+            {% if selected_job %}
+              <p class="meta">
+                {{ selected_job.dispatch_mode|title }} route
+                · {{ selected_job.state|title }}
+                · {{ selected_job.created_at }}
+              </p>
+              {% if selected_job.input_data.kind == "upload" %}
+                <p class="meta">Source: {{ selected_job.input_data.filename }}</p>
+              {% else %}
+                <p class="meta">Source: {{ selected_job.input_data.url }}</p>
+              {% endif %}
+              {% if selected_job_artifacts %}
+                <ul class="downloads">
+                  {% for download in selected_job_artifacts %}
+                    <li><a class="chip" href="{{ download.url }}">{{ download.label }}</a></li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+              {% if selected_job.state == "succeeded" %}
+                <pre class="transcript">{{ selected_job.result_text }}</pre>
+              {% else %}
+                <p class="empty">This transcript is not finished yet. Refresh the page to pick up batch progress.</p>
+              {% endif %}
+            {% else %}
+              <p class="empty">No transcripts yet.</p>
+            {% endif %}
+          </article>
+        </div>
+
+        <aside class="panel">
+          <h3>Recent Transcripts</h3>
+          <div class="recent-list">
+            {% for job in recent_jobs %}
+              <div class="recent-card">
+                <strong><a href="/?job={{ job.id }}">{{ job.dispatch_mode|title }} · {{ job.state|title }}</a></strong>
+                {% if job.input_data.kind == "upload" %}
+                  <div class="meta">{{ job.input_data.filename }}</div>
+                {% else %}
+                  <div class="meta">{{ job.input_data.url }}</div>
+                {% endif %}
+              </div>
+            {% empty %}
+              <p class="empty">No recent transcripts for this operator.</p>
+            {% endfor %}
+          </div>
+        </aside>
+      </section>
+    {% else %}
+      <section class="hero">
+        <div>
+          <p class="meta">Voxhelm operator login</p>
+          <h1>Transcript operations stay inside Voxhelm.</h1>
+          <p>Sign in with the operator account to run local audio and video transcript flows through the existing Voxhelm service boundary.</p>
+        </div>
+      </section>
+      <section class="panel" style="max-width: 480px;">
+        <h2>Sign In</h2>
+        {% if login_form.non_field_errors %}
+          <ul class="errors">
+            {% for error in login_form.non_field_errors %}
+              <li>{{ error }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        <form method="post" class="stack">
+          {% csrf_token %}
+          <div>
+            <label for="{{ login_form.username.id_for_label }}">Username</label>
+            {{ login_form.username }}
+          </div>
+          <div>
+            <label for="{{ login_form.password.id_for_label }}">Password</label>
+            {{ login_form.password }}
+          </div>
+          <button type="submit">Log in</button>
+        </form>
+      </section>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
-from transcriptions.views import ApiError
+from transcriptions.errors import ApiError
 
 AUDIO_SUFFIXES: Final[dict[str, str]] = {
     ".flac": "audio/flac",

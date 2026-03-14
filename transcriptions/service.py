@@ -17,6 +17,7 @@ from uuid import uuid4
 from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+from transcriptions import formats as transcript_formats
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
@@ -424,34 +425,11 @@ def timestamp_to_seconds(timestamp: str) -> float:
 
 
 def render_verbose_json(result: TranscriptionResult) -> dict[str, Any]:
-    return {
-        "task": "transcribe",
-        "language": result.language,
-        "text": result.text,
-        "segments": [segment.as_verbose_json() for segment in result.segments],
-    }
+    return transcript_formats.render_verbose_json(result)
 
 
 def render_vtt(result: TranscriptionResult) -> str:
-    lines = ["WEBVTT", ""]
-    for segment in result.segments:
-        timestamp_line = (
-            f"{format_vtt_timestamp(segment.start)} --> {format_vtt_timestamp(segment.end)}"
-        )
-        lines.append(timestamp_line)
-        lines.append(segment.text)
-        lines.append("")
-    if len(lines) == 2 and result.text:
-        lines.extend(["00:00:00.000 --> 00:00:00.000", result.text, ""])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def format_vtt_timestamp(seconds: float) -> str:
-    milliseconds = max(int(round(seconds * 1000)), 0)
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02}.{millis:03}"
+    return transcript_formats.render_vtt(result)
 
 
 def get_backend_service() -> BackendProtocol:
