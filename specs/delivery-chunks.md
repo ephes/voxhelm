@@ -699,6 +699,8 @@ Current completion state:
 
 ### C20 -- Large-Media Batch Input + Service-Owned Chunking
 
+**Implementation note (2026-03-15):** Partially delivered. Voxhelm now has a producer-facing staged-audio batch path via `POST /v1/uploads` plus `input.kind=upload` / `input.upload_id` on `POST /v1/jobs`, with worker-owned materialization into the normal job source artifact and staged-object cleanup after execution. URL audio/video behavior is unchanged. Uploaded video and true chunk splitting/stitching remain explicit follow-ons, so this slice closes the reusable large/private/local audio handoff gap without claiming the broader media-processing work is complete.
+
 **Purpose:** Let Voxhelm accept oversized/private/local transcription media through an explicit batch path so consumers do not need their own chunking, transcoding, or stitching logic just to get media past the sync upload ceiling.
 
 **Included scope:**

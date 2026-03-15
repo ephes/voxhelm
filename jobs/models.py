@@ -108,3 +108,30 @@ class JobArtifact(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["job", "name"], name="jobs_artifact_job_name_unique")
         ]
+
+
+class StagedMedia(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    producer = models.CharField(max_length=64)
+    original_filename = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=255)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    storage_backend = models.CharField(max_length=32)
+    storage_key = models.CharField(max_length=512)
+    claimed_by_job = models.ForeignKey(
+        Job,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staged_inputs",
+    )
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["producer", "created_at"]),
+            models.Index(fields=["expires_at"]),
+        ]

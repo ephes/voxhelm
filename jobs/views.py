@@ -8,11 +8,30 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from jobs.artifacts import get_artifact_store
 from jobs.models import Job, JobArtifact
 from jobs.services import create_job_from_payload, serialize_job
+from jobs.staging import serialize_staged_media, stage_uploaded_audio
 from transcriptions.errors import ApiError
 from transcriptions.views import openai_error_response, require_bearer_token
+
+
+@csrf_exempt
+@require_POST
+def uploads_collection(request: HttpRequest) -> JsonResponse:
+    try:
+        producer = require_bearer_token(request)
+        content_type = (request.content_type or "").lower()
+        if not content_type.startswith("multipart/form-data"):
+            raise ApiError("Batch upload staging requires multipart/form-data.")
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ApiError("Multipart requests must include a file field named 'file'.")
+        staged_media = stage_uploaded_audio(producer=producer, upload=upload)
+        return JsonResponse(serialize_staged_media(staged_media), status=201)
+    except ApiError as exc:
+        return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
+    except RuntimeError as exc:
+        return openai_error_response(str(exc), status=500, error_type="server_error")
 
 
 @csrf_exempt
@@ -53,6 +72,8 @@ def job_artifact(request: HttpRequest, job_id: UUID, name: str) -> HttpResponse:
         producer = require_bearer_token(request)
         job = get_object_or_404(Job, id=job_id, producer=producer)
         artifact = get_object_or_404(JobArtifact, job=job, name=name, exposed=True)
+        from jobs.artifacts import get_artifact_store
+
         store = get_artifact_store()
         data = store.read_bytes(key=artifact.storage_key)
         return HttpResponse(data, content_type=artifact.content_type)

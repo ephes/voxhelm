@@ -27,6 +27,10 @@ class ArtifactStore(Protocol):
 
     def read_bytes(self, *, key: str) -> bytes: ...
 
+    def download_file(self, *, key: str, destination_path: Path) -> None: ...
+
+    def delete(self, *, key: str) -> None: ...
+
 
 class FilesystemArtifactStore:
     backend_name = "filesystem"
@@ -58,6 +62,15 @@ class FilesystemArtifactStore:
 
     def read_bytes(self, *, key: str) -> bytes:
         return (self.root / key).read_bytes()
+
+    def download_file(self, *, key: str, destination_path: Path) -> None:
+        source = self.root / key
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination_path)
+
+    def delete(self, *, key: str) -> None:
+        target = self.root / key
+        target.unlink(missing_ok=True)
 
 
 class S3ArtifactStore:
@@ -112,6 +125,13 @@ class S3ArtifactStore:
     def read_bytes(self, *, key: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
+
+    def download_file(self, *, key: str, destination_path: Path) -> None:
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        self.client.download_file(self.bucket, key, str(destination_path))
+
+    def delete(self, *, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
 
 @lru_cache(maxsize=1)

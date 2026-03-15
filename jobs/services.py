@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -22,7 +23,14 @@ from jobs.media import (
     extract_audio_from_video,
     is_video_path,
 )
-from jobs.models import Job, JobArtifact
+from jobs.models import Job, JobArtifact, StagedMedia
+from jobs.staging import (
+    claim_staged_media_for_job,
+    cleanup_expired_staged_media,
+    delete_staged_media,
+    get_staged_media_for_submission,
+    materialize_staged_media,
+)
 from synthesis.service import (
     AUDIO_OUTPUT_FORMATS,
     MAX_TTS_SPEED,
@@ -96,8 +104,24 @@ def create_job_from_payload_for_actor(
     task_callable = (
         run_synthesis_job if request.job_type == Job.JobType.SYNTHESIZE else run_transcription_job
     )
+    if request.job_type == Job.JobType.TRANSCRIBE and request.input_data.get("kind") == "upload":
+        cleanup_expired_staged_media(exclude_upload_id=str(request.input_data["upload_id"]))
 
     with transaction.atomic():
+        staged_media: StagedMedia | None = None
+        input_data = request.input_data
+        if request.job_type == Job.JobType.TRANSCRIBE and input_data.get("kind") == "upload":
+            staged_media = get_staged_media_for_submission(
+                producer=producer,
+                upload_id=str(input_data["upload_id"]),
+            )
+            input_data = {
+                "kind": "upload",
+                "upload_id": str(staged_media.id),
+                "filename": staged_media.original_filename,
+                "content_type": staged_media.content_type,
+                "size_bytes": staged_media.size_bytes,
+            }
         job = Job.objects.create(
             producer=producer,
             operator=operator,
@@ -109,11 +133,13 @@ def create_job_from_payload_for_actor(
             backend=request.backend,
             model=request.model,
             language=request.language or "",
-            input_data=request.input_data,
+            input_data=input_data,
             output_data={"formats": request.output_formats},
             context_data=request.context,
             state=Job.State.QUEUED,
         )
+        if staged_media is not None:
+            claim_staged_media_for_job(staged=staged_media, job=job)
         task_result = task_callable.using(
             priority=PRIORITY_TO_TASK_PRIORITY[Job.Priority(request.priority)],
             queue_name=settings.VOXHELM_TASK_QUEUE,
@@ -168,6 +194,8 @@ def create_operator_sync_transcription(
             requested_language=language,
             result=result,
             processing_seconds=round(monotonic() - started, 3),
+            source_kind=str(input_data.get("kind") or ""),
+            source_name=source_name,
             source_url=str(input_data.get("url") or ""),
             source_content_type=str(input_data.get("content_type") or ""),
         )
@@ -195,14 +223,24 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
 
     input_data = ensure_object(payload.get("input"), "input")
     input_kind = optional_string(input_data.get("kind"))
-    if input_kind != "url":
-        raise ApiError("M1b currently supports only input.kind=url for transcribe jobs.")
-    source_url = optional_string(input_data.get("url"))
-    if not source_url:
-        raise ApiError("Batch transcription requires input.url.")
-    parsed = urlparse(source_url)
-    if not parsed.scheme or not parsed.netloc:
-        raise ApiError("input.url must be an absolute URL.")
+    if input_kind == "url":
+        source_url = optional_string(input_data.get("url"))
+        if not source_url:
+            raise ApiError("Batch transcription requires input.url.")
+        parsed = urlparse(source_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ApiError("input.url must be an absolute URL.")
+        normalized_input_data = {"kind": "url", "url": source_url}
+    elif input_kind == "upload":
+        upload_id = optional_string(input_data.get("upload_id"))
+        if not upload_id:
+            raise ApiError("Batch upload transcription requires input.upload_id.")
+        normalized_input_data = {
+            "kind": "upload",
+            "upload_id": ensure_uuid_string(upload_id, "input.upload_id"),
+        }
+    else:
+        raise ApiError("Transcribe jobs support input.kind=url or input.kind=upload.")
 
     output_formats = validate_transcription_output_formats(
         ensure_object(payload.get("output", {}), "output")
@@ -217,7 +255,7 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         backend=backend,
         model=model,
         language=language,
-        input_data={"kind": "url", "url": source_url},
+        input_data=normalized_input_data,
         output_formats=output_formats,
         context=context,
         task_ref=task_ref,
@@ -382,14 +420,25 @@ def ensure_object(value: object, field_name: str) -> dict[str, Any]:
     return value
 
 
+def ensure_uuid_string(value: str, field_name: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise ApiError(f"{field_name} must be a UUID string.") from exc
+
+
 def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, Any]:
     job = initialize_running_job(job_id=job_id, task_result_id=task_result_id)
     media: DownloadedMedia | None = None
+    staged_media: StagedMedia | None = None
     extracted_audio_path: Path | None = None
     started = monotonic()
     try:
-        media = download_allowed_media(source_url=str(job.input_data["url"]))
+        media, staged_media = prepare_transcription_input_media(job=job)
         store_job_input_artifact(job=job, media=media)
+        if staged_media is not None:
+            delete_staged_media(staged=staged_media, missing_ok=True)
+            staged_media = None
 
         audio_path = media.path
         if is_video_path(media.path, content_type=media.content_type):
@@ -423,6 +472,30 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             media.path.unlink(missing_ok=True)
         if extracted_audio_path is not None:
             extracted_audio_path.unlink(missing_ok=True)
+        if staged_media is not None:
+            try:
+                delete_staged_media(staged=staged_media, missing_ok=True)
+            except Exception:
+                pass
+
+
+def prepare_transcription_input_media(*, job: Job) -> tuple[DownloadedMedia, StagedMedia | None]:
+    input_kind = str(job.input_data.get("kind") or "")
+    if input_kind == "url":
+        return download_allowed_media(source_url=str(job.input_data["url"])), None
+    if input_kind == "upload":
+        try:
+            staged_media = StagedMedia.objects.get(
+                id=str(job.input_data["upload_id"]),
+                producer=job.producer,
+                claimed_by_job=job,
+            )
+        except StagedMedia.DoesNotExist as exc:
+            raise RuntimeError(
+                "Failed to materialize staged input: upload handle is missing."
+            ) from exc
+        return materialize_staged_media(staged=staged_media), staged_media
+    raise RuntimeError(f"Unsupported transcription input kind '{input_kind}'.")
 
 
 def execute_synthesis_job(*, job_id: str, task_result_id: str) -> dict[str, Any]:
@@ -519,6 +592,8 @@ def build_transcription_result_metadata(
         requested_language=job.language or None,
         result=result,
         processing_seconds=processing_seconds,
+        source_kind=media.source_kind,
+        source_name=media.source_name,
         source_url=media.source_url,
         source_content_type=media.content_type,
     )
@@ -530,6 +605,8 @@ def build_transcription_metadata(
     requested_language: str | None,
     result: TranscriptionResult,
     processing_seconds: float,
+    source_kind: str,
+    source_name: str,
     source_url: str,
     source_content_type: str,
 ) -> dict[str, Any]:
@@ -543,6 +620,8 @@ def build_transcription_metadata(
         "language": result.language or requested_language or "",
         "duration_seconds": duration_seconds,
         "processing_seconds": processing_seconds,
+        "source_kind": source_kind,
+        "source_name": source_name,
         "source_url": source_url,
         "source_content_type": source_content_type,
     }
@@ -643,10 +722,9 @@ def persist_synthesis_output_artifacts(*, job: Job, exports: list[ExportedAudio]
 
 
 def store_job_input_artifact(*, job: Job, media: DownloadedMedia) -> None:
-    source_name = Path(urlparse(media.source_url).path or "input").name or "input"
     create_or_replace_artifact_from_file(
         job=job,
-        name=source_name,
+        name=media.source_name or "input",
         kind=JobArtifact.Kind.SOURCE,
         format_name="source",
         content_type=media.content_type or "application/octet-stream",

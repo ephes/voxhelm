@@ -3,6 +3,7 @@ from __future__ import annotations
 import mimetypes
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -56,7 +57,9 @@ SUPPORTED_SUFFIXES: Final[dict[str, str]] = {
 class DownloadedMedia:
     path: Path
     content_type: str
-    source_url: str
+    source_url: str = ""
+    source_name: str = "input"
+    source_kind: str = "url"
 
 
 def detect_media_suffix(filename_or_url: str, content_type: str) -> str:
@@ -74,6 +77,20 @@ def is_video_path(path: Path, *, content_type: str | None = None) -> bool:
     if path.suffix.lower() in VIDEO_SUFFIXES:
         return True
     return bool(content_type and content_type.startswith("video/"))
+
+
+def reserve_temp_media_path(*, suffix: str) -> Path:
+    return Path(tempfile.NamedTemporaryFile(delete=False, suffix=suffix).name)
+
+
+def write_uploaded_media_to_tempfile(chunks: Iterable[bytes], *, suffix: str) -> Path:
+    file_handle = reserve_temp_media_path(suffix=suffix).open("wb")
+    try:
+        for chunk in chunks:
+            file_handle.write(chunk)
+    finally:
+        file_handle.close()
+    return Path(file_handle.name)
 
 
 def download_allowed_media(*, source_url: str) -> DownloadedMedia:
@@ -103,7 +120,7 @@ def download_allowed_media(*, source_url: str) -> DownloadedMedia:
             suffix = detect_media_suffix(final_url, content_type)
             if not suffix:
                 raise ApiError("Unsupported remote media type for batch transcription.")
-            temp_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=suffix).name)
+            temp_path = reserve_temp_media_path(suffix=suffix)
             total = 0
             with temp_path.open("wb") as handle:
                 while True:
@@ -118,6 +135,8 @@ def download_allowed_media(*, source_url: str) -> DownloadedMedia:
                 path=temp_path,
                 content_type=content_type,
                 source_url=final_url,
+                source_name=Path(urlparse(final_url).path or "input").name or "input",
+                source_kind="url",
             )
     except HTTPError as exc:
         if temp_path is not None:
@@ -139,7 +158,7 @@ def download_allowed_media(*, source_url: str) -> DownloadedMedia:
 
 
 def extract_audio_from_video(*, source_path: Path) -> Path:
-    target_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
+    target_path = reserve_temp_media_path(suffix=".wav")
     try:
         subprocess.run(
             [

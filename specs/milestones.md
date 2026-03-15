@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, the async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is a large-media batch-input follow-on for oversized/private media, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, the async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. C20 now has a narrow first pass for staged batch audio input as of 2026-03-15. Remaining planned work is the rest of the large-media follow-on (uploaded video plus true chunk splitting/stitching), further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -20,6 +20,7 @@ Implemented today:
 - `GET /v1/health`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/speech`
+- `POST /v1/uploads`
 - `POST /v1/jobs`
 - `GET /v1/jobs/{id}`
 - `GET /v1/jobs/{id}/artifacts/{name}`
@@ -38,7 +39,7 @@ Implemented today:
 Not implemented yet:
 
 - stronger runtime isolation beyond the first C13 slice (for example a dedicated interactive worker/host, preemption, or richer operator status surfaces)
-- explicit large-media batch input for oversized/private/local transcription sources; batch is still URL-only today
+- the rest of the large-media follow-on beyond staged batch audio uploads: uploaded video plus true chunk splitting/stitching
 - backend follow-on work beyond the current `whisper.cpp` and `mlx-whisper` set plus the experimental non-default WhisperKit path
 - Archive article-to-audio consumer integration
 - OpenClaw integration

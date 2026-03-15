@@ -14,6 +14,7 @@ The current slice also adds the first Voxhelm-owned operator UI:
 - sync routing for audio URLs and uploaded audio
 - batch routing for video URLs
 - transcript downloads for `text`, `json`, `vtt`, `dote`, and `podlove`
+- staged batch uploads for oversized/private/local audio via `POST /v1/uploads`
 
 ## Local Development
 
@@ -61,6 +62,8 @@ export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
+export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
+export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
 export VOXHELM_BOOTSTRAP_OPERATOR_USERNAME="jochen"
 export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
@@ -93,6 +96,45 @@ curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/sample.mp3","model":"whisper-1"}'
 ```
+
+## Batch Large-Input Contract
+
+Stage oversized/private/local audio into Voxhelm first:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/uploads \
+  -H "Authorization: Bearer replace-me" \
+  -F "file=@large-private-episode.mp3"
+```
+
+Then submit the existing batch job with `input.kind=upload`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/jobs \
+  -H "Authorization: Bearer replace-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "transcribe",
+    "priority": "normal",
+    "lane": "batch",
+    "backend": "auto",
+    "model": "auto",
+    "input": {"kind": "upload", "upload_id": "replace-me"},
+    "output": {"formats": ["text", "json"]},
+    "task_ref": "archive-item-123"
+  }'
+```
+
+Staged uploads are stored in Voxhelm's configured artifact backend before worker
+execution. The worker copies staged input into the normal job-owned source
+artifact, then deletes the temporary staged object immediately after
+materialization. Unclaimed staged uploads expire after
+`VOXHELM_STAGED_INPUT_RETENTION_SECONDS` and are opportunistically cleaned on
+later staging/submission requests.
+
+Current scope note: batch staged uploads are audio-only in this slice. URL
+audio and URL video keep working on the existing path. Uploaded video and true
+service-owned chunk splitting/stitching are still explicitly deferred.
 
 ## Wyoming STT
 

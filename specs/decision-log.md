@@ -490,6 +490,8 @@ The follow-on slice should be defined as:
 
 **Recommended default:** Option C.
 
+**Implementation note (2026-03-15):** Delivered in a narrow first pass. Voxhelm now exposes `POST /v1/uploads` for producer-authenticated staged batch audio, and `POST /v1/jobs` accepts `input.kind=upload` plus `input.upload_id`. Staged media lives in the configured artifact backend until the worker materializes it, copies it into the normal job-owned source artifact, and deletes the temporary staged object. Unclaimed staged uploads expire after `VOXHELM_STAGED_INPUT_RETENTION_SECONDS` and are opportunistically cleaned on later staging/submission requests. URL audio and URL video remain unchanged. Uploaded video and true chunk splitting/stitching are still explicitly deferred, so this closes the reusable large/private/local audio handoff gap without pretending the full chunking follow-on is done.
+
 **Recommended shape:**
 
 - keep `POST /v1/audio/transcriptions` unchanged as the small-file convenience path

@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from asgiref.local import Local
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from django_tasks import task_backends
 
 from jobs.media import DownloadedMedia
-from jobs.models import Job, JobArtifact
+from jobs.models import Job, JobArtifact, StagedMedia
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
@@ -34,7 +37,12 @@ def configure_task_backend(settings, backend: str) -> None:
     handler._connections = Local(connections._thread_critical)
 
 
-def build_job_payload(url: str = "https://media.example.com/episode.mp3") -> dict[str, object]:
+def build_job_payload(
+    url: str = "https://media.example.com/episode.mp3",
+    *,
+    input_data: dict[str, object] | None = None,
+    task_ref: str = "archive-item-123",
+) -> dict[str, object]:
     return {
         "job_type": "transcribe",
         "priority": "normal",
@@ -42,10 +50,10 @@ def build_job_payload(url: str = "https://media.example.com/episode.mp3") -> dic
         "backend": "auto",
         "model": "auto",
         "language": "en",
-        "input": {"kind": "url", "url": url},
+        "input": input_data or {"kind": "url", "url": url},
         "output": {"formats": ["text", "json"]},
         "context": {"producer": "archive", "item_id": 123},
-        "task_ref": "archive-item-123",
+        "task_ref": task_ref,
     }
 
 
@@ -63,6 +71,20 @@ def build_synthesis_payload(text: str = "Hello from Voxhelm") -> dict[str, objec
         "context": {"producer": "archive", "item_id": 456},
         "task_ref": "archive-item-456-audio-v1",
     }
+
+
+def stage_upload(
+    client,
+    *,
+    name: str = "episode.mp3",
+    content: bytes = b"mp3-bytes",
+    content_type: str,
+):
+    return client.post(
+        "/v1/uploads",
+        data={"file": SimpleUploadedFile(name, content, content_type=content_type)},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
 
 
 @pytest.mark.django_db
@@ -119,6 +141,293 @@ def test_job_submission_is_idempotent(client, settings):
     assert second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
     assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_batch_upload_staging_contract_accepts_large_audio_file(client, settings):
+    settings.VOXHELM_MAX_UPLOAD_BYTES = 4
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 8
+
+    response = stage_upload(
+        client,
+        content=b"12345",
+        content_type="audio/mpeg",
+    )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["object"] == "staged_media"
+    assert payload["filename"] == "episode.mp3"
+    staged = StagedMedia.objects.get(id=payload["id"])
+    assert staged.size_bytes == 5
+
+
+@pytest.mark.django_db
+def test_batch_upload_staging_contract_rejects_oversized_audio_file(client, settings):
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 4
+
+    response = stage_upload(
+        client,
+        content=b"12345",
+        content_type="audio/mpeg",
+    )
+
+    assert response.status_code == 400
+    assert "batch staging limit" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_batch_upload_contract_rejects_uploaded_video(client):
+    response = stage_upload(
+        client,
+        name="clip.mp4",
+        content=b"video-bytes",
+        content_type="video/mp4",
+    )
+
+    assert response.status_code == 400
+    assert "audio only" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_expired_staged_upload_is_rejected(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    staged_response = stage_upload(
+        client,
+        name="expired.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    staged = StagedMedia.objects.get(id=staged_response.json()["id"])
+    staged.expires_at = timezone.now() - timedelta(seconds=1)
+    staged.save(update_fields=["expires_at"])
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": str(staged.id)},
+                task_ref="archive-item-expired",
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "has expired" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_already_claimed_staged_upload_is_rejected(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    staged_response = stage_upload(
+        client,
+        name="claimed.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": upload_id},
+                task_ref="archive-item-claimed-1",
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": upload_id},
+                task_ref="archive-item-claimed-2",
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 400
+    assert "already been attached" in second.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_wrong_producer_cannot_submit_foreign_staged_upload(client, settings):
+    settings.VOXHELM_BEARER_TOKENS = {"archive": "test-token", "other": "other-token"}
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    staged_response = stage_upload(
+        client,
+        name="foreign.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": staged_response.json()["id"]},
+                task_ref="other-item-123",
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer other-token",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Unknown input.upload_id."
+
+
+@pytest.mark.django_db
+def test_malformed_upload_id_is_rejected(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": "not-a-uuid"},
+                task_ref="archive-item-malformed",
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "input.upload_id must be a UUID string."
+
+
+@pytest.mark.django_db
+def test_expired_staged_uploads_are_cleaned_on_next_stage_request(client, settings):
+    first = stage_upload(
+        client,
+        name="first.mp3",
+        content=b"first-audio",
+        content_type="audio/mpeg",
+    )
+    expired = StagedMedia.objects.get(id=first.json()["id"])
+    artifact_path = expired.storage_key
+    expired.expires_at = timezone.now() - timedelta(seconds=1)
+    expired.save(update_fields=["expires_at"])
+
+    second = stage_upload(
+        client,
+        name="second.mp3",
+        content=b"second-audio",
+        content_type="audio/mpeg",
+    )
+
+    assert second.status_code == 201
+    assert not StagedMedia.objects.filter(id=expired.id).exists()
+    assert not (settings.VOXHELM_ARTIFACT_ROOT / artifact_path).exists()
+
+
+@pytest.mark.django_db
+def test_staged_audio_job_executes_and_serves_artifacts(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    staged_response = stage_upload(
+        client,
+        name="private-episode.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    payload = response.json()
+    assert response.status_code == 201
+    assert payload["state"] == "succeeded"
+    assert payload["result"]["metadata"]["source_kind"] == "upload"
+    assert payload["result"]["metadata"]["source_name"] == "private-episode.mp3"
+    assert not StagedMedia.objects.filter(id=upload_id).exists()
+
+    artifact_response = client.get(
+        payload["result"]["artifacts"]["text"],
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert artifact_response.status_code == 200
+    assert artifact_response.content.decode() == "Batch hello world"
+
+
+@pytest.mark.django_db
+def test_staged_audio_submission_is_idempotent_with_task_ref(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    staged_response = stage_upload(
+        client,
+        name="repeatable.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+    body = json.dumps(build_job_payload(input_data={"kind": "upload", "upload_id": upload_id}))
+
+    first = client.post(
+        "/v1/jobs",
+        data=body,
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=body,
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_staged_audio_job_records_materialization_failure(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    monkeypatch.setattr(
+        "jobs.services.materialize_staged_media",
+        lambda *, staged: (_ for _ in ()).throw(RuntimeError("staging exploded")),
+    )
+    staged_response = stage_upload(
+        client,
+        name="broken.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                input_data={"kind": "upload", "upload_id": staged_response.json()["id"]}
+            )
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["state"] == "failed"
+    assert response.json()["error"]["message"] == "staging exploded"
 
 
 @pytest.mark.django_db
@@ -287,6 +596,40 @@ def test_video_job_extracts_audio_before_transcription(client, settings, monkeyp
     assert extracted_calls == [video_path]
     artifact_kinds = set(JobArtifact.objects.values_list("kind", flat=True))
     assert JobArtifact.Kind.EXTRACTED_AUDIO in artifact_kinds
+
+
+@pytest.mark.django_db
+def test_video_extraction_failure_marks_job_failed(client, settings, monkeypatch, tmp_path):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"video-bytes")
+
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=video_path,
+            content_type="video/mp4",
+            source_url=source_url,
+            source_name="clip.mp4",
+            source_kind="url",
+        ),
+    )
+    monkeypatch.setattr(
+        "jobs.services.extract_audio_from_video",
+        lambda *, source_path: (_ for _ in ()).throw(RuntimeError("ffmpeg exploded")),
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_job_payload(url="https://media.example.com/clip.mp4")),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["state"] == "failed"
+    assert response.json()["error"]["message"] == "ffmpeg exploded"
 
 
 @pytest.mark.django_db

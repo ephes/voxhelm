@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from config.settings import env_tokens
@@ -374,6 +375,28 @@ def test_upload_limit_is_enforced(client, settings):
     assert "25 MiB" in response.json()["error"]["message"] or "exceeded" in response.json()[
         "error"
     ]["message"]
+
+
+@pytest.mark.django_db
+def test_sync_upload_limit_remains_in_place_when_batch_staging_exists(client, settings):
+    settings.VOXHELM_MAX_UPLOAD_BYTES = 4
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 8
+    upload = SimpleUploadedFile("sample.mp3", b"12345", content_type="audio/mpeg")
+
+    sync_response = client.post(
+        "/v1/audio/transcriptions",
+        data={"file": upload, "model": "whisper-1"},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    staged_response = client.post(
+        "/v1/uploads",
+        data={"file": SimpleUploadedFile("sample.mp3", b"12345", content_type="audio/mpeg")},
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert sync_response.status_code == 400
+    assert staged_response.status_code == 201
 
 
 def test_speech_endpoint_requires_bearer_token(client):
