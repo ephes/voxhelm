@@ -9,6 +9,7 @@ from asgiref.local import Local
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.test import Client
 from django_tasks import task_backends
 
 from jobs.media import DownloadedMedia
@@ -55,6 +56,37 @@ def test_authenticated_root_renders_operator_home(client):
 
     assert response.status_code == 200
     assert "Submit Transcript" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_login_succeeds_behind_https_proxy_with_csrf_checks(settings):
+    host = "voxhelm.home.xn--wersdrfer-47a.de"
+    settings.ALLOWED_HOSTS = [host, "testserver"]
+    settings.CSRF_TRUSTED_ORIGINS = [f"https://{host}"]
+    settings.SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    get_user_model().objects.create_user(username="jochen", password="secret", is_staff=True)
+    client = Client(enforce_csrf_checks=True)
+
+    response = client.get("/", HTTP_HOST=host, HTTP_X_FORWARDED_PROTO="https")
+
+    assert response.status_code == 200
+    csrf_token = response.cookies["csrftoken"].value
+
+    response = client.post(
+        "/",
+        data={
+            "username": "jochen",
+            "password": "secret",
+            "csrfmiddlewaretoken": csrf_token,
+        },
+        HTTP_HOST=host,
+        HTTP_ORIGIN=f"https://{host}",
+        HTTP_REFERER=f"https://{host}/",
+        HTTP_X_FORWARDED_PROTO="https",
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/"
 
 
 @pytest.mark.django_db
