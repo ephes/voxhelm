@@ -155,13 +155,20 @@ class WhisperCppBackend:
         model_path = resolve_whispercpp_model_path(self.model_name)
 
         with tempfile.TemporaryDirectory(prefix="voxhelm-whispercpp-") as temp_dir:
-            output_base = Path(temp_dir) / "transcript"
+            temp_root = Path(temp_dir)
+            normalized_audio_path = temp_root / "input.wav"
+            _normalize_audio_for_whispercpp(
+                input_path=audio_path,
+                output_path=normalized_audio_path,
+            )
+
+            output_base = temp_root / "transcript"
             args = [
                 executable,
                 "-m",
                 str(model_path),
                 "-f",
-                str(audio_path),
+                str(normalized_audio_path),
                 "-oj",
                 "-of",
                 str(output_base),
@@ -191,8 +198,45 @@ class WhisperCppBackend:
                 raise RuntimeError("whisper.cpp transcription failed.")
 
             json_path = output_base.with_suffix(".json")
+            if not json_path.exists():
+                raise RuntimeError(
+                    "whisper.cpp transcription failed: transcript.json was not produced."
+                )
             payload = json.loads(json_path.read_text(encoding="utf-8"))
         return normalize_whispercpp_payload(payload, model_name=self.model_name)
+
+
+def _normalize_audio_for_whispercpp(*, input_path: Path, output_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            settings.VOXHELM_FFMPEG_BIN,
+            "-y",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0 and output_path.exists():
+        return
+
+    detail = "\n".join(
+        part.strip()
+        for part in (completed.stderr, completed.stdout)
+        if isinstance(part, str) and part.strip()
+    )
+    if detail:
+        raise RuntimeError(f"ffmpeg audio normalization failed: {detail}")
+    raise RuntimeError("ffmpeg audio normalization failed.")
 
 
 class WhisperKitBackend:

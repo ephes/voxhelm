@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
     TranscriptionSegment,
+    WhisperCppBackend,
     WhisperKitBackend,
     get_backend_services_for_model,
     normalize_interactive_transcript,
@@ -307,6 +309,159 @@ def test_normalize_whispercpp_payload_builds_segments_and_language() -> None:
         TranscriptionSegment(id=0, start=1.25, end=2.5, text="Hallo"),
         TranscriptionSegment(id=1, start=2.5, end=3.75, text="Welt"),
     ]
+
+
+def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    input_path = tmp_path / "sample.m4a"
+    input_path.write_bytes(b"not-really-audio")
+    model_path = tmp_path / "ggml-large-v3.bin"
+    model_path.write_text("model", encoding="utf-8")
+    settings.VOXHELM_FFMPEG_BIN = "/tmp/fake-ffmpeg"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_binary",
+        lambda _path: "/tmp/fake-whisper-cli",
+    )
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_model_path",
+        lambda _name: model_path,
+    )
+
+    def fake_run(args, capture_output, text, check):
+        del capture_output, text, check
+        call = [str(part) for part in args]
+        calls.append(call)
+        if call[0] == settings.VOXHELM_FFMPEG_BIN:
+            Path(call[-1]).write_bytes(b"RIFFfakewav")
+            return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        output_base = Path(call[call.index("-of") + 1])
+        output_base.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "result": {"language": "de"},
+                    "transcription": [
+                        {
+                            "text": "Hallo Welt",
+                            "timestamps": {"from": "00:00:00,000", "to": "00:00:01,000"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+
+    result = backend.transcribe(
+        input_path,
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+
+    assert len(calls) == 2
+    assert calls[0][:5] == [settings.VOXHELM_FFMPEG_BIN, "-y", "-i", str(input_path), "-vn"]
+    assert calls[0][-1].endswith("input.wav")
+    assert calls[1][0] == "/tmp/fake-whisper-cli"
+    assert calls[1][calls[1].index("-f") + 1].endswith("input.wav")
+    assert result.text == "Hallo Welt"
+    assert result.language == "de"
+
+
+def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    input_path = tmp_path / "sample.m4a"
+    input_path.write_bytes(b"not-really-audio")
+    model_path = tmp_path / "ggml-large-v3.bin"
+    model_path.write_text("model", encoding="utf-8")
+    settings.VOXHELM_FFMPEG_BIN = "/tmp/fake-ffmpeg"
+
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_binary",
+        lambda _path: "/tmp/fake-whisper-cli",
+    )
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_model_path",
+        lambda _name: model_path,
+    )
+
+    def fake_run(args, capture_output, text, check):
+        del args, capture_output, text, check
+        return type(
+            "Completed",
+            (),
+            {"returncode": 1, "stderr": "decoder exploded", "stdout": ""},
+        )()
+
+    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+
+    try:
+        backend.transcribe(
+            input_path,
+            TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "ffmpeg audio normalization failed: decoder exploded"
+    else:  # pragma: no cover
+        raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
+
+
+def test_whispercpp_backend_raises_when_transcript_json_is_missing(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    input_path = tmp_path / "sample.m4a"
+    input_path.write_bytes(b"not-really-audio")
+    model_path = tmp_path / "ggml-large-v3.bin"
+    model_path.write_text("model", encoding="utf-8")
+    settings.VOXHELM_FFMPEG_BIN = "/tmp/fake-ffmpeg"
+
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_binary",
+        lambda _path: "/tmp/fake-whisper-cli",
+    )
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_model_path",
+        lambda _name: model_path,
+    )
+
+    def fake_run(args, capture_output, text, check):
+        del capture_output, text, check
+        call = [str(part) for part in args]
+        if call[0] == settings.VOXHELM_FFMPEG_BIN:
+            Path(call[-1]).write_bytes(b"RIFFfakewav")
+        return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+
+    try:
+        backend.transcribe(
+            input_path,
+            TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == (
+            "whisper.cpp transcription failed: transcript.json was not produced."
+        )
+    else:  # pragma: no cover
+        raise AssertionError("Expected missing transcript.json to raise RuntimeError.")
 
 
 def test_normalize_interactive_transcript_strips_german_leading_fillers() -> None:

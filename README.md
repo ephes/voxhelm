@@ -16,6 +16,9 @@ The current slice also adds the first Voxhelm-owned operator UI:
 - transcript downloads for `text`, `json`, `vtt`, `dote`, and `podlove`
 - staged batch uploads for oversized/private/local audio via `POST /v1/uploads`
 
+`whisper.cpp` inputs are normalized through `ffmpeg` to 16 kHz mono PCM WAV before
+inference so AAC/M4A and other container/codec quirks do not leak into the backend.
+
 ## Local Development
 
 ```bash
@@ -35,6 +38,7 @@ Optional settings:
 
 ```bash
 export VOXHELM_ALLOWED_HOSTS="localhost,127.0.0.1"
+export VOXHELM_CSRF_TRUSTED_ORIGINS="https://voxhelm.example.com"
 export VOXHELM_STT_BACKEND="whispercpp"
 export VOXHELM_STT_FALLBACK_BACKEND="mlx"
 export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
