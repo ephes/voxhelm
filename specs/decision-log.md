@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14. Remaining planned work is later backend expansion, Archive article-audio consumer work, and M4/OpenClaw.
+**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14. Remaining planned work is later backend expansion, speaker diarization for podcast transcripts, Archive article-audio consumer work, and M4/OpenClaw.
 
 ---
 
@@ -236,7 +236,9 @@ Voxhelm should persist its own producer-facing job record and store the returned
 | B. Spike before Milestone 2 | Evaluate feasibility and quality on representative audio; inform whether it is worth building |
 | C. Later milestone (post-M4) | Defer entirely; no v1 or near-term work |
 
-**Recommended default:** Option C. Defer diarization entirely for now. django-cast needs contributor/speaker support before speaker labels have meaningful product value, so diarization should not drive near-term Voxhelm scope.
+**Recommended default:** Option C. Defer diarization from v1 and the near-term core runtime work.
+
+**Update (2026-05-18):** django-cast now has a concrete backlog item for speaker diarization in generated podcast transcripts. That does not change the v1 decision, but it does move diarization from "purely hypothetical later" to a later-work spike/output follow-on. Track it as C21: first prove a diarization backend on representative podcast audio, then decide whether to add speaker labels as an explicit option on `job_type=transcribe`, a separate `diarize` job type, or both.
 
 **Blocks implementation:** No.
 

@@ -1,7 +1,7 @@
 # Voxhelm Milestones
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, the async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. C20 now has a narrow first pass for staged batch audio input as of 2026-03-15. Remaining planned work is the rest of the large-media follow-on (uploaded video plus true chunk splitting/stitching), further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, the async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. C20 now has a narrow first pass for staged batch audio input as of 2026-03-15. Remaining planned work is the rest of the large-media follow-on (uploaded video plus true chunk splitting/stitching), further backend expansion, speaker diarization for podcast transcripts, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`
 
 ## Current Implementation Snapshot
@@ -41,6 +41,7 @@ Not implemented yet:
 - stronger runtime isolation beyond the first C13 slice (for example a dedicated interactive worker/host, preemption, or richer operator status surfaces)
 - the rest of the large-media follow-on beyond staged batch audio uploads: uploaded video plus true chunk splitting/stitching
 - backend follow-on work beyond the current `whisper.cpp` and `mlx-whisper` set plus the experimental non-default WhisperKit path
+- speaker diarization spike and speaker-labeled transcript output for podcast consumers
 - Archive article-to-audio consumer integration
 - OpenClaw integration
 
@@ -68,7 +69,7 @@ The full batch-job model is M1b, not M1a. Archive's current code is purely synch
 
 ### 5. Is diarization a v1 feature, spike, or later?
 
-**Later.** Diarization is not required by any current consumer. django-cast's Transcript model has a `speakerDesignation` field, but it is currently always empty. podcast-transcript does not produce speaker labels. Diarization should be a spike at earliest in M2, with implementation deferred until a consumer needs it.
+**Later.** Diarization was not required by the initial consumers. django-cast's transcript formats have speaker fields, but they are currently empty. podcast-transcript does not produce speaker labels. Now that django-cast has a backlog item for speaker-labeled generated transcripts, diarization should be treated as a later-work spike/output follow-on rather than as v1 scope.
 
 ---
 

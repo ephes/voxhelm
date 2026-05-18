@@ -1,7 +1,7 @@
 # Voxhelm Implementation Sequence
 
 **Date:** 2026-03-11
-**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is the consumer async transcript-completion follow-on, the large-media batch-input follow-on, further backend expansion, Archive article-audio follow-on, and M4/OpenClaw.
+**Status:** M1a, M1b, the current M1c consumer slices, the post-M3 operator transcript follow-on, and the core M2/M3 runtime work are implemented as of 2026-03-14, including the first C13 lane-scheduling slice. Remaining planned work is the consumer async transcript-completion follow-on, the large-media batch-input follow-on, further backend expansion, speaker diarization for podcast transcripts, Archive article-audio follow-on, and M4/OpenClaw.
 **Input:** `specs/2026-03-11_voxhelm_service.md`, `specs/milestones.md`
 
 Current implementation checkpoint:
@@ -22,7 +22,7 @@ Completed as of 2026-03-14:
 [deploy + live verification]
 
 Remaining draft phases:
-[C19: async Wagtail completion] [C20: large-media batch input] [M4: OpenClaw]
+[C19: async Wagtail completion] [C20: large-media batch input] [C21: speaker diarization] [M4: OpenClaw]
 ```
 
 ---

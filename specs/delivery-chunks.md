@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C16, C18, and C19 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts and the follow-on async Wagtail transcript-completion slice. C20, Archive article-audio consumer work, and C17/OpenClaw remain draft.
+**Status:** C1-C16, C18, and C19 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts and the follow-on async Wagtail transcript-completion slice. C20, C21 speaker diarization, Archive article-audio consumer work, and C17/OpenClaw remain draft.
 
 Current completion state:
 
 - Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18, C19
-- Not implemented yet: C20, Archive article-audio consumer follow-on, C17
+- Not implemented yet: C20, C21, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -36,6 +36,7 @@ Current completion state:
 | C18 | Operator transcript UI + shared transcript outputs | Post-M3 follow-on | C6, C7, C10, C11 |
 | C19 | Async Wagtail transcript completion | Consumer follow-on | C10, C18 |
 | C20 | Large-media batch input + service-owned chunking | Core media follow-on | C6, C7 |
+| C21 | Speaker diarization spike and transcript output | Podcast transcript follow-on | C6, C18 |
 | C17 | OpenClaw integration | M4 | C7 |
 
 ---
@@ -348,7 +349,7 @@ Current completion state:
 **Explicitly excluded scope:**
 
 - TTS backends (C15)
-- Diarization (S3)
+- Diarization (C21)
 - Job orchestration (C6)
 - HTTP endpoint wiring (C7)
 
@@ -601,7 +602,7 @@ Current completion state:
 **Explicitly excluded scope:**
 
 - Automatic triggering (e.g., on Audio upload) -- that can be added later
-- Speaker diarization (S3)
+- Speaker diarization (C21)
 - Changes to django-cast's Transcript model schema
 - TTS generation for episodes
 - Django admin UI for transcript generation or configuration
@@ -1147,6 +1148,60 @@ Current completion state:
 ---
 
 ## M4 Chunks -- OpenClaw and Later Work
+
+### C21 -- Speaker Diarization Spike And Transcript Output
+
+**Purpose:** Determine whether Voxhelm should produce speaker-labeled transcript artifacts for podcast consumers, then add the smallest server-owned output path if the spike quality and operational cost are acceptable.
+
+**Context:** django-cast now has a backlog item for speaker diarization in generated transcripts. The current Voxhelm batch transcription path already owns the DOTe and Podlove renderers, but both render empty speaker fields because the normalized transcription segments have no speaker label.
+
+**Included scope:**
+
+- Evaluate one diarization backend on representative podcast audio, including German and English episodes and at least one multi-speaker long-form recording
+- Record quality, runtime, memory, model/download requirements, and deployment requirements on `studio`
+- Decide the API shape:
+  - an option on `job_type=transcribe`, or
+  - a separate `job_type=diarize`, or
+  - both, with one treated as a convenience wrapper
+- Extend Voxhelm's internal transcript segment shape with an optional speaker label if the spike proceeds
+- Merge diarization turns with transcription segments using deterministic alignment rules
+- Render speaker labels into DOTe `speakerDesignation` and Podlove `speaker` / `voice` fields
+- Decide whether WebVTT should include speaker labels in the first slice or stay unchanged
+- Add tests around speaker-label propagation through canonical JSON, DOTe, Podlove, and any selected WebVTT behavior
+
+**Explicitly excluded scope:**
+
+- Speaker enrollment or persistent voice identity across episodes
+- Editor UI for renaming speakers
+- Mapping generic speakers to django-cast contributors
+- Replacing the existing STT backend selection logic
+- Making diarization mandatory for all transcription jobs
+
+**Dependencies:** C6 (batch transcription and canonical output artifacts), C18 (server-owned transcript conversion boundary), and D-12 (diarization decision)
+
+**Consumer(s):** django-cast / python-podcast first; later podcast-transcript and operator UI if the output proves useful
+
+**Primary interfaces:**
+
+- Existing `POST /v1/jobs` batch transcription API, possibly with a new diarization option
+- Existing transcript artifacts: `json`, `dote`, `podlove`, and possibly `vtt`
+
+**Acceptance criteria:**
+
+- A short spike report documents the selected backend, quality on representative audio, runtime/resource cost, and operational requirements
+- The API shape for requesting diarization is documented before implementation
+- When diarization is requested, Voxhelm emits stable generic speaker labels in server-owned transcript artifacts
+- Existing non-diarized transcription jobs keep their current artifact schema and behavior
+- django-cast can consume the populated DOTe/Podlove speaker fields without needing local transcript conversion
+
+**Main risks:**
+
+- Diarization may require a separate model stack, Hugging Face token, or model license acceptance that does not fit the current lightweight deployment shape
+- Speaker labels may be unreliable on overlapping speech, remote-call audio, music beds, or crosstalk
+- Merging diarization turns with STT segments can produce misleading labels unless alignment rules are conservative
+- Adding this directly to every transcribe job could increase runtime and resource contention; keep it explicit until operational data says otherwise
+
+**Suggested implementation order:** After the current transcript-output and async-completion paths remain stable in production. Run the spike first; only implement artifact changes if representative podcast quality is good enough.
 
 ### C17 -- OpenClaw Integration
 
