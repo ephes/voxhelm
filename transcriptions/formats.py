@@ -11,23 +11,27 @@ class SegmentLike(Protocol):
     start: float
     end: float
     text: str
+    speaker: str | None
 
 
 def render_verbose_json(result: TranscriptionResult) -> dict[str, Any]:
+    segments: list[dict[str, Any]] = []
+    for segment in result.segments:
+        payload = {
+            "id": segment.id,
+            "seek": int(segment.start * 100),
+            "start": segment.start,
+            "end": segment.end,
+            "text": segment.text,
+        }
+        if segment.speaker:
+            payload["speaker"] = segment.speaker
+        segments.append(payload)
     return {
         "task": "transcribe",
         "language": result.language,
         "text": result.text,
-        "segments": [
-            {
-                "id": segment.id,
-                "seek": int(segment.start * 100),
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text,
-            }
-            for segment in result.segments
-        ],
+        "segments": segments,
     }
 
 
@@ -55,7 +59,7 @@ def render_dote(result: TranscriptionResult) -> dict[str, Any]:
             {
                 "startTime": format_dote_timestamp(segment.start),
                 "endTime": format_dote_timestamp(segment.end),
-                "speakerDesignation": "",
+                "speakerDesignation": segment.speaker or "",
                 "text": segment.text,
             }
             for segment in normalized_segments(result)
@@ -74,8 +78,8 @@ def render_podlove(result: TranscriptionResult) -> dict[str, Any]:
                 "start_ms": start_ms,
                 "end": format_podlove_timestamp(segment.end),
                 "end_ms": end_ms,
-                "speaker": "",
-                "voice": "",
+                "speaker": segment.speaker or "",
+                "voice": segment.speaker or "",
                 "text": segment.text,
             }
         )
@@ -90,21 +94,39 @@ def normalized_segments(result: TranscriptionResult) -> list[SegmentLike]:
                 start=segment.start,
                 end=max(segment.start, segment.end),
                 text=segment.text,
+                speaker=segment.speaker,
             )
             for segment in result.segments
             if segment.text.strip()
         ]
     if result.text.strip():
-        return [SimpleSegment(id=0, start=0.0, end=0.0, text=result.text.strip())]
+        return [
+            SimpleSegment(
+                id=0,
+                start=0.0,
+                end=0.0,
+                text=result.text.strip(),
+                speaker=None,
+            )
+        ]
     return []
 
 
 class SimpleSegment:
-    def __init__(self, *, id: int, start: float, end: float, text: str) -> None:
+    def __init__(
+        self,
+        *,
+        id: int,
+        start: float,
+        end: float,
+        text: str,
+        speaker: str | None,
+    ) -> None:
         self.id = id
         self.start = start
         self.end = end
         self.text = text
+        self.speaker = speaker
 
 
 def format_vtt_timestamp(seconds: float) -> str:

@@ -18,6 +18,11 @@ dependencies = [
 [project.scripts]
 voxhelm-wyoming-stt = "transcriptions.wyoming:main"
 
+[project.optional-dependencies]
+diarization = [
+    "pyannote-audio>=4.0.4",
+]
+
 [dependency-groups]
 dev = [
   "django-stubs[compatible-mypy]>=5.2.7",

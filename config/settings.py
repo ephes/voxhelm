@@ -178,6 +178,15 @@ VOXHELM_WHISPERKIT_TIMEOUT_SECONDS = int(
     os.getenv("VOXHELM_WHISPERKIT_TIMEOUT_SECONDS", "900")
 )
 VOXHELM_STT_DEBUG_LOGGING = env_bool("VOXHELM_STT_DEBUG_LOGGING", default=False)
+VOXHELM_DIARIZATION_BACKEND = os.getenv("VOXHELM_DIARIZATION_BACKEND", "none").strip()
+VOXHELM_PYANNOTE_MODEL = os.getenv(
+    "VOXHELM_PYANNOTE_MODEL",
+    "pyannote/speaker-diarization-3.1",
+).strip()
+VOXHELM_HUGGINGFACE_TOKEN = os.getenv(
+    "VOXHELM_HUGGINGFACE_TOKEN",
+    os.getenv("HF_TOKEN", ""),
+).strip()
 VOXHELM_MODEL_CACHE_DIR = Path(
     os.getenv("VOXHELM_MODEL_CACHE_DIR", str(BASE_DIR / "var" / "models"))
 )

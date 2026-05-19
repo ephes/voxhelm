@@ -14,6 +14,7 @@ from django_tasks import task_backends
 
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
+from transcriptions.diarization import SpeakerTurn
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
@@ -116,6 +117,59 @@ def test_create_job_queued_with_dummy_backend(client, settings):
     assert payload["state"] == "queued"
     job = Job.objects.get(id=payload["id"])
     assert job.django_task_id
+    assert job.output_data["diarization"] == {"enabled": False}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "diarization",
+    [
+        True,
+        [],
+        {},
+        {"enabled": "true"},
+        {"enabled": 1},
+        {"enabled": None},
+    ],
+)
+def test_transcription_job_rejects_malformed_diarization_option(
+    client,
+    settings,
+    diarization,
+):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="archive-item-diarization-malformed")
+    payload["diarization"] = diarization
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "diarization" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_transcription_job_accepts_disabled_diarization_option(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="archive-item-diarization-disabled")
+    payload["diarization"] = {"enabled": False}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    job = Job.objects.get(id=response.json()["id"])
+    assert job.output_data["diarization"] == {"enabled": False}
 
 
 @pytest.mark.django_db
@@ -474,7 +528,9 @@ def test_immediate_backend_executes_job_and_serves_artifacts(
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert json_response.status_code == 200
-    assert json_response.json()["segments"][0]["text"] == "Batch hello"
+    json_payload = json_response.json()
+    assert json_payload["segments"][0]["text"] == "Batch hello"
+    assert "speaker" not in json_payload["segments"][0]
 
 
 @pytest.mark.django_db
@@ -510,14 +566,192 @@ def test_transcription_job_accepts_dote_and_podlove_outputs(
 
     dote_response = client.get(result["artifacts"]["dote"], HTTP_AUTHORIZATION="Bearer test-token")
     assert dote_response.status_code == 200
-    assert dote_response.json()["lines"][0]["startTime"] == "00:00:00,000"
+    dote_payload = dote_response.json()
+    assert dote_payload["lines"][0]["startTime"] == "00:00:00,000"
+    assert dote_payload["lines"][0]["speakerDesignation"] == ""
 
     podlove_response = client.get(
         result["artifacts"]["podlove"],
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert podlove_response.status_code == 200
-    assert podlove_response.json()["transcripts"][1]["text"] == "world"
+    podlove_payload = podlove_response.json()
+    assert podlove_payload["transcripts"][1]["text"] == "world"
+    assert podlove_payload["transcripts"][1]["speaker"] == ""
+    assert podlove_payload["transcripts"][1]["voice"] == ""
+
+
+@pytest.mark.django_db
+def test_diarized_transcription_job_labels_server_owned_artifacts(
+    client,
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    diarization_calls: list[Path] = []
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+
+    def fake_diarize(audio_path: Path) -> list[SpeakerTurn]:
+        diarization_calls.append(audio_path)
+        return [
+            SpeakerTurn(start=0.0, end=1.0, speaker="SPEAKER_00"),
+            SpeakerTurn(start=1.0, end=2.0, speaker="SPEAKER_01"),
+        ]
+
+    monkeypatch.setattr("jobs.services.diarize_audio", fake_diarize)
+    payload = build_job_payload(task_ref="archive-item-diarized")
+    payload["diarization"] = {"enabled": True}
+    payload["output"] = {"formats": ["text", "json", "vtt", "dote", "podlove"]}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 201
+    assert response.json()["state"] == "succeeded"
+    assert diarization_calls == [media_path]
+    job = Job.objects.get(id=response.json()["id"])
+    assert job.output_data["diarization"] == {"enabled": True}
+    assert result["metadata"]["diarization"] == {"enabled": True}
+
+    json_response = client.get(
+        result["artifacts"]["json"],
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert json_response.status_code == 200
+    assert json_response.json()["segments"] == [
+        {
+            "id": 0,
+            "seek": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "Batch hello",
+            "speaker": "Speaker 1",
+        },
+        {
+            "id": 1,
+            "seek": 100,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "world",
+            "speaker": "Speaker 2",
+        },
+    ]
+
+    dote_response = client.get(result["artifacts"]["dote"], HTTP_AUTHORIZATION="Bearer test-token")
+    assert dote_response.status_code == 200
+    assert [line["speakerDesignation"] for line in dote_response.json()["lines"]] == [
+        "Speaker 1",
+        "Speaker 2",
+    ]
+
+    podlove_response = client.get(
+        result["artifacts"]["podlove"],
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert podlove_response.status_code == 200
+    podlove_payload = podlove_response.json()
+    assert [line["speaker"] for line in podlove_payload["transcripts"]] == [
+        "Speaker 1",
+        "Speaker 2",
+    ]
+    assert [line["voice"] for line in podlove_payload["transcripts"]] == [
+        "Speaker 1",
+        "Speaker 2",
+    ]
+
+    vtt_response = client.get(result["artifacts"]["vtt"], HTTP_AUTHORIZATION="Bearer test-token")
+    assert vtt_response.status_code == 200
+    assert "Speaker" not in vtt_response.content.decode()
+
+
+@pytest.mark.django_db
+def test_requested_diarization_fails_when_backend_is_unavailable(
+    client,
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    settings.VOXHELM_DIARIZATION_BACKEND = "none"
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    payload = build_job_payload(task_ref="archive-item-diarization-unavailable")
+    payload["diarization"] = {"enabled": True}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["state"] == "failed"
+    assert "Diarization was requested" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+def test_requested_diarization_fails_when_backend_returns_no_usable_turns(
+    client,
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    monkeypatch.setattr("jobs.services.diarize_audio", lambda audio_path: [])
+    payload = build_job_payload(task_ref="archive-item-diarization-empty")
+    payload["diarization"] = {"enabled": True}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["state"] == "failed"
+    assert "no usable speaker turns" in response.json()["error"]["message"]
+    assert not JobArtifact.objects.filter(kind=JobArtifact.Kind.TRANSCRIPT_JSON).exists()
 
 
 @pytest.mark.django_db

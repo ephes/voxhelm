@@ -54,15 +54,19 @@ class TranscriptionSegment:
     start: float
     end: float
     text: str
+    speaker: str | None = None
 
     def as_verbose_json(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "seek": int(self.start * 100),
             "start": self.start,
             "end": self.end,
             "text": self.text,
         }
+        if self.speaker:
+            payload["speaker"] = self.speaker
+        return payload
 
 
 @dataclass(frozen=True)

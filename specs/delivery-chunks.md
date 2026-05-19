@@ -2,12 +2,12 @@
 
 **Date:** 2026-03-11
 **Input:** `2026-03-11_voxhelm_service.md` (PRD), consumer repo exploration
-**Status:** C1-C16, C18, and C19 are implemented as of 2026-03-14, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts and the follow-on async Wagtail transcript-completion slice. C20, C21 speaker diarization, Archive article-audio consumer work, and C17/OpenClaw remain draft.
+**Status:** C1-C16, C18, C19, and the first C21 speaker-output slice are implemented, including the same-epic `django-cast` consumer cleanup that switched to Voxhelm-owned `dote` / `podlove` artifacts and the follow-on async Wagtail transcript-completion slice. C20, C21 backend-quality validation, Archive article-audio consumer work, and C17/OpenClaw remain draft/follow-on work.
 
 Current completion state:
 
-- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18, C19
-- Not implemented yet: C20, C21, Archive article-audio consumer follow-on, C17
+- Implemented: C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C18, C19, C21 first speaker-output slice
+- Not implemented yet: C20, C21 backend-quality validation/named-speaker follow-ons, Archive article-audio consumer follow-on, C17
 
 ---
 
@@ -1151,6 +1151,8 @@ Current completion state:
 
 ### C21 -- Speaker Diarization Spike And Transcript Output
 
+**Implementation note (2026-05-19):** The first output slice is implemented. Batch `job_type=transcribe` requests can opt in with top-level `diarization: {"enabled": true}`; omitted or `false` keeps current behavior. Voxhelm stores the normalized option in `Job.output_data`, runs diarization only for requested batch transcription jobs, normalizes backend labels to stable generic `Speaker N` labels, aligns turns to STT segments by largest timestamp overlap, includes `speaker` only on labeled verbose-JSON segments, fills DOTe `speakerDesignation`, and fills Podlove `speaker` / `voice`. WebVTT intentionally remains unchanged. A guarded pyannote adapter exists behind the optional `diarization` dependency extra; representative backend quality/runtime validation remains follow-on work before treating diarization as production-ready.
+
 **Purpose:** Determine whether Voxhelm should produce speaker-labeled transcript artifacts for podcast consumers, then add the smallest server-owned output path if the spike quality and operational cost are acceptable.
 
 **Context:** django-cast now has a backlog item for speaker diarization in generated transcripts. The current Voxhelm batch transcription path already owns the DOTe and Podlove renderers, but both render empty speaker fields because the normalized transcription segments have no speaker label.
@@ -1160,9 +1162,8 @@ Current completion state:
 - Evaluate one diarization backend on representative podcast audio, including German and English episodes and at least one multi-speaker long-form recording
 - Record quality, runtime, memory, model/download requirements, and deployment requirements on `studio`
 - Decide the API shape:
-  - an option on `job_type=transcribe`, or
-  - a separate `job_type=diarize`, or
-  - both, with one treated as a convenience wrapper
+  - selected for the first slice: an explicit option on `job_type=transcribe`
+  - a separate `job_type=diarize` remains deferred unless a later lifecycle needs it
 - Extend Voxhelm's internal transcript segment shape with an optional speaker label if the spike proceeds
 - Merge diarization turns with transcription segments using deterministic alignment rules
 - Render speaker labels into DOTe `speakerDesignation` and Podlove `speaker` / `voice` fields
@@ -1183,16 +1184,16 @@ Current completion state:
 
 **Primary interfaces:**
 
-- Existing `POST /v1/jobs` batch transcription API, possibly with a new diarization option
-- Existing transcript artifacts: `json`, `dote`, `podlove`, and possibly `vtt`
+- Existing `POST /v1/jobs` batch transcription API with top-level `diarization.enabled`
+- Existing transcript artifacts: `json`, `dote`, and `podlove`; `vtt` remains unchanged in the first slice
 
 **Acceptance criteria:**
 
-- A short spike report documents the selected backend, quality on representative audio, runtime/resource cost, and operational requirements
-- The API shape for requesting diarization is documented before implementation
-- When diarization is requested, Voxhelm emits stable generic speaker labels in server-owned transcript artifacts
-- Existing non-diarized transcription jobs keep their current artifact schema and behavior
-- django-cast can consume the populated DOTe/Podlove speaker fields without needing local transcript conversion
+- First output slice: the API shape for requesting diarization is documented and implemented
+- First output slice: when diarization is requested and a backend returns turns, Voxhelm emits stable generic speaker labels in server-owned transcript artifacts
+- First output slice: existing non-diarized transcription jobs keep their current artifact schema and behavior
+- First output slice: django-cast can consume populated DOTe/Podlove speaker fields without needing local transcript conversion
+- Follow-on validation: a short spike report documents selected backend quality on representative audio, runtime/resource cost, and operational requirements
 
 **Main risks:**
 

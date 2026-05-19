@@ -15,6 +15,7 @@ from transcriptions.service import (
     WhisperKitBackend,
     get_backend_services_for_model,
     normalize_interactive_transcript,
+    normalize_transcription_payload,
     normalize_whispercpp_payload,
     resolve_backend_name_for_model,
     resolve_model_name_for_backend,
@@ -78,6 +79,27 @@ class WorkingBackend:
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
         del audio_path, params
         return TranscriptionResult(text="fallback", language="de", segments=[])
+
+
+def test_normalize_transcription_payload_drops_backend_speaker_labels() -> None:
+    result = normalize_transcription_payload(
+        {
+            "text": "Hello",
+            "segments": [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "Hello",
+                    "speaker": "SPEAKER_00",
+                }
+            ],
+        }
+    )
+
+    assert result.segments == [
+        TranscriptionSegment(id=0, start=0.0, end=1.0, text="Hello")
+    ]
 
 
 def test_transcribe_audio_uses_fallback_backend(monkeypatch) -> None:

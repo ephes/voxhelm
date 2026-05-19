@@ -56,6 +56,9 @@ export VOXHELM_WHISPERKIT_CONCURRENT_WORKER_COUNT="8"
 export VOXHELM_WHISPERKIT_CHUNKING_STRATEGY="vad"
 export VOXHELM_WHISPERKIT_TIMEOUT_SECONDS="900"
 export VOXHELM_STT_DEBUG_LOGGING="false"
+export VOXHELM_DIARIZATION_BACKEND="none"
+export VOXHELM_PYANNOTE_MODEL="pyannote/speaker-diarization-3.1"
+export VOXHELM_HUGGINGFACE_TOKEN=""
 export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
 export VOXHELM_WYOMING_STT_HOST="0.0.0.0"
 export VOXHELM_WYOMING_STT_PORT="10300"
@@ -139,6 +142,84 @@ later staging/submission requests.
 Current scope note: batch staged uploads are audio-only in this slice. URL
 audio and URL video keep working on the existing path. Uploaded video and true
 service-owned chunk splitting/stitching are still explicitly deferred.
+
+## Batch Speaker Diarization
+
+Batch `job_type=transcribe` requests can opt into speaker labels:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/jobs \
+  -H "Authorization: Bearer replace-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "transcribe",
+    "lane": "batch",
+    "backend": "auto",
+    "model": "auto",
+    "input": {"kind": "url", "url": "https://example.com/episode.mp3"},
+    "output": {"formats": ["json", "dote", "podlove", "vtt"]},
+    "diarization": {"enabled": true}
+  }'
+```
+
+When enabled, Voxhelm runs diarization after STT, aligns speaker turns to
+transcript segments by largest timestamp overlap, and emits stable generic
+labels such as `Speaker 1` and `Speaker 2`. Verbose JSON includes `speaker`
+only on labeled segments. DOTe fills `speakerDesignation`; Podlove fills both
+`speaker` and `voice`. WebVTT intentionally remains unchanged in this first
+slice.
+
+The default `VOXHELM_DIARIZATION_BACKEND=none` makes requested diarization jobs
+fail clearly instead of silently emitting unlabeled output. A guarded pyannote
+adapter is available with `VOXHELM_DIARIZATION_BACKEND=pyannote`,
+`VOXHELM_PYANNOTE_MODEL`, and `VOXHELM_HUGGINGFACE_TOKEN`. Install the optional
+model stack with:
+
+```bash
+uv sync --extra diarization
+```
+
+`VOXHELM_HUGGINGFACE_TOKEN` is required because the default pyannote pretrained
+speaker-diarization pipeline is downloaded from Hugging Face and its model terms
+must be accepted by the token-owning account before first use. With current
+pyannote releases this may require access to the configured pipeline repository
+and its gated component repositories, including
+`pyannote/speaker-diarization-community-1`. If `VOXHELM_HUGGINGFACE_TOKEN` is
+unset, Voxhelm also reads the common `HF_TOKEN` environment variable.
+
+Production diarization requires all of the following:
+
+- install dependencies with `uv sync --extra diarization`
+- set `VOXHELM_DIARIZATION_BACKEND=pyannote`
+- set `VOXHELM_HUGGINGFACE_TOKEN` or `HF_TOKEN`
+- accept Hugging Face access for `pyannote/speaker-diarization-3.1`,
+  `pyannote/speaker-diarization-community-1`, and any gated dependency reported
+  by pyannote during model loading
+
+The first successful run downloads model weights into the configured model
+cache and can take time. Long podcast episodes are CPU-heavy; submit them as
+async batch jobs and inspect the worker logs rather than holding an HTTP/admin
+request open.
+
+Short smoke test:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/jobs \
+  -H "Authorization: Bearer replace-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "transcribe",
+    "lane": "batch",
+    "backend": "auto",
+    "model": "auto",
+    "input": {"kind": "url", "url": "https://example.com/short-audio.mp3"},
+    "output": {"formats": ["json", "dote", "podlove"]},
+    "diarization": {"enabled": true}
+  }'
+```
+
+After the job succeeds, verify the JSON, DOTe, and Podlove artifacts contain
+`Speaker 1` / `Speaker 2` labels.
 
 ## Wyoming STT
 

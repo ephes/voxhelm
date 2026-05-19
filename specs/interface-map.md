@@ -1,7 +1,7 @@
 # Voxhelm Interface Map
 
 **Date:** 2026-03-11
-**Status:** Active architecture doc; M1-M3 core runtime slices, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14
+**Status:** Active architecture doc; M1-M3 core runtime slices, the operator transcript UI, the shared transcript-output follow-on, and the first C21 speaker-output slice are implemented as of 2026-05-19
 
 This document is the active source of truth for Voxhelm's architecture boundaries, interface contracts, artifact access model, and auth domains.
 
@@ -166,6 +166,9 @@ Larger URL-driven inputs can be handled through this interface or through the ba
   "output": {
     "formats": ["text", "json"]
   },
+  "diarization": {
+    "enabled": false
+  },
   "context": {
     "producer": "archive",
     "item_id": 123
@@ -175,7 +178,9 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 ```
 
 **Job types (current v1):** `transcribe`, `synthesize`
-**Job types (later):** `extract_audio`, `analyze_media`, `diarize`
+**Job types (later):** `extract_audio`, `analyze_media`; a separate `diarize` job type remains deferred unless a later lifecycle needs it.
+
+For `job_type=transcribe`, `diarization` is optional. Omitted `diarization` is treated as `{"enabled": false}` and stored in normalized job output metadata. `{"enabled": true}` runs speaker diarization after STT and before artifact rendering. Malformed values are rejected with `invalid_request_error`. If diarization is requested but the configured backend is unavailable, misconfigured, returns no usable turns, or returns turns that cannot align with transcript segments, the job fails clearly instead of emitting unlabeled speaker artifacts.
 
 **Input kinds (current M1b):** `url`
 **Input kinds (planned follow-ons):** `upload`, `minio_ref`
@@ -187,12 +192,14 @@ The shipped operator UI intentionally stays within this current boundary: batch 
 | Format | Shape | Consumer | Status |
 |--------|-------|----------|--------|
 | `text` | Plain text string | Archive (via sync endpoint), podcast-pipeline (indirect) | implemented |
-| `json` | Whisper-style `{"segments": [{"id", "start", "end", "text", ...}]}` | podcast-transcript, python-podcast | implemented |
+| `json` | Whisper-style `{"segments": [{"id", "start", "end", "text", ...}]}`; diarized jobs add `speaker` only on labeled segments | podcast-transcript, python-podcast | implemented |
 | `vtt` / `webvtt` | WebVTT text | subtitle and transcript consumers | implemented |
 | `dote` | DOTe JSON | django-cast, operator UI exports | implemented |
 | `podlove` | Podlove transcript JSON | django-cast, operator UI exports | implemented |
 
 Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current implementation stores `text`, `json`, `vtt`, `dote`, and `podlove` artifacts. `django-cast` and the operator UI now consume those shared server-owned outputs instead of duplicating conversion logic.
+
+When diarization is enabled, backend-native speaker identifiers are normalized to stable generic labels such as `Speaker 1` and `Speaker 2`. DOTe renders those labels in `speakerDesignation`; Podlove renders them in both `speaker` and `voice`. WebVTT intentionally remains unchanged in the first diarization slice.
 
 **Response:** `201 Created`
 

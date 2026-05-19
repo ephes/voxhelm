@@ -42,6 +42,7 @@ from synthesis.service import (
     export_audio,
     synthesize_text,
 )
+from transcriptions.diarization import apply_speaker_labels, diarize_audio
 from transcriptions.errors import ApiError
 from transcriptions.formats import render_dote, render_podlove, render_text
 from transcriptions.service import (
@@ -73,6 +74,7 @@ class JobRequest:
     language: str | None
     input_data: dict[str, Any]
     output_formats: list[str]
+    diarization_enabled: bool
     context: dict[str, Any]
     task_ref: str
 
@@ -122,6 +124,10 @@ def create_job_from_payload_for_actor(
                 "content_type": staged_media.content_type,
                 "size_bytes": staged_media.size_bytes,
             }
+        output_data: dict[str, Any] = {"formats": request.output_formats}
+        if request.job_type == Job.JobType.TRANSCRIBE:
+            output_data["diarization"] = {"enabled": request.diarization_enabled}
+
         job = Job.objects.create(
             producer=producer,
             operator=operator,
@@ -134,7 +140,7 @@ def create_job_from_payload_for_actor(
             model=request.model,
             language=request.language or "",
             input_data=input_data,
-            output_data={"formats": request.output_formats},
+            output_data=output_data,
             context_data=request.context,
             state=Job.State.QUEUED,
         )
@@ -245,6 +251,7 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
     output_formats = validate_transcription_output_formats(
         ensure_object(payload.get("output", {}), "output")
     )
+    diarization_enabled = parse_diarization_option(payload)
     context = ensure_object(payload.get("context", {}), "context")
     task_ref = optional_string(payload.get("task_ref")) or ""
 
@@ -257,6 +264,7 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         language=language,
         input_data=normalized_input_data,
         output_formats=output_formats,
+        diarization_enabled=diarization_enabled,
         context=context,
         task_ref=task_ref,
     )
@@ -304,6 +312,7 @@ def parse_synthesis_job_request(payload: dict[str, Any]) -> JobRequest:
         language=language,
         input_data=synthesis_input,
         output_formats=output_formats,
+        diarization_enabled=False,
         context=context,
         task_ref=task_ref,
     )
@@ -342,6 +351,19 @@ def validate_transcription_output_formats(output: dict[str, Any]) -> list[str]:
         if normalized not in output_formats:
             output_formats.append(normalized)
     return output_formats
+
+
+def parse_diarization_option(payload: dict[str, Any]) -> bool:
+    raw_diarization = payload.get("diarization")
+    if raw_diarization is None:
+        return False
+    diarization = ensure_object(raw_diarization, "diarization")
+    if "enabled" not in diarization:
+        raise ApiError("diarization.enabled must be provided when diarization is set.")
+    raw_enabled = diarization["enabled"]
+    if not isinstance(raw_enabled, bool):
+        raise ApiError("diarization.enabled must be a boolean.")
+    return raw_enabled
 
 
 def validate_speech_output_formats(output: dict[str, Any]) -> list[str]:
@@ -454,6 +476,8 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
                 language=job.language or None,
             ),
         )
+        if transcription_diarization_enabled(job):
+            result = apply_speaker_labels(result, diarize_audio(audio_path))
         processing_seconds = round(monotonic() - started, 3)
         metadata = build_transcription_result_metadata(
             job=job,
@@ -587,7 +611,7 @@ def build_transcription_result_metadata(
     result: TranscriptionResult,
     processing_seconds: float,
 ) -> dict[str, Any]:
-    return build_transcription_metadata(
+    metadata = build_transcription_metadata(
         requested_model=job.model or "auto",
         requested_language=job.language or None,
         result=result,
@@ -597,6 +621,9 @@ def build_transcription_result_metadata(
         source_url=media.source_url,
         source_content_type=media.content_type,
     )
+    if transcription_diarization_enabled(job):
+        metadata["diarization"] = {"enabled": True}
+    return metadata
 
 
 def build_transcription_metadata(
@@ -625,6 +652,11 @@ def build_transcription_metadata(
         "source_url": source_url,
         "source_content_type": source_content_type,
     }
+
+
+def transcription_diarization_enabled(job: Job) -> bool:
+    raw_diarization = job.output_data.get("diarization")
+    return isinstance(raw_diarization, dict) and raw_diarization.get("enabled") is True
 
 
 def build_synthesis_result_metadata(

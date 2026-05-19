@@ -1,7 +1,7 @@
 # Decision Log: Voxhelm
 
 **Date:** 2026-03-11
-**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, the operator transcript UI, and the shared transcript-output follow-on are implemented as of 2026-03-14. Remaining planned work is later backend expansion, speaker diarization for podcast transcripts, Archive article-audio consumer work, and M4/OpenClaw.
+**Status:** Accepted defaults; the M1-M3 core runtime slices, including the first C13 lane-scheduling slice, the operator transcript UI, the shared transcript-output follow-on, and the first C21 speaker-output slice are implemented. Remaining planned work is later backend expansion, C21 diarization backend validation/named-speaker follow-ons, Archive article-audio consumer work, and M4/OpenClaw.
 
 ---
 
@@ -239,6 +239,8 @@ Voxhelm should persist its own producer-facing job record and store the returned
 **Recommended default:** Option C. Defer diarization from v1 and the near-term core runtime work.
 
 **Update (2026-05-18):** django-cast now has a concrete backlog item for speaker diarization in generated podcast transcripts. That does not change the v1 decision, but it does move diarization from "purely hypothetical later" to a later-work spike/output follow-on. Track it as C21: first prove a diarization backend on representative podcast audio, then decide whether to add speaker labels as an explicit option on `job_type=transcribe`, a separate `diarize` job type, or both.
+
+**Update (2026-05-19):** The first C21 output slice chose an explicit top-level option on batch `job_type=transcribe`: `diarization: {"enabled": true}`. Omitted or `false` keeps existing behavior. Voxhelm normalizes backend speaker IDs to generic `Speaker N` labels, aligns diarization turns to STT segments by largest timestamp overlap, and propagates labels into verbose JSON, DOTe `speakerDesignation`, and Podlove `speaker` / `voice`. WebVTT remains unchanged for this slice. A separate `job_type=diarize`, named-speaker mapping, contributor mapping, and mandatory diarization remain deferred. The pyannote path is guarded and optional; the heavyweight diarization stack is isolated behind the `diarization` optional dependency extra and still requires backend quality/runtime validation before production use.
 
 **Blocks implementation:** No.
 
