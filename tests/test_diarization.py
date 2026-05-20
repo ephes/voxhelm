@@ -8,6 +8,7 @@ from transcriptions.diarization import (
     apply_speaker_labels,
     choose_speaker_for_segment,
     extract_pyannote_annotation,
+    get_pyannote_diarization_backend,
     normalize_speaker_turns,
 )
 from transcriptions.formats import render_dote, render_podlove, render_verbose_json, render_vtt
@@ -40,6 +41,19 @@ def test_extract_pyannote_annotation_accepts_exclusive_pyannote_v4_output_wrappe
     annotation = FakeAnnotation()
 
     assert extract_pyannote_annotation(FakeExclusiveDiarizeOutput(annotation)) is annotation
+
+
+def test_pyannote_backend_is_cached_per_model_and_token() -> None:
+    get_pyannote_diarization_backend.cache_clear()
+
+    first = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-a")
+    second = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-a")
+    different_model = get_pyannote_diarization_backend(model_name="model-b", auth_token="token-a")
+    different_token = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-b")
+
+    assert first is second
+    assert first is not different_model
+    assert first is not different_token
 
 
 def test_normalize_speaker_turns_uses_stable_generic_labels() -> None:
@@ -105,6 +119,23 @@ def test_apply_speaker_labels_raises_when_turns_do_not_overlap_segments() -> Non
         language="en",
         segments=[TranscriptionSegment(id=0, start=10.0, end=11.0, text="hello")],
     )
+
+    with pytest.raises(DiarizationError, match="did not overlap"):
+        apply_speaker_labels(
+            result,
+            [SpeakerTurn(start=0.0, end=1.0, speaker="SPEAKER_00")],
+        )
+
+
+def test_apply_speaker_labels_raises_when_result_has_no_segments_and_no_usable_turns() -> None:
+    result = TranscriptionResult(text="", language="en", segments=[])
+
+    with pytest.raises(DiarizationError, match="no usable speaker turns"):
+        apply_speaker_labels(result, [])
+
+
+def test_apply_speaker_labels_raises_when_result_has_no_segments_to_align() -> None:
+    result = TranscriptionResult(text="hello", language="en", segments=[])
 
     with pytest.raises(DiarizationError, match="did not overlap"):
         apply_speaker_labels(

@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import wave
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
@@ -197,7 +198,7 @@ def build_diarization_backend_service(*, backend_name: str) -> DiarizationBacken
     if normalized in {"", "none"}:
         return UnavailableDiarizationBackend()
     if normalized == "pyannote":
-        return PyannoteDiarizationBackend(
+        return get_pyannote_diarization_backend(
             model_name=settings.VOXHELM_PYANNOTE_MODEL,
             auth_token=settings.VOXHELM_HUGGINGFACE_TOKEN,
         )
@@ -206,13 +207,20 @@ def build_diarization_backend_service(*, backend_name: str) -> DiarizationBacken
     )
 
 
+@lru_cache(maxsize=4)
+def get_pyannote_diarization_backend(
+    *,
+    model_name: str,
+    auth_token: str,
+) -> PyannoteDiarizationBackend:
+    return PyannoteDiarizationBackend(model_name=model_name, auth_token=auth_token)
+
+
 def apply_speaker_labels(
     result: TranscriptionResult,
     turns: list[SpeakerTurn],
 ) -> TranscriptionResult:
     normalized_turns = normalize_speaker_turns(turns)
-    if not result.segments:
-        return result
     if not normalized_turns:
         raise DiarizationError("Diarization backend returned no usable speaker turns.")
 

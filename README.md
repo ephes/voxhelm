@@ -196,10 +196,10 @@ Production diarization requires all of the following:
   `pyannote/speaker-diarization-community-1`, and any gated dependency reported
   by pyannote during model loading
 
-The first successful run downloads model weights into the configured model
-cache and can take time. Long podcast episodes are CPU-heavy; submit them as
-async batch jobs and inspect the worker logs rather than holding an HTTP/admin
-request open.
+The first successful run downloads model weights through the Hugging Face /
+pyannote cache path and can take time. Long podcast episodes are CPU-heavy;
+submit them as async batch jobs and inspect the worker logs rather than holding
+an HTTP/admin request open.
 
 Short smoke test:
 
