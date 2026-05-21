@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from transcriptions.diarization import (
     DiarizationError,
+    PyannoteDiarizationBackend,
     SpeakerTurn,
     apply_speaker_labels,
     choose_speaker_for_segment,
@@ -31,6 +34,17 @@ class FakeExclusiveDiarizeOutput:
         self.exclusive_speaker_diarization = annotation
 
 
+class BrokenItertracksAnnotation:
+    def itertracks(self, *, yield_label: bool):
+        del yield_label
+        raise AttributeError("broken itertracks")
+
+
+class BrokenPyannoteDiarizationBackend(PyannoteDiarizationBackend):
+    def _load_pipeline(self) -> Any:
+        return lambda audio: BrokenItertracksAnnotation()
+
+
 def test_extract_pyannote_annotation_accepts_pyannote_v4_output_wrapper() -> None:
     annotation = FakeAnnotation()
 
@@ -41,6 +55,25 @@ def test_extract_pyannote_annotation_accepts_exclusive_pyannote_v4_output_wrappe
     annotation = FakeAnnotation()
 
     assert extract_pyannote_annotation(FakeExclusiveDiarizeOutput(annotation)) is annotation
+
+
+def test_extract_pyannote_annotation_rejects_unexpected_output_with_diarization_error() -> None:
+    with pytest.raises(DiarizationError, match="unexpected diarization result"):
+        extract_pyannote_annotation(object())
+
+
+def test_pyannote_backend_rejects_annotation_without_itertracks_with_diarization_error(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    backend = BrokenPyannoteDiarizationBackend(model_name="model", auth_token="token")
+    monkeypatch.setattr(
+        "transcriptions.diarization.load_audio_for_pyannote",
+        lambda audio_path: {"waveform": object(), "sample_rate": 16000},
+    )
+
+    with pytest.raises(DiarizationError, match="unexpected diarization result"):
+        backend.diarize(tmp_path / "audio.mp3")
 
 
 def test_pyannote_backend_is_cached_per_model_and_token() -> None:

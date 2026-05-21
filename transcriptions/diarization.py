@@ -112,7 +112,7 @@ class PyannoteDiarizationBackend:
         try:
             iterator = annotation.itertracks(yield_label=True)
         except AttributeError as exc:
-            raise RuntimeError(
+            raise DiarizationError(
                 "pyannote.audio returned an unexpected diarization result."
             ) from exc
         for segment, _track, label in iterator:
@@ -178,7 +178,7 @@ def extract_pyannote_annotation(diarization_result: Any) -> Any:
     annotation = getattr(diarization_result, "exclusive_speaker_diarization", None)
     if annotation is not None:
         return annotation
-    raise RuntimeError("pyannote.audio returned an unexpected diarization result.")
+    raise DiarizationError("pyannote.audio returned an unexpected diarization result.")
 
 
 def diarize_audio(audio_path: Path) -> list[SpeakerTurn]:
