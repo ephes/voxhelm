@@ -99,9 +99,10 @@ def load_audio_for_pyannote(audio_path: Path) -> dict[str, Any]:
 
 
 class PyannoteDiarizationBackend:
-    def __init__(self, *, model_name: str, auth_token: str) -> None:
+    def __init__(self, *, model_name: str, auth_token: str, device_name: str = "auto") -> None:
         self.model_name = model_name
         self.auth_token = auth_token
+        self.device_name = device_name
         self._pipeline: Any | None = None
 
     def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
@@ -163,10 +164,47 @@ class PyannoteDiarizationBackend:
             raise DiarizationBackendUnavailableError(
                 f"pyannote.audio could not load diarization model '{self.model_name}'."
             )
+        self._pipeline.to(resolve_pyannote_device(self.device_name))
         return self._pipeline
 
 
 _DIARIZATION_LOCK = Lock()
+
+
+_AUTO_DEVICE_NAMES = frozenset({"", "auto"})
+_EXPLICIT_DEVICE_NAMES = frozenset({"cpu", "mps", "cuda"})
+
+
+def _torch_device_available(torch: Any, device_name: str) -> bool:
+    if device_name == "cuda":
+        return bool(torch.cuda.is_available())
+    if device_name == "mps":
+        mps_backend = getattr(torch.backends, "mps", None)
+        return mps_backend is not None and bool(mps_backend.is_available())
+    return device_name == "cpu"
+
+
+def resolve_pyannote_device(device_name: str) -> Any:
+    torch = importlib.import_module("torch")
+    normalized = device_name.strip().lower()
+
+    if normalized in _AUTO_DEVICE_NAMES:
+        for candidate in ("mps", "cuda"):
+            if _torch_device_available(torch, candidate):
+                return torch.device(candidate)
+        return torch.device("cpu")
+
+    if normalized not in _EXPLICIT_DEVICE_NAMES:
+        supported = ", ".join(["auto", *sorted(_EXPLICIT_DEVICE_NAMES)])
+        raise DiarizationConfigurationError(
+            f"Unsupported pyannote device '{device_name}'. Supported values: {supported}."
+        )
+
+    if not _torch_device_available(torch, normalized):
+        raise DiarizationBackendUnavailableError(
+            f"pyannote device '{normalized}' is not available on this host."
+        )
+    return torch.device(normalized)
 
 
 def extract_pyannote_annotation(diarization_result: Any) -> Any:
@@ -201,6 +239,7 @@ def build_diarization_backend_service(*, backend_name: str) -> DiarizationBacken
         return get_pyannote_diarization_backend(
             model_name=settings.VOXHELM_PYANNOTE_MODEL,
             auth_token=settings.VOXHELM_HUGGINGFACE_TOKEN,
+            device_name=settings.VOXHELM_PYANNOTE_DEVICE,
         )
     raise DiarizationConfigurationError(
         f"Unsupported diarization backend '{backend_name}'. Supported values: none, pyannote."
@@ -212,8 +251,13 @@ def get_pyannote_diarization_backend(
     *,
     model_name: str,
     auth_token: str,
+    device_name: str,
 ) -> PyannoteDiarizationBackend:
-    return PyannoteDiarizationBackend(model_name=model_name, auth_token=auth_token)
+    return PyannoteDiarizationBackend(
+        model_name=model_name,
+        auth_token=auth_token,
+        device_name=device_name,
+    )
 
 
 def apply_speaker_labels(

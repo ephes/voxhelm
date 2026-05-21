@@ -183,6 +183,7 @@ VOXHELM_PYANNOTE_MODEL = os.getenv(
     "VOXHELM_PYANNOTE_MODEL",
     "pyannote/speaker-diarization-3.1",
 ).strip()
+VOXHELM_PYANNOTE_DEVICE = os.getenv("VOXHELM_PYANNOTE_DEVICE", "auto").strip()
 VOXHELM_HUGGINGFACE_TOKEN = os.getenv(
     "VOXHELM_HUGGINGFACE_TOKEN",
     os.getenv("HF_TOKEN", ""),

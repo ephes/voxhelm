@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 import pytest
 
 from transcriptions.diarization import (
+    DiarizationBackendUnavailableError,
+    DiarizationConfigurationError,
     DiarizationError,
     PyannoteDiarizationBackend,
     SpeakerTurn,
@@ -13,6 +16,7 @@ from transcriptions.diarization import (
     extract_pyannote_annotation,
     get_pyannote_diarization_backend,
     normalize_speaker_turns,
+    resolve_pyannote_device,
 )
 from transcriptions.formats import render_dote, render_podlove, render_verbose_json, render_vtt
 from transcriptions.service import TranscriptionResult, TranscriptionSegment
@@ -76,17 +80,55 @@ def test_pyannote_backend_rejects_annotation_without_itertracks_with_diarization
         backend.diarize(tmp_path / "audio.mp3")
 
 
-def test_pyannote_backend_is_cached_per_model_and_token() -> None:
+def test_pyannote_backend_is_cached_per_model_token_and_device() -> None:
     get_pyannote_diarization_backend.cache_clear()
 
-    first = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-a")
-    second = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-a")
-    different_model = get_pyannote_diarization_backend(model_name="model-b", auth_token="token-a")
-    different_token = get_pyannote_diarization_backend(model_name="model-a", auth_token="token-b")
+    first = get_pyannote_diarization_backend(
+        model_name="model-a", auth_token="token-a", device_name="cpu"
+    )
+    second = get_pyannote_diarization_backend(
+        model_name="model-a", auth_token="token-a", device_name="cpu"
+    )
+    different_model = get_pyannote_diarization_backend(
+        model_name="model-b", auth_token="token-a", device_name="cpu"
+    )
+    different_token = get_pyannote_diarization_backend(
+        model_name="model-a", auth_token="token-b", device_name="cpu"
+    )
+    different_device = get_pyannote_diarization_backend(
+        model_name="model-a", auth_token="token-a", device_name="auto"
+    )
 
     assert first is second
     assert first is not different_model
     assert first is not different_token
+    assert first is not different_device
+
+
+def test_resolve_pyannote_device_cpu_resolves_to_cpu() -> None:
+    assert resolve_pyannote_device("cpu").type == "cpu"
+
+
+def test_resolve_pyannote_device_auto_resolves_to_supported_device() -> None:
+    assert resolve_pyannote_device("auto").type in {"cpu", "mps", "cuda"}
+
+
+def test_resolve_pyannote_device_rejects_unknown_device_name() -> None:
+    with pytest.raises(DiarizationConfigurationError, match="Unsupported pyannote device"):
+        resolve_pyannote_device("tpu")
+
+
+@pytest.mark.parametrize("device_name", ["mps", "cuda"])
+def test_resolve_pyannote_device_rejects_unavailable_explicit_device(
+    device_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = importlib.import_module("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None:
+        monkeypatch.setattr(mps_backend, "is_available", lambda: False)
+    with pytest.raises(DiarizationBackendUnavailableError, match="is not available"):
+        resolve_pyannote_device(device_name)
 
 
 def test_normalize_speaker_turns_uses_stable_generic_labels() -> None:

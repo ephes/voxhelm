@@ -172,8 +172,9 @@ slice.
 The default `VOXHELM_DIARIZATION_BACKEND=none` makes requested diarization jobs
 fail clearly instead of silently emitting unlabeled output. A guarded pyannote
 adapter is available with `VOXHELM_DIARIZATION_BACKEND=pyannote`,
-`VOXHELM_PYANNOTE_MODEL`, and `VOXHELM_HUGGINGFACE_TOKEN`. Install the optional
-model stack with:
+`VOXHELM_PYANNOTE_MODEL`, `VOXHELM_PYANNOTE_DEVICE`, and
+`VOXHELM_HUGGINGFACE_TOKEN`. `VOXHELM_PYANNOTE_DEVICE=auto` uses Apple MPS when
+available, then CUDA, then CPU. Install the optional model stack with:
 
 ```bash
 uv sync --extra diarization
@@ -192,6 +193,7 @@ Production diarization requires all of the following:
 - install dependencies with `uv sync --extra diarization`
 - set `VOXHELM_DIARIZATION_BACKEND=pyannote`
 - set `VOXHELM_HUGGINGFACE_TOKEN` or `HF_TOKEN`
+- keep `VOXHELM_PYANNOTE_DEVICE=auto` or explicitly set `mps`, `cuda`, or `cpu`
 - accept Hugging Face access for `pyannote/speaker-diarization-3.1`,
   `pyannote/speaker-diarization-community-1`, and any gated dependency reported
   by pyannote during model loading
