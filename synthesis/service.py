@@ -225,7 +225,14 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
         args.extend(["-vn", "-codec:a", "libvorbis", "-q:a", "4"])
     args.append(str(target_path))
 
-    completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    completed = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
     if completed.returncode != 0:
         target_path.unlink(missing_ok=True)
         detail = "\n".join(

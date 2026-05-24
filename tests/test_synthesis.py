@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,35 @@ def test_export_audio_returns_wav_without_conversion(tmp_path: Path) -> None:
     exported = export_audio(result, output_format="wav")
 
     assert exported == ExportedAudio(path=wav_path, format_name="wav", content_type="audio/wav")
+
+
+def test_export_audio_handles_non_utf8_ffmpeg_stderr(tmp_path: Path, settings) -> None:
+    fake_ffmpeg = tmp_path / "fake-ffmpeg.py"
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.buffer.write(b'bad byte: \\xf0')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    fake_ffmpeg.chmod(0o755)
+    wav_path = tmp_path / "speech.wav"
+    wav_path.write_bytes(b"RIFF")
+    result = SynthesisResult(
+        audio_path=wav_path,
+        backend_name="piper",
+        model_name="piper",
+        voice_name="en_US-lessac-medium",
+        language="en",
+        sample_rate=22050,
+        sample_width=2,
+        channels=1,
+        duration_seconds=1.0,
+    )
+    settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
+
+    with pytest.raises(RuntimeError, match="Audio conversion failed: bad byte: �"):
+        export_audio(result, output_format="mp3")
 
 
 def test_export_audio_rejects_unknown_format(tmp_path: Path) -> None:

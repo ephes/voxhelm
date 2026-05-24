@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from transcriptions.service import (
     TranscriptionSegment,
     WhisperCppBackend,
     WhisperKitBackend,
+    _normalize_audio_for_whispercpp,
     get_backend_services_for_model,
     normalize_interactive_transcript,
     normalize_transcription_payload,
@@ -357,8 +359,9 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
         lambda _name: model_path,
     )
 
-    def fake_run(args, capture_output, text, check):
-        del capture_output, text, check
+    def fake_run(args, **kwargs):
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
         call = [str(part) for part in args]
         calls.append(call)
         if call[0] == settings.VOXHELM_FFMPEG_BIN:
@@ -420,8 +423,8 @@ def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(
         lambda _name: model_path,
     )
 
-    def fake_run(args, capture_output, text, check):
-        del args, capture_output, text, check
+    def fake_run(args, **kwargs):
+        del args, kwargs
         return type(
             "Completed",
             (),
@@ -437,6 +440,31 @@ def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(
         )
     except RuntimeError as exc:
         assert str(exc) == "ffmpeg audio normalization failed: decoder exploded"
+    else:  # pragma: no cover
+        raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
+
+
+def test_whispercpp_audio_normalization_handles_non_utf8_ffmpeg_stderr(
+    tmp_path: Path, settings
+) -> None:
+    fake_ffmpeg = tmp_path / "fake-ffmpeg.py"
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.buffer.write(b'bad byte: \\xf0')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    fake_ffmpeg.chmod(0o755)
+    input_path = tmp_path / "sample.mp3"
+    input_path.write_bytes(b"not-really-audio")
+    output_path = tmp_path / "normalized.wav"
+    settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
+
+    try:
+        _normalize_audio_for_whispercpp(input_path=input_path, output_path=output_path)
+    except RuntimeError as exc:
+        assert str(exc) == "ffmpeg audio normalization failed: bad byte: �"
     else:  # pragma: no cover
         raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
 
@@ -464,8 +492,8 @@ def test_whispercpp_backend_raises_when_transcript_json_is_missing(
         lambda _name: model_path,
     )
 
-    def fake_run(args, capture_output, text, check):
-        del capture_output, text, check
+    def fake_run(args, **kwargs):
+        del kwargs
         call = [str(part) for part in args]
         if call[0] == settings.VOXHELM_FFMPEG_BIN:
             Path(call[-1]).write_bytes(b"RIFFfakewav")

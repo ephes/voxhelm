@@ -189,6 +189,8 @@ class WhisperCppBackend:
                 args,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
             )
             if completed.returncode != 0:
@@ -228,6 +230,8 @@ def _normalize_audio_for_whispercpp(*, input_path: Path, output_path: Path) -> N
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if completed.returncode == 0 and output_path.exists():

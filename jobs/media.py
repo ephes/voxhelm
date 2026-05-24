@@ -176,6 +176,8 @@ def extract_audio_from_video(*, source_path: Path) -> Path:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.CalledProcessError as exc:
         target_path.unlink(missing_ok=True)
