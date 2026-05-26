@@ -180,7 +180,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 **Job types (current v1):** `transcribe`, `synthesize`
 **Job types (later):** `extract_audio`, `analyze_media`; a separate `diarize` job type remains deferred unless a later lifecycle needs it.
 
-For `job_type=transcribe`, `diarization` is optional. Omitted `diarization` is treated as `{"enabled": false}` and stored in normalized job output metadata. `{"enabled": true}` runs speaker diarization after STT and before artifact rendering. Malformed values are rejected with `invalid_request_error`. If diarization is requested but the configured backend is unavailable, misconfigured, returns no usable turns, or returns turns that cannot align with transcript segments, the job fails clearly instead of emitting unlabeled speaker artifacts.
+For `job_type=transcribe`, `diarization` is optional. Omitted `diarization` is treated as `{"enabled": false}` and stored in normalized job output metadata. `{"enabled": true}` runs speaker diarization after STT and before artifact rendering. Enabled diarization may include pyannote speaker-count hints: either an exact `num_speakers` or `min_speakers` / `max_speakers` bounds. Malformed values, unknown diarization keys, disabled diarization with speaker hints, and exact-plus-bound combinations are rejected with `invalid_request_error`. If diarization is requested but the configured backend is unavailable, misconfigured, returns no usable turns, or returns turns that cannot align with transcript segments, the job fails clearly instead of emitting unlabeled speaker artifacts. Jobs with the same `task_ref` are deduplicated only when the normalized result-affecting transcription request fields match, including input, model, language, output formats, and diarization payload; output-format order is not significant. Synthesis jobs currently retain the original looser `task_ref` idempotency behavior for same-type non-failed jobs.
 
 **Input kinds (current M1b):** `url`
 **Input kinds (planned follow-ons):** `upload`, `minio_ref`
@@ -199,7 +199,7 @@ The shipped operator UI intentionally stays within this current boundary: batch 
 
 Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current implementation stores `text`, `json`, `vtt`, `dote`, and `podlove` artifacts. `django-cast` and the operator UI now consume those shared server-owned outputs instead of duplicating conversion logic.
 
-When diarization is enabled, backend-native speaker identifiers are normalized to stable generic labels such as `Speaker 1` and `Speaker 2`. DOTe renders those labels in `speakerDesignation`; Podlove renders them in both `speaker` and `voice`. WebVTT intentionally remains unchanged in the first diarization slice.
+When diarization is enabled, backend-native speaker identifiers are normalized to stable generic labels such as `Speaker 1` and `Speaker 2`. DOTe renders those labels in `speakerDesignation`; Podlove renders them in both `speaker` and `voice`. WebVTT intentionally remains unchanged in the first diarization slice. Result metadata echoes the normalized diarization payload, including any accepted speaker-count hints.
 
 **Response:** `201 Created`
 

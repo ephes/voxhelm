@@ -23,6 +23,23 @@ class SpeakerTurn:
     speaker: str
 
 
+@dataclass(frozen=True)
+class DiarizationParams:
+    num_speakers: int | None = None
+    min_speakers: int | None = None
+    max_speakers: int | None = None
+
+    def pyannote_kwargs(self) -> dict[str, int]:
+        kwargs = {}
+        if self.num_speakers is not None:
+            kwargs["num_speakers"] = self.num_speakers
+        if self.min_speakers is not None:
+            kwargs["min_speakers"] = self.min_speakers
+        if self.max_speakers is not None:
+            kwargs["max_speakers"] = self.max_speakers
+        return kwargs
+
+
 class DiarizationError(RuntimeError):
     """Base error for requested diarization failures."""
 
@@ -36,12 +53,20 @@ class DiarizationConfigurationError(DiarizationError):
 
 
 class DiarizationBackendProtocol(Protocol):
-    def diarize(self, audio_path: Path) -> list[SpeakerTurn]: ...
+    def diarize(
+        self,
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+    ) -> list[SpeakerTurn]: ...
 
 
 class UnavailableDiarizationBackend:
-    def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
-        del audio_path
+    def diarize(
+        self,
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+    ) -> list[SpeakerTurn]:
+        del audio_path, params
         raise DiarizationBackendUnavailableError(
             "Diarization was requested, but no diarization backend is configured. "
             "Set VOXHELM_DIARIZATION_BACKEND=pyannote and configure the backend first."
@@ -105,9 +130,17 @@ class PyannoteDiarizationBackend:
         self.device_name = device_name
         self._pipeline: Any | None = None
 
-    def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
+    def diarize(
+        self,
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+    ) -> list[SpeakerTurn]:
         pipeline = self._load_pipeline()
-        diarization_result = pipeline(load_audio_for_pyannote(audio_path))
+        diarization_params = params or DiarizationParams()
+        diarization_result = pipeline(
+            load_audio_for_pyannote(audio_path),
+            **diarization_params.pyannote_kwargs(),
+        )
         annotation = extract_pyannote_annotation(diarization_result)
         turns: list[SpeakerTurn] = []
         try:
@@ -131,8 +164,7 @@ class PyannoteDiarizationBackend:
             return self._pipeline
         if not self.auth_token:
             raise DiarizationConfigurationError(
-                "VOXHELM_HUGGINGFACE_TOKEN must be set for "
-                "VOXHELM_DIARIZATION_BACKEND=pyannote."
+                "VOXHELM_HUGGINGFACE_TOKEN must be set for VOXHELM_DIARIZATION_BACKEND=pyannote."
             )
 
         try:
@@ -219,10 +251,13 @@ def extract_pyannote_annotation(diarization_result: Any) -> Any:
     raise DiarizationError("pyannote.audio returned an unexpected diarization result.")
 
 
-def diarize_audio(audio_path: Path) -> list[SpeakerTurn]:
+def diarize_audio(
+    audio_path: Path,
+    params: DiarizationParams | None = None,
+) -> list[SpeakerTurn]:
     with admit_local_inference(LANE_NON_INTERACTIVE):
         with _DIARIZATION_LOCK:
-            return get_diarization_backend_service().diarize(audio_path)
+            return get_diarization_backend_service().diarize(audio_path, params)
 
 
 def get_diarization_backend_service() -> DiarizationBackendProtocol:
@@ -296,9 +331,7 @@ def normalize_speaker_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
         if end <= start:
             continue
         if backend_label not in labels_by_backend_label:
-            labels_by_backend_label[backend_label] = (
-                f"Speaker {len(labels_by_backend_label) + 1}"
-            )
+            labels_by_backend_label[backend_label] = f"Speaker {len(labels_by_backend_label) + 1}"
         normalized_turns.append(
             SpeakerTurn(
                 start=start,

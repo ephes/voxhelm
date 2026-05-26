@@ -42,7 +42,7 @@ from synthesis.service import (
     export_audio,
     synthesize_text,
 )
-from transcriptions.diarization import apply_speaker_labels, diarize_audio
+from transcriptions.diarization import DiarizationParams, apply_speaker_labels, diarize_audio
 from transcriptions.errors import ApiError
 from transcriptions.formats import render_dote, render_podlove, render_text
 from transcriptions.service import (
@@ -74,7 +74,7 @@ class JobRequest:
     language: str | None
     input_data: dict[str, Any]
     output_formats: list[str]
-    diarization_enabled: bool
+    diarization: dict[str, Any]
     context: dict[str, Any]
     task_ref: str
 
@@ -93,15 +93,15 @@ def create_job_from_payload_for_actor(
     from jobs.tasks import run_synthesis_job, run_transcription_job
 
     if request.task_ref:
-        existing = (
+        existing_jobs = (
             Job.objects.filter(producer=producer, task_ref=request.task_ref)
             .exclude(state=Job.State.FAILED)
             .order_by("-created_at")
-            .first()
         )
-        if existing is not None:
-            reconcile_job_state(existing)
-            return existing, False
+        for existing in existing_jobs.iterator():
+            if existing_job_matches_request(existing, request):
+                reconcile_job_state(existing)
+                return existing, False
 
     task_callable = (
         run_synthesis_job if request.job_type == Job.JobType.SYNTHESIZE else run_transcription_job
@@ -126,7 +126,7 @@ def create_job_from_payload_for_actor(
             }
         output_data: dict[str, Any] = {"formats": request.output_formats}
         if request.job_type == Job.JobType.TRANSCRIBE:
-            output_data["diarization"] = {"enabled": request.diarization_enabled}
+            output_data["diarization"] = request.diarization
 
         job = Job.objects.create(
             producer=producer,
@@ -251,7 +251,7 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
     output_formats = validate_transcription_output_formats(
         ensure_object(payload.get("output", {}), "output")
     )
-    diarization_enabled = parse_diarization_option(payload)
+    diarization = parse_diarization_option(payload)
     context = ensure_object(payload.get("context", {}), "context")
     task_ref = optional_string(payload.get("task_ref")) or ""
 
@@ -264,10 +264,40 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         language=language,
         input_data=normalized_input_data,
         output_formats=output_formats,
-        diarization_enabled=diarization_enabled,
+        diarization=diarization,
         context=context,
         task_ref=task_ref,
     )
+
+
+def existing_job_matches_request(existing: Job, request: JobRequest) -> bool:
+    if existing.job_type != request.job_type:
+        return False
+    if request.job_type != Job.JobType.TRANSCRIBE:
+        return True
+    return (
+        existing.backend == request.backend
+        and existing.model == request.model
+        and (existing.language or None) == request.language
+        and existing_transcription_input_matches_request(existing.input_data, request.input_data)
+        and sorted(existing.output_data.get("formats", [])) == sorted(request.output_formats)
+        and transcription_diarization_payload(existing) == request.diarization
+    )
+
+
+def existing_transcription_input_matches_request(
+    existing_input: dict[str, Any],
+    request_input: dict[str, Any],
+) -> bool:
+    existing_kind = existing_input.get("kind")
+    request_kind = request_input.get("kind")
+    if existing_kind != request_kind:
+        return False
+    if request_kind == "upload":
+        return str(existing_input.get("upload_id") or "") == str(
+            request_input.get("upload_id") or ""
+        )
+    return existing_input == request_input
 
 
 def parse_synthesis_job_request(payload: dict[str, Any]) -> JobRequest:
@@ -312,7 +342,7 @@ def parse_synthesis_job_request(payload: dict[str, Any]) -> JobRequest:
         language=language,
         input_data=synthesis_input,
         output_formats=output_formats,
-        diarization_enabled=False,
+        diarization={"enabled": False},
         context=context,
         task_ref=task_ref,
     )
@@ -353,17 +383,65 @@ def validate_transcription_output_formats(output: dict[str, Any]) -> list[str]:
     return output_formats
 
 
-def parse_diarization_option(payload: dict[str, Any]) -> bool:
+def parse_diarization_option(payload: dict[str, Any]) -> dict[str, Any]:
     raw_diarization = payload.get("diarization")
     if raw_diarization is None:
-        return False
+        return {"enabled": False}
     diarization = ensure_object(raw_diarization, "diarization")
+    allowed_keys = {"enabled", "num_speakers", "min_speakers", "max_speakers"}
+    unknown_keys = sorted(set(diarization) - allowed_keys)
+    if unknown_keys:
+        raise ApiError(f"Unsupported diarization option: {', '.join(unknown_keys)}.")
     if "enabled" not in diarization:
         raise ApiError("diarization.enabled must be provided when diarization is set.")
     raw_enabled = diarization["enabled"]
     if not isinstance(raw_enabled, bool):
         raise ApiError("diarization.enabled must be a boolean.")
-    return raw_enabled
+
+    hint_keys = {"num_speakers", "min_speakers", "max_speakers"}
+    if not raw_enabled and any(key in diarization for key in hint_keys):
+        raise ApiError("diarization speaker hints require diarization.enabled=true.")
+
+    normalized: dict[str, Any] = {"enabled": raw_enabled}
+    if not raw_enabled:
+        return normalized
+
+    num_speakers = optional_positive_int(
+        diarization.get("num_speakers"),
+        "diarization.num_speakers",
+    )
+    min_speakers = optional_positive_int(
+        diarization.get("min_speakers"),
+        "diarization.min_speakers",
+    )
+    max_speakers = optional_positive_int(
+        diarization.get("max_speakers"),
+        "diarization.max_speakers",
+    )
+    if num_speakers is not None and (min_speakers is not None or max_speakers is not None):
+        raise ApiError(
+            "diarization.num_speakers cannot be combined with min_speakers or max_speakers."
+        )
+    if min_speakers is not None and max_speakers is not None and min_speakers > max_speakers:
+        raise ApiError(
+            "diarization.min_speakers must be less than or equal to diarization.max_speakers."
+        )
+    for key, value in (
+        ("num_speakers", num_speakers),
+        ("min_speakers", min_speakers),
+        ("max_speakers", max_speakers),
+    ):
+        if value is not None:
+            normalized[key] = value
+    return normalized
+
+
+def optional_positive_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ApiError(f"{field_name} must be a positive integer.")
+    return value
 
 
 def validate_speech_output_formats(output: dict[str, Any]) -> list[str]:
@@ -477,7 +555,10 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             ),
         )
         if transcription_diarization_enabled(job):
-            result = apply_speaker_labels(result, diarize_audio(audio_path))
+            result = apply_speaker_labels(
+                result,
+                diarize_audio(audio_path, transcription_diarization_params(job)),
+            )
         processing_seconds = round(monotonic() - started, 3)
         metadata = build_transcription_result_metadata(
             job=job,
@@ -553,9 +634,7 @@ def execute_synthesis_job(*, job_id: str, task_result_id: str) -> dict[str, Any]
         raise
     finally:
         cleanup_targets = [
-            export.path
-            for export in exports
-            if result is None or export.path != result.audio_path
+            export.path for export in exports if result is None or export.path != result.audio_path
         ]
         if result is not None:
             cleanup_targets.append(result.audio_path)
@@ -622,7 +701,7 @@ def build_transcription_result_metadata(
         source_content_type=media.content_type,
     )
     if transcription_diarization_enabled(job):
-        metadata["diarization"] = {"enabled": True}
+        metadata["diarization"] = transcription_diarization_payload(job)
     return metadata
 
 
@@ -657,6 +736,27 @@ def build_transcription_metadata(
 def transcription_diarization_enabled(job: Job) -> bool:
     raw_diarization = job.output_data.get("diarization")
     return isinstance(raw_diarization, dict) and raw_diarization.get("enabled") is True
+
+
+def transcription_diarization_payload(job: Job) -> dict[str, Any]:
+    raw_diarization = job.output_data.get("diarization")
+    if not isinstance(raw_diarization, dict):
+        return {"enabled": False}
+    payload: dict[str, Any] = {"enabled": raw_diarization.get("enabled") is True}
+    for key in ("num_speakers", "min_speakers", "max_speakers"):
+        value = raw_diarization.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            payload[key] = value
+    return payload
+
+
+def transcription_diarization_params(job: Job) -> DiarizationParams:
+    payload = transcription_diarization_payload(job)
+    return DiarizationParams(
+        num_speakers=payload.get("num_speakers"),
+        min_speakers=payload.get("min_speakers"),
+        max_speakers=payload.get("max_speakers"),
+    )
 
 
 def build_synthesis_result_metadata(

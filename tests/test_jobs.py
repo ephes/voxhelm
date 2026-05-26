@@ -14,7 +14,7 @@ from django_tasks import task_backends
 
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
-from transcriptions.diarization import SpeakerTurn
+from transcriptions.diarization import DiarizationParams, SpeakerTurn
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
@@ -130,6 +130,12 @@ def test_create_job_queued_with_dummy_backend(client, settings):
         {"enabled": "true"},
         {"enabled": 1},
         {"enabled": None},
+        {"enabled": True, "num_speakers": 0},
+        {"enabled": True, "num_speakers": True},
+        {"enabled": True, "num_speaker": 2},
+        {"enabled": False, "num_speakers": 2},
+        {"enabled": True, "num_speakers": 2, "min_speakers": 1},
+        {"enabled": True, "min_speakers": 4, "max_speakers": 2},
     ],
 )
 def test_transcription_job_rejects_malformed_diarization_option(
@@ -173,6 +179,29 @@ def test_transcription_job_accepts_disabled_diarization_option(client, settings)
 
 
 @pytest.mark.django_db
+def test_transcription_job_accepts_diarization_speaker_hints(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="archive-item-diarization-hints")
+    payload["diarization"] = {"enabled": True, "min_speakers": 2, "max_speakers": 4}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    job = Job.objects.get(id=response.json()["id"])
+    assert job.output_data["diarization"] == {
+        "enabled": True,
+        "min_speakers": 2,
+        "max_speakers": 4,
+    }
+
+
+@pytest.mark.django_db
 def test_job_submission_is_idempotent(client, settings):
     configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
@@ -195,6 +224,147 @@ def test_job_submission_is_idempotent(client, settings):
     assert second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
     assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_job_submission_deduplicates_output_formats_regardless_of_order(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    first_payload = build_job_payload(task_ref="archive-item-output-order-idempotency")
+    first_payload["output"] = {"formats": ["json", "podlove"]}
+    second_payload = build_job_payload(task_ref="archive-item-output-order-idempotency")
+    second_payload["output"] = {"formats": ["podlove", "json"]}
+
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(first_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_job_submission_with_same_task_ref_creates_new_job_for_different_output_formats(
+    client,
+    settings,
+):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    first_payload = build_job_payload(task_ref="archive-item-output-idempotency")
+    first_payload["output"] = {"formats": ["json"]}
+    second_payload = build_job_payload(task_ref="archive-item-output-idempotency")
+    second_payload["output"] = {"formats": ["json", "podlove"]}
+
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(first_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    third = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert third.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+    assert third.json()["id"] == second.json()["id"]
+    assert Job.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_job_submission_with_same_task_ref_deduplicates_interleaved_payloads(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    first_payload = build_job_payload(task_ref="archive-item-interleaved-idempotency")
+    first_payload["output"] = {"formats": ["json"]}
+    second_payload = build_job_payload(task_ref="archive-item-interleaved-idempotency")
+    second_payload["output"] = {"formats": ["json", "podlove"]}
+
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(first_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    third = client.post(
+        "/v1/jobs",
+        data=json.dumps(first_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert third.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+    assert third.json()["id"] == first.json()["id"]
+    assert Job.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_job_submission_with_same_task_ref_creates_new_job_for_different_diarization(
+    client,
+    settings,
+):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    first_payload = build_job_payload(task_ref="archive-item-diarization-idempotency")
+    second_payload = build_job_payload(task_ref="archive-item-diarization-idempotency")
+    second_payload["diarization"] = {"enabled": True, "num_speakers": 4}
+
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(first_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    third = client.post(
+        "/v1/jobs",
+        data=json.dumps(second_payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert third.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+    assert third.json()["id"] == second.json()["id"]
+    assert Job.objects.count() == 2
 
 
 @pytest.mark.django_db
@@ -398,9 +568,7 @@ def test_staged_audio_job_executes_and_serves_artifacts(client, settings, monkey
 
     response = client.post(
         "/v1/jobs",
-        data=json.dumps(
-            build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})
-        ),
+        data=json.dumps(build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})),
         content_type="application/json",
         HTTP_AUTHORIZATION="Bearer test-token",
     )
@@ -603,7 +771,11 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
     )
     monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
 
-    def fake_diarize(audio_path: Path) -> list[SpeakerTurn]:
+    def fake_diarize(
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+    ) -> list[SpeakerTurn]:
+        del params
         diarization_calls.append(audio_path)
         return [
             SpeakerTurn(start=0.0, end=1.0, speaker="SPEAKER_00"),
@@ -682,6 +854,56 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
 
 
 @pytest.mark.django_db
+def test_diarized_transcription_job_passes_speaker_count_hint_to_backend(
+    client,
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    diarization_params: list[DiarizationParams | None] = []
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+
+    def fake_diarize(
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+    ) -> list[SpeakerTurn]:
+        del audio_path
+        diarization_params.append(params)
+        return [SpeakerTurn(start=0.0, end=2.0, speaker="SPEAKER_00")]
+
+    monkeypatch.setattr("jobs.services.diarize_audio", fake_diarize)
+    payload = build_job_payload(task_ref="archive-item-diarized-speaker-hint")
+    payload["diarization"] = {"enabled": True, "num_speakers": 4}
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 201
+    assert response.json()["state"] == "succeeded"
+    assert diarization_params == [DiarizationParams(num_speakers=4)]
+    job = Job.objects.get(id=response.json()["id"])
+    assert job.output_data["diarization"] == {"enabled": True, "num_speakers": 4}
+    assert result["metadata"]["diarization"] == {"enabled": True, "num_speakers": 4}
+
+
+@pytest.mark.django_db
 def test_requested_diarization_fails_when_backend_is_unavailable(
     client,
     settings,
@@ -737,7 +959,7 @@ def test_requested_diarization_fails_when_backend_returns_no_usable_turns(
         ),
     )
     monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
-    monkeypatch.setattr("jobs.services.diarize_audio", lambda audio_path: [])
+    monkeypatch.setattr("jobs.services.diarize_audio", lambda audio_path, params=None: [])
     payload = build_job_payload(task_ref="archive-item-diarization-empty")
     payload["diarization"] = {"enabled": True}
 

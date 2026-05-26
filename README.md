@@ -158,16 +158,18 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
     "model": "auto",
     "input": {"kind": "url", "url": "https://example.com/episode.mp3"},
     "output": {"formats": ["json", "dote", "podlove", "vtt"]},
-    "diarization": {"enabled": true}
+    "diarization": {"enabled": true, "num_speakers": 4}
   }'
 ```
 
 When enabled, Voxhelm runs diarization after STT, aligns speaker turns to
 transcript segments by largest timestamp overlap, and emits stable generic
-labels such as `Speaker 1` and `Speaker 2`. Verbose JSON includes `speaker`
-only on labeled segments. DOTe fills `speakerDesignation`; Podlove fills both
-`speaker` and `voice`. WebVTT intentionally remains unchanged in this first
-slice.
+labels such as `Speaker 1` and `Speaker 2`. If the expected speaker count is
+known, pass `diarization.num_speakers`; alternatively pass
+`diarization.min_speakers` and/or `diarization.max_speakers` as pyannote speaker
+hints. Verbose JSON includes `speaker` only on labeled segments. DOTe fills
+`speakerDesignation`; Podlove fills both `speaker` and `voice`. WebVTT
+intentionally remains unchanged in this first slice.
 
 The default `VOXHELM_DIARIZATION_BACKEND=none` makes requested diarization jobs
 fail clearly instead of silently emitting unlabeled output. A guarded pyannote

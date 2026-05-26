@@ -9,6 +9,7 @@ from transcriptions.diarization import (
     DiarizationBackendUnavailableError,
     DiarizationConfigurationError,
     DiarizationError,
+    DiarizationParams,
     PyannoteDiarizationBackend,
     SpeakerTurn,
     apply_speaker_labels,
@@ -46,7 +47,7 @@ class BrokenItertracksAnnotation:
 
 class BrokenPyannoteDiarizationBackend(PyannoteDiarizationBackend):
     def _load_pipeline(self) -> Any:
-        return lambda audio: BrokenItertracksAnnotation()
+        return lambda audio, **kwargs: BrokenItertracksAnnotation()
 
 
 def test_extract_pyannote_annotation_accepts_pyannote_v4_output_wrapper() -> None:
@@ -78,6 +79,28 @@ def test_pyannote_backend_rejects_annotation_without_itertracks_with_diarization
 
     with pytest.raises(DiarizationError, match="unexpected diarization result"):
         backend.diarize(tmp_path / "audio.mp3")
+
+
+def test_pyannote_backend_passes_speaker_hints_to_pipeline(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    class HintPyannoteDiarizationBackend(PyannoteDiarizationBackend):
+        def _load_pipeline(self) -> Any:
+            def pipeline(audio, **kwargs):
+                calls.append((audio, kwargs))
+                return FakeAnnotation()
+
+            return pipeline
+
+    backend = HintPyannoteDiarizationBackend(model_name="model", auth_token="token")
+    audio_payload = {"waveform": object(), "sample_rate": 16000}
+    monkeypatch.setattr(
+        "transcriptions.diarization.load_audio_for_pyannote",
+        lambda audio_path: audio_payload,
+    )
+
+    assert backend.diarize(tmp_path / "audio.mp3", DiarizationParams(num_speakers=4)) == []
+    assert calls == [(audio_payload, {"num_speakers": 4})]
 
 
 def test_pyannote_backend_is_cached_per_model_token_and_device() -> None:
@@ -226,8 +249,7 @@ def test_choose_speaker_for_segment_uses_chronological_tiebreak() -> None:
     ]
 
     assert (
-        choose_speaker_for_segment(segment_start=0.0, segment_end=2.0, turns=turns)
-        == "Speaker 1"
+        choose_speaker_for_segment(segment_start=0.0, segment_end=2.0, turns=turns) == "Speaker 1"
     )
 
 
