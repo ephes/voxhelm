@@ -1,6 +1,6 @@
 # Voxhelm Specs Map
 
-Current implementation snapshot as of 2026-05-19:
+Current implementation and research snapshot as of 2026-05-27:
 
 - M1a, M1b, and the current M1c consumer slices are implemented and deployed.
 - M2 Home Assistant voice wiring is implemented: Voxhelm now runs a Wyoming sidecar on `studio`, Home Assistant can use Voxhelm STT/TTS through Assist pipelines, and area-registry aliases can be managed from deploy config.
@@ -12,6 +12,7 @@ Current implementation snapshot as of 2026-05-19:
 - Implemented TTS contract: Piper-backed synchronous speech generation plus batch `synthesize` jobs with artifact storage.
 - Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, artifact download through the Voxhelm HTTP proxy, and canonical batch transcript artifacts for `json`, `text`, `vtt`, `dote`, and `podlove`.
 - Implemented C21 first speaker-output slice: batch `transcribe` jobs can opt into `diarization.enabled=true`; Voxhelm applies generic `Speaker N` labels to transcript segments when the diarization backend returns turns, fills verbose JSON/DOTe/Podlove speaker fields, and leaves WebVTT unchanged.
+- Current diarization quality findings are captured in [`diarization-quality-research.md`](./diarization-quality-research.md): the DjangoCon Europe 2025 four-speaker mono podcast failure appears to be an acoustic clustering failure, local FLAC tracks are unreliable as direct timing labels without mastered-timeline alignment but strong as voiceprint references, and the recommended path is pyannote as baseline/fallback plus bad-diarization diagnostics, exclusive-turn alignment, and a known-speaker postprocessor for episodes with contributor reference clips.
 - The same-epic `django-cast` consumer cleanup is now complete: it requests and persists Voxhelm-owned `podlove`, `dote`, and `vtt` artifacts directly instead of converting `dote` / `podlove` locally.
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription, live batch jobs, direct Home Assistant STT, and the restored production debug-logging default have all been validated against the deployed service.
@@ -35,15 +36,17 @@ Read the documents in this order:
    The v1 technical shape: service boundaries, auth boundaries, interface contracts, producer/consumer relationships, and storage/access model.
 3. [`decision-log.md`](./decision-log.md)
    The decision register: open or recently resolved choices, available options, recommended default, and blocker status.
-4. [`milestones.md`](./milestones.md)
+4. [`diarization-quality-research.md`](./diarization-quality-research.md)
+   Current quality research for podcast speaker diarization, including the known four-speaker merge failure, pyannote tuning options, separated-track constraints, and recommended experiments.
+5. [`milestones.md`](./milestones.md)
    The delivery slices: what ships in each milestone, what is deferred, milestone dependencies, and milestone success criteria.
-5. [`delivery-chunks.md`](./delivery-chunks.md)
+6. [`delivery-chunks.md`](./delivery-chunks.md)
    The implementation work packages: chunk scope, exclusions, dependencies, interfaces, and acceptance criteria.
-6. [`implementation-sequence.md`](./implementation-sequence.md)
+7. [`implementation-sequence.md`](./implementation-sequence.md)
    The execution plan: ordering, parallelism, spikes, gates, and implementation timing.
-7. [`archive/spec-review.md`](./archive/spec-review.md)
+8. [`archive/spec-review.md`](./archive/spec-review.md)
    The research review against the original PRD and consumer repos.
-8. [`archive/planning-review.md`](./archive/planning-review.md)
+9. [`archive/planning-review.md`](./archive/planning-review.md)
    The review of the planning package itself.
 
 ## Source Of Truth Hierarchy
@@ -194,6 +197,7 @@ Active top-level spec set:
 - [`milestones.md`](./milestones.md)
 - [`delivery-chunks.md`](./delivery-chunks.md)
 - [`implementation-sequence.md`](./implementation-sequence.md)
+- [`diarization-quality-research.md`](./diarization-quality-research.md)
 - [`README.md`](./README.md)
 
 ## Current File Mapping
@@ -212,6 +216,8 @@ The current planning package maps reasonably well to a high-level-to-low-level s
   [`delivery-chunks.md`](./delivery-chunks.md)
 - Execution order:
   [`implementation-sequence.md`](./implementation-sequence.md)
+- Diarization quality research:
+  [`diarization-quality-research.md`](./diarization-quality-research.md)
 - Review artifacts:
   [`archive/spec-review.md`](./archive/spec-review.md), [`archive/planning-review.md`](./archive/planning-review.md)
 
