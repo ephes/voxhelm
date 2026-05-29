@@ -84,6 +84,54 @@ def quantile(values: list[float], q: float) -> float:
     return ordered[index]
 
 
+def weighted_error_rate(
+    gold: list[dict], predicted: list[str], weight_key: str
+) -> float:
+    """Time- or word-weighted single-speaker error rate (DER/WDER-style).
+
+    Single-speaker segments only; no overlap handling or collar, so this is a
+    practical DER/WDER approximation rather than full pyannote.metrics DER.
+    """
+    total = 0.0
+    errors = 0.0
+    for g, p in zip(gold, predicted, strict=True):
+        if weight_key == "time":
+            weight = max(float(g["end"]) - float(g["start"]), 0.0)
+        else:
+            weight = float(len(g["text"].split()))
+        total += weight
+        if g["speaker"] != p:
+            errors += weight
+    return round(errors / total, 4) if total else 0.0
+
+
+def build_curated_subset(gold: list[dict]) -> dict[str, list[int]]:
+    """Goal gold set: Johannes passage + per-speaker reps + short + boundary cases."""
+    subset: dict[str, list[int]] = {
+        "johannes_passage": [],
+        "per_speaker_representative": [],
+        "short_segments": [],
+        "speaker_boundary": [],
+    }
+    per_speaker: dict[str, int] = {}
+    for i, g in enumerate(gold):
+        start, end, speaker = float(g["start"]), float(g["end"]), g["speaker"]
+        duration = end - start
+        if JOHANNES_PASSAGE[0] <= start <= JOHANNES_PASSAGE[1]:
+            subset["johannes_passage"].append(i)
+        # Up to 3 clean representative passages per speaker.
+        if duration >= 2.5 and per_speaker.get(speaker, 0) < 3:
+            subset["per_speaker_representative"].append(i)
+            per_speaker[speaker] = per_speaker.get(speaker, 0) + 1
+        # Short segments (the hard, overlap/crosstalk-prone case).
+        if duration < 1.0:
+            subset["short_segments"].append(i)
+        # Segments at a speaker change (turn boundaries / likely crosstalk).
+        if i > 0 and gold[i - 1]["speaker"] != speaker and duration < 2.0:
+            subset["speaker_boundary"].append(i)
+    return subset
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--production-audio", type=Path, default=DEFAULT_PRODUCTION_AUDIO)
@@ -160,11 +208,41 @@ def main() -> None:
         for gold_speaker, seg in passage
     ]
 
+    # Curated gold subset per the goal: Johannes passage + per-speaker reps +
+    # short + speaker-boundary/crosstalk cases.
+    curated = build_curated_subset(gold)
+    curated_report: dict[str, dict] = {}
+    for category, indices in curated.items():
+        if not indices:
+            curated_report[category] = {"segments": 0, "top1_accuracy": None}
+            continue
+        hits = sum(1 for i in indices if top1[i] == gold[i]["speaker"])
+        curated_report[category] = {
+            "segments": len(indices),
+            "top1_accuracy": round(hits / len(indices), 4),
+        }
+    curated_all = sorted({i for indices in curated.values() for i in indices})
+    curated_hits = sum(1 for i in curated_all if top1[i] == gold[i]["speaker"])
+
+    accepted_indices = [i for i, seg in enumerate(outcome.segments) if not seg.speaker_uncertain]
+
     margins = [seg.speaker_margin for seg in outcome.segments]
     report = {
         "embedding_model": config.embedding_model,
         "segment_count": len(gold),
         "all_segments_top1_accuracy": round(correct_all / len(gold), 4),
+        "der_time_weighted": weighted_error_rate(gold, top1, "time"),
+        "wder_word_weighted": weighted_error_rate(gold, top1, "word"),
+        "der_time_weighted_accepted_only": weighted_error_rate(
+            [gold[i] for i in accepted_indices],
+            [outcome.segments[i].speaker or "" for i in accepted_indices],
+            "time",
+        ),
+        "curated_gold_subset": {
+            "total_unique_segments": len(curated_all),
+            "top1_accuracy": round(curated_hits / len(curated_all), 4) if curated_all else 0.0,
+            "by_category": curated_report,
+        },
         "auto_accept_policy": {
             "min_segment_duration": config.min_segment_duration,
             "auto_accept_margin": config.auto_accept_margin,
