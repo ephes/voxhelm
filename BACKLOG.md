@@ -2,7 +2,12 @@
 
 ## Speaker diarization deployment and consumer follow-through
 
-Status as of 2026-05-20: first Voxhelm diarization output slice is implemented and locally smoke-tested. A 3-minute clip from `pp_67` completed successfully with generic `Speaker 1` / `Speaker 2` labels in verbose JSON, DOTe, and Podlove. Full-episode runtime and deployment wiring are still open.
+Status as of 2026-05-27: first Voxhelm diarization output slice is implemented and locally smoke-tested. A
+3-minute clip from `pp_67` completed successfully with generic `Speaker 1` / `Speaker 2` labels in verbose JSON,
+DOTe, and Podlove. Full-episode research on representative Python Podcast audio showed that anonymous pyannote
+diarization with speaker-count hints can still merge a real speaker into another cluster, so generic diarization
+should be treated as a fallback/debug signal for known-speaker podcasts. Known-speaker voiceprint experiments with
+clean contributor reference material are the preferred follow-up direction.
 
 ### Voxhelm repo
 
@@ -13,10 +18,18 @@ Status as of 2026-05-20: first Voxhelm diarization output slice is implemented a
 - [ ] Keep `pyannote.audio` behind the optional `diarization` extra and verify fresh install with:
   - `uv sync --extra diarization`
 - [ ] Decide whether the current pyannote/torchcodec warning is acceptable in production logs. Voxhelm avoids torchcodec decoding by passing ffmpeg-decoded waveform data to pyannote, but pyannote still emits the import-time warning.
-- [ ] Validate runtime on representative full podcast episodes, not only short clips.
+- [ ] Add diarization quality metadata and warnings for pathological label distributions, including tiny clusters and
+  distributions that contradict the requested speaker count.
+- [ ] Prefer `exclusive_speaker_diarization` for transcript alignment when pyannote returns it.
+- [ ] Add a non-default known-speaker postprocessor behind an explicit request flag. It should classify mastered
+  transcript segment windows against contributor reference embeddings, preserve anonymous pyannote labels as
+  fallback/debug metadata, and emit candidates, margins, confidence, and uncertainty flags.
+- [ ] Keep `pyannote/wespeaker-voxceleb-resnet34-LM` as the first known-speaker embedding model candidate based on
+  the 2026-05-27 research spike; keep `pyannote/embedding` as a possible high-precision/lower-coverage alternative.
 - [ ] Document required Hugging Face access for the configured pyannote model and gated dependencies:
   - `pyannote/speaker-diarization-3.1`
   - `pyannote/speaker-diarization-community-1`
+  - `pyannote/wespeaker-voxceleb-resnet34-LM`
   - any additional gated repo pyannote reports at model load time.
 
 ### ops-library
@@ -49,14 +62,15 @@ Status as of 2026-05-20: first Voxhelm diarization output slice is implemented a
 
 ### django-cast
 
-- [ ] Add a configurable diarization switch:
-  - global/env setting: `CAST_VOXHELM_DIARIZATION_ENABLED`, default false;
-  - site-level `VoxhelmSettings.diarization_enabled` boolean.
-- [ ] Include top-level `"diarization": {"enabled": true}` in Voxhelm batch job payloads only when enabled.
-- [ ] Add tests for payload shape, settings precedence, and unchanged behavior when disabled.
-- [ ] Add migration and docs/release notes.
-- [ ] Keep generic labels as the first slice; do not auto-map `Speaker 1` to the first contributor.
-- [ ] Design/implement a later contributor mapping workflow from generic speaker labels to `EpisodeContributor` records.
+- [ ] Add private contributor voice references for reviewed clips or source ranges. These are private admin/editor
+  data, not public contributor profile metadata.
+- [ ] Once Voxhelm has a known-speaker contract, send approved references for expected episode contributors using
+  private job artifacts, signed private URLs, or source ranges. Do not send public profile URLs.
+- [ ] Store returned candidates, margins, confidence, raw diarization labels, and uncertainty flags as reviewable
+  transcript speaker state.
+- [ ] Keep generic labels as fallback/debug metadata; do not auto-map `Speaker 1` to the first contributor.
+- [ ] Decide how the current destructive contributor mapping workflow should evolve into non-destructive mapping or
+  reviewed suggestion state.
 
 ### python-podcast
 

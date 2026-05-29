@@ -701,6 +701,149 @@ def test_immediate_backend_executes_job_and_serves_artifacts(
     assert "speaker" not in json_payload["segments"][0]
 
 
+class StubEmbeddingBackend:
+    embedding_version = "stub-v1"
+
+    def embed(self, samples, sample_rate):
+        del sample_rate
+        import numpy
+
+        tag = int(round(float(numpy.mean(samples)) * 10))
+        vector = [0.0] * 6
+        vector[max(0, min(tag, 5))] = 1.0
+        return vector
+
+
+@pytest.mark.django_db
+def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypatch, tmp_path):
+    import numpy
+
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com", "cdn.example.com"}
+    media_path = tmp_path / "episode.mp3"
+    media_path.write_bytes(b"mp3-bytes")
+    ref_path = tmp_path / "ref.mp3"
+    ref_path.write_bytes(b"mp3-bytes")
+    monkeypatch.setattr(
+        "jobs.services.download_allowed_media",
+        lambda *, source_url: DownloadedMedia(
+            path=media_path if "episode" in source_url else ref_path,
+            content_type="audio/mpeg",
+            source_url=source_url,
+        ),
+    )
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
+    # Both job audio and reference decode to constant 0.1 -> stub tag 1 (Johannes).
+    monkeypatch.setattr(
+        "jobs.services.decode_mono_16k",
+        lambda path: numpy.full(2 * 16000, 0.1, dtype="float32"),
+    )
+    monkeypatch.setattr(
+        "jobs.services.get_known_speaker_backend", lambda model: StubEmbeddingBackend()
+    )
+    monkeypatch.setattr(
+        "jobs.services.diarize_audio",
+        lambda audio_path, params: [SpeakerTurn(start=0.0, end=2.0, speaker="SPEAKER_00")],
+    )
+
+    payload = build_job_payload(task_ref="archive-known-speaker")
+    payload["output"] = {"formats": ["podlove"]}
+    payload["diarization"] = {
+        "enabled": True,
+        "strategy": "pyannote_known_speaker",
+        "known_speakers": [
+            {
+                "id": "12",
+                "name": "Johannes",
+                "references": [
+                    {
+                        "kind": "source_range",
+                        "audio": {"kind": "url", "url": "https://cdn.example.com/pp_60.m4a"},
+                        "start": 0.0,
+                        "end": 2.0,
+                    }
+                ],
+            }
+        ],
+        "known_speaker": {
+            "min_segment_duration": 0.5,
+            "auto_accept_margin": 0.1,
+            "min_top_similarity": 0.5,
+        },
+    }
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    result = response.json()["result"]
+    assert response.status_code == 201
+    assert "speakers" in result["artifacts"]
+    # Known-speaker summary is surfaced in result metadata without leaking refs.
+    summary = result["metadata"]["diarization"]["known_speaker_summary"]
+    assert summary["strategy"] == "pyannote_known_speaker"
+    assert summary["confident_segment_count"] == 2
+    assert result["metadata"]["diarization"]["known_speakers"] == [
+        {"id": "12", "name": "Johannes", "reference_count": 1}
+    ]
+    assert "url" not in json.dumps(result["metadata"]["diarization"])
+
+    speakers_response = client.get(
+        result["artifacts"]["speakers"], HTTP_AUTHORIZATION="Bearer test-token"
+    )
+    assert speakers_response.status_code == 200
+    speakers_payload = speakers_response.json()
+    assert speakers_payload["segments"][0]["speaker"] == "Johannes"
+    assert speakers_payload["segments"][0]["raw_diarization_speaker"] == "Speaker 1"
+    assert speakers_payload["segments"][0]["speaker_uncertain"] is False
+
+    podlove_response = client.get(
+        result["artifacts"]["podlove"], HTTP_AUTHORIZATION="Bearer test-token"
+    )
+    assert podlove_response.json()["transcripts"][0]["speaker"] == "Johannes"
+
+
+@pytest.mark.django_db
+def test_known_speaker_job_differs_from_anonymous_for_dedup(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com", "cdn.example.com"}
+
+    anonymous = build_job_payload(task_ref="dedup-strategy")
+    anonymous["diarization"] = {"enabled": True, "num_speakers": 2}
+    first = client.post(
+        "/v1/jobs",
+        data=json.dumps(anonymous),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    known = build_job_payload(task_ref="dedup-strategy")
+    known["diarization"] = {
+        "enabled": True,
+        "num_speakers": 2,
+        "strategy": "pyannote_known_speaker",
+        "known_speakers": [
+            {
+                "id": "1",
+                "name": "A",
+                "references": [
+                    {"kind": "clip_artifact", "audio": {"kind": "url", "url": "https://cdn.example.com/a.wav"}}
+                ],
+            }
+        ],
+    }
+    second = client.post(
+        "/v1/jobs",
+        data=json.dumps(known),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+
+
 @pytest.mark.django_db
 def test_transcription_job_accepts_dote_and_podlove_outputs(
     client, settings, monkeypatch, tmp_path

@@ -606,6 +606,15 @@ Concrete next implementation slice if approved:
 4. Add django-cast support for private contributor reference clips and a review
    UI path for uncertain segments.
 
+Status update, 2026-05-29: item 3 is implemented. The known-speaker
+voiceprint postprocessor and its `pyannote_known_speaker` request/response
+contract landed; see `known-speaker-diarization.md`. It classifies mastered
+mono transcript segments directly against contributor reference centroids,
+keeps anonymous pyannote as a fallback/debug signal recorded per segment, and
+emits a reviewable `speakers` artifact with candidates, confidence, margin, and
+uncertainty. Items 1, 2, and 4 (pyannote imbalance warnings, exclusive-output
+alignment, and the django-cast review UI) remain open follow-ups.
+
 ## Improvement Options
 
 ### 1. Add diagnostics and bad-diarization detection

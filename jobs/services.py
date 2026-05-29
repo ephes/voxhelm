@@ -42,9 +42,28 @@ from synthesis.service import (
     export_audio,
     synthesize_text,
 )
-from transcriptions.diarization import DiarizationParams, apply_speaker_labels, diarize_audio
+from transcriptions.diarization import (
+    DiarizationError,
+    DiarizationParams,
+    SpeakerTurn,
+    apply_speaker_labels,
+    diarize_audio,
+)
 from transcriptions.errors import ApiError
 from transcriptions.formats import render_dote, render_podlove, render_text
+from transcriptions.known_speaker import (
+    ANONYMOUS_STRATEGY,
+    DIARIZATION_STRATEGIES,
+    KNOWN_SPEAKER_STRATEGY,
+    KnownSpeakerConfig,
+    ReferenceAudio,
+    build_speakers_artifact,
+    decode_mono_16k,
+    extract_reference_windows,
+    get_known_speaker_backend,
+    run_known_speaker_postprocess,
+    slice_samples,
+)
 from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
@@ -281,7 +300,7 @@ def existing_job_matches_request(existing: Job, request: JobRequest) -> bool:
         and (existing.language or None) == request.language
         and existing_transcription_input_matches_request(existing.input_data, request.input_data)
         and sorted(existing.output_data.get("formats", [])) == sorted(request.output_formats)
-        and transcription_diarization_payload(existing) == request.diarization
+        and existing.output_data.get("diarization", {"enabled": False}) == request.diarization
     )
 
 
@@ -388,7 +407,15 @@ def parse_diarization_option(payload: dict[str, Any]) -> dict[str, Any]:
     if raw_diarization is None:
         return {"enabled": False}
     diarization = ensure_object(raw_diarization, "diarization")
-    allowed_keys = {"enabled", "num_speakers", "min_speakers", "max_speakers"}
+    allowed_keys = {
+        "enabled",
+        "num_speakers",
+        "min_speakers",
+        "max_speakers",
+        "strategy",
+        "known_speakers",
+        "known_speaker",
+    }
     unknown_keys = sorted(set(diarization) - allowed_keys)
     if unknown_keys:
         raise ApiError(f"Unsupported diarization option: {', '.join(unknown_keys)}.")
@@ -398,9 +425,9 @@ def parse_diarization_option(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_enabled, bool):
         raise ApiError("diarization.enabled must be a boolean.")
 
-    hint_keys = {"num_speakers", "min_speakers", "max_speakers"}
-    if not raw_enabled and any(key in diarization for key in hint_keys):
-        raise ApiError("diarization speaker hints require diarization.enabled=true.")
+    option_keys = allowed_keys - {"enabled"}
+    if not raw_enabled and any(key in diarization for key in option_keys):
+        raise ApiError("diarization options require diarization.enabled=true.")
 
     normalized: dict[str, Any] = {"enabled": raw_enabled}
     if not raw_enabled:
@@ -433,6 +460,125 @@ def parse_diarization_option(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if value is not None:
             normalized[key] = value
+
+    strategy = parse_diarization_strategy(diarization.get("strategy"))
+    if strategy == KNOWN_SPEAKER_STRATEGY:
+        normalized["strategy"] = KNOWN_SPEAKER_STRATEGY
+        normalized["known_speakers"] = parse_known_speakers(diarization.get("known_speakers"))
+        known_speaker_config = parse_known_speaker_config(diarization.get("known_speaker"))
+        if known_speaker_config:
+            normalized["known_speaker"] = known_speaker_config
+    elif "known_speakers" in diarization or "known_speaker" in diarization:
+        raise ApiError(
+            "diarization.known_speakers and diarization.known_speaker require "
+            f"strategy={KNOWN_SPEAKER_STRATEGY}."
+        )
+    return normalized
+
+
+def parse_diarization_strategy(value: object) -> str:
+    if value is None:
+        return ANONYMOUS_STRATEGY
+    if not isinstance(value, str):
+        raise ApiError("diarization.strategy must be a string.")
+    normalized = value.strip()
+    if normalized not in DIARIZATION_STRATEGIES:
+        accepted = ", ".join(sorted(DIARIZATION_STRATEGIES))
+        raise ApiError(f"Unsupported diarization.strategy. Accepted values: {accepted}.")
+    return normalized
+
+
+def parse_known_speakers(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ApiError(
+            "diarization.known_speakers must be a non-empty list when "
+            f"strategy={KNOWN_SPEAKER_STRATEGY}."
+        )
+    known_speakers: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_speaker in value:
+        speaker = ensure_object(raw_speaker, "diarization.known_speakers[]")
+        speaker_id = optional_string(speaker.get("id"))
+        if not speaker_id:
+            raise ApiError("Each diarization.known_speakers entry requires a non-empty id.")
+        if speaker_id in seen_ids:
+            raise ApiError(f"Duplicate diarization.known_speakers id '{speaker_id}'.")
+        seen_ids.add(speaker_id)
+        name = optional_string(speaker.get("name"))
+        if not name:
+            raise ApiError("Each diarization.known_speakers entry requires a non-empty name.")
+        references = parse_known_speaker_references(speaker.get("references"))
+        known_speakers.append({"id": speaker_id, "name": name, "references": references})
+    return known_speakers
+
+
+def parse_known_speaker_references(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ApiError(
+            "Each diarization.known_speakers entry requires a non-empty references list."
+        )
+    references: list[dict[str, Any]] = []
+    for raw_reference in value:
+        reference = ensure_object(raw_reference, "diarization.known_speakers[].references[]")
+        kind = optional_string(reference.get("kind"))
+        if kind not in {"clip_artifact", "source_range"}:
+            raise ApiError(
+                "diarization reference kind must be 'clip_artifact' or 'source_range'."
+            )
+        audio = parse_reference_audio(reference.get("audio"))
+        normalized: dict[str, Any] = {"kind": kind, "audio": audio}
+        if kind == "source_range":
+            start = require_non_negative_number(reference.get("start"), "reference.start")
+            end = require_non_negative_number(reference.get("end"), "reference.end")
+            if start >= end:
+                raise ApiError("A source_range reference needs start before end.")
+            normalized["start"] = start
+            normalized["end"] = end
+        references.append(normalized)
+    return references
+
+
+def parse_reference_audio(value: object) -> dict[str, Any]:
+    audio = ensure_object(value, "diarization.known_speakers[].references[].audio")
+    kind = optional_string(audio.get("kind"))
+    if kind == "url":
+        url = optional_string(audio.get("url"))
+        if not url:
+            raise ApiError("A url reference audio requires audio.url.")
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ApiError("reference audio.url must be an absolute URL.")
+        return {"kind": "url", "url": url}
+    if kind == "upload":
+        upload_id = optional_string(audio.get("upload_id"))
+        if not upload_id:
+            raise ApiError("An upload reference audio requires audio.upload_id.")
+        return {"kind": "upload", "upload_id": ensure_uuid_string(upload_id, "audio.upload_id")}
+    raise ApiError("reference audio.kind must be 'url' or 'upload'.")
+
+
+def parse_known_speaker_config(value: object) -> dict[str, Any]:
+    if value is None:
+        return {}
+    config = ensure_object(value, "diarization.known_speaker")
+    allowed_keys = {
+        "embedding_model",
+        "min_segment_duration",
+        "auto_accept_margin",
+        "min_top_similarity",
+    }
+    unknown_keys = sorted(set(config) - allowed_keys)
+    if unknown_keys:
+        raise ApiError(f"Unsupported diarization.known_speaker option: {', '.join(unknown_keys)}.")
+    normalized: dict[str, Any] = {}
+    embedding_model = optional_string(config.get("embedding_model"))
+    if embedding_model:
+        normalized["embedding_model"] = embedding_model
+    for key in ("min_segment_duration", "auto_accept_margin", "min_top_similarity"):
+        if key in config:
+            normalized[key] = require_non_negative_number(
+                config.get(key), f"diarization.known_speaker.{key}"
+            )
     return normalized
 
 
@@ -442,6 +588,15 @@ def optional_positive_int(value: object, field_name: str) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ApiError(f"{field_name} must be a positive integer.")
     return value
+
+
+def require_non_negative_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApiError(f"{field_name} must be a number.")
+    number = float(value)
+    if number < 0:
+        raise ApiError(f"{field_name} must not be negative.")
+    return number
 
 
 def validate_speech_output_formats(output: dict[str, Any]) -> list[str]:
@@ -554,19 +709,28 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
                 language=job.language or None,
             ),
         )
+        speakers_artifact: dict[str, Any] | None = None
         if transcription_diarization_enabled(job):
-            result = apply_speaker_labels(
-                result,
-                diarize_audio(audio_path, transcription_diarization_params(job)),
-            )
+            if transcription_diarization_strategy(job) == KNOWN_SPEAKER_STRATEGY:
+                result, speakers_artifact = run_known_speaker_for_job(
+                    job=job, audio_path=audio_path, result=result
+                )
+            else:
+                result = apply_speaker_labels(
+                    result,
+                    diarize_audio(audio_path, transcription_diarization_params(job)),
+                )
         processing_seconds = round(monotonic() - started, 3)
         metadata = build_transcription_result_metadata(
             job=job,
             media=media,
             result=result,
             processing_seconds=processing_seconds,
+            speakers_artifact=speakers_artifact,
         )
-        persist_transcription_output_artifacts(job=job, result=result)
+        persist_transcription_output_artifacts(
+            job=job, result=result, speakers_artifact=speakers_artifact
+        )
         mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
         return {"job_id": str(job.id), "text": result.text, "metadata": metadata}
     except Exception as exc:
@@ -689,6 +853,7 @@ def build_transcription_result_metadata(
     media: DownloadedMedia,
     result: TranscriptionResult,
     processing_seconds: float,
+    speakers_artifact: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = build_transcription_metadata(
         requested_model=job.model or "auto",
@@ -702,6 +867,8 @@ def build_transcription_result_metadata(
     )
     if transcription_diarization_enabled(job):
         metadata["diarization"] = transcription_diarization_payload(job)
+        if speakers_artifact is not None:
+            metadata["diarization"]["known_speaker_summary"] = speakers_artifact["summary"]
     return metadata
 
 
@@ -747,16 +914,158 @@ def transcription_diarization_payload(job: Job) -> dict[str, Any]:
         value = raw_diarization.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             payload[key] = value
+    strategy = raw_diarization.get("strategy")
+    if strategy == KNOWN_SPEAKER_STRATEGY:
+        payload["strategy"] = KNOWN_SPEAKER_STRATEGY
+        # Surface only non-sensitive reference shape in result metadata, never the
+        # private reference URLs/ranges django-cast sent.
+        known_speakers = raw_diarization.get("known_speakers")
+        if isinstance(known_speakers, list):
+            payload["known_speakers"] = [
+                {
+                    "id": speaker.get("id"),
+                    "name": speaker.get("name"),
+                    "reference_count": len(speaker.get("references", [])),
+                }
+                for speaker in known_speakers
+                if isinstance(speaker, dict)
+            ]
+        known_speaker_config = raw_diarization.get("known_speaker")
+        if isinstance(known_speaker_config, dict):
+            payload["known_speaker"] = dict(known_speaker_config)
     return payload
 
 
+def transcription_diarization_strategy(job: Job) -> str:
+    raw_diarization = job.output_data.get("diarization")
+    if (
+        isinstance(raw_diarization, dict)
+        and raw_diarization.get("strategy") == KNOWN_SPEAKER_STRATEGY
+    ):
+        return KNOWN_SPEAKER_STRATEGY
+    return ANONYMOUS_STRATEGY
+
+
 def transcription_diarization_params(job: Job) -> DiarizationParams:
-    payload = transcription_diarization_payload(job)
+    raw_diarization = job.output_data.get("diarization")
+    counts: dict[str, Any] = raw_diarization if isinstance(raw_diarization, dict) else {}
     return DiarizationParams(
-        num_speakers=payload.get("num_speakers"),
-        min_speakers=payload.get("min_speakers"),
-        max_speakers=payload.get("max_speakers"),
+        num_speakers=_positive_int_or_none(counts.get("num_speakers")),
+        min_speakers=_positive_int_or_none(counts.get("min_speakers")),
+        max_speakers=_positive_int_or_none(counts.get("max_speakers")),
     )
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def known_speaker_config_for_job(job: Job) -> KnownSpeakerConfig:
+    raw_diarization = job.output_data.get("diarization")
+    config_data: dict[str, Any] = {}
+    if isinstance(raw_diarization, dict):
+        raw_config = raw_diarization.get("known_speaker")
+        if isinstance(raw_config, dict):
+            config_data = raw_config
+    defaults = KnownSpeakerConfig()
+    return KnownSpeakerConfig(
+        embedding_model=config_data.get("embedding_model") or defaults.embedding_model,
+        min_segment_duration=float(
+            config_data.get("min_segment_duration", defaults.min_segment_duration)
+        ),
+        auto_accept_margin=float(
+            config_data.get("auto_accept_margin", defaults.auto_accept_margin)
+        ),
+        min_top_similarity=float(
+            config_data.get("min_top_similarity", defaults.min_top_similarity)
+        ),
+    )
+
+
+def build_known_speaker_references(job: Job) -> list[ReferenceAudio]:
+    raw_diarization = job.output_data.get("diarization")
+    known_speakers = None
+    if isinstance(raw_diarization, dict):
+        known_speakers = raw_diarization.get("known_speakers")
+    if not isinstance(known_speakers, list):
+        return []
+    references: list[ReferenceAudio] = []
+    for speaker in known_speakers:
+        if not isinstance(speaker, dict):
+            continue
+        for raw_reference in speaker.get("references", []):
+            windows = load_reference_windows(raw_reference)
+            if windows:
+                references.append(
+                    ReferenceAudio(
+                        speaker_id=str(speaker.get("id")),
+                        name=str(speaker.get("name")),
+                        windows=windows,
+                    )
+                )
+    return references
+
+
+def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
+    from transcriptions.known_speaker import SAMPLE_RATE
+
+    audio = reference.get("audio", {})
+    audio_kind = audio.get("kind")
+    if audio_kind != "url":
+        # Uploaded-clip references are accepted by the contract but require signed
+        # private delivery; production references use source ranges into already
+        # public mastered audio. Document this as a follow-up rather than guess.
+        raise ApiError(
+            "Only url-based known-speaker reference audio is supported for execution; "
+            "deliver reference clips as source ranges into allowlisted audio."
+        )
+    media = download_allowed_media(source_url=str(audio.get("url")))
+    try:
+        samples = decode_mono_16k(media.path)
+    finally:
+        media.path.unlink(missing_ok=True)
+    if reference.get("kind") == "source_range":
+        samples = slice_samples(
+            samples, SAMPLE_RATE, float(reference["start"]), float(reference["end"])
+        )
+    return extract_reference_windows(samples, SAMPLE_RATE)
+
+
+def run_known_speaker_for_job(
+    *,
+    job: Job,
+    audio_path: Path,
+    result: TranscriptionResult,
+) -> tuple[TranscriptionResult, dict[str, Any]]:
+    config = known_speaker_config_for_job(job)
+    references = build_known_speaker_references(job)
+    backend = get_known_speaker_backend(config.embedding_model)
+    job_audio_samples = decode_mono_16k(audio_path)
+    raw_turns = collect_anonymous_diarization_turns(job, audio_path)
+    outcome = run_known_speaker_postprocess(
+        result,
+        references=references,
+        job_audio_samples=job_audio_samples,
+        raw_turns=raw_turns,
+        config=config,
+        backend=backend,
+    )
+    return outcome.result, build_speakers_artifact(outcome)
+
+
+def collect_anonymous_diarization_turns(job: Job, audio_path: Path) -> list[SpeakerTurn]:
+    """Run anonymous pyannote as a fallback/debug signal; tolerate its failure.
+
+    Known-speaker classification does not depend on these turns, so a diarization
+    backend failure must not fail the known-speaker job. The raw labels are kept
+    per segment for audit when available.
+    """
+    try:
+        return diarize_audio(audio_path, transcription_diarization_params(job))
+    except DiarizationError:
+        return []
 
 
 def build_synthesis_result_metadata(
@@ -776,7 +1085,12 @@ def build_synthesis_result_metadata(
     }
 
 
-def persist_transcription_output_artifacts(*, job: Job, result: TranscriptionResult) -> None:
+def persist_transcription_output_artifacts(
+    *,
+    job: Job,
+    result: TranscriptionResult,
+    speakers_artifact: dict[str, Any] | None = None,
+) -> None:
     requested_formats = set(
         job.output_data.get("formats", list(DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS))
     )
@@ -831,6 +1145,17 @@ def persist_transcription_output_artifacts(*, job: Job, result: TranscriptionRes
             format_name="podlove",
             content_type="application/json",
             payload=podlove_payload.encode("utf-8"),
+            exposed=True,
+        )
+    if speakers_artifact is not None:
+        speakers_payload = json.dumps(speakers_artifact, ensure_ascii=True, indent=2)
+        create_or_replace_artifact(
+            job=job,
+            name="transcript.speakers.json",
+            kind=JobArtifact.Kind.TRANSCRIPT_SPEAKERS,
+            format_name="speakers",
+            content_type="application/json",
+            payload=speakers_payload.encode("utf-8"),
             exposed=True,
         )
 

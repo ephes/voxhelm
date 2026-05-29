@@ -87,6 +87,7 @@ class JobArtifact(models.Model):
         TRANSCRIPT_VTT = "transcript_vtt", "Transcript VTT"
         TRANSCRIPT_DOTE = "transcript_dote", "Transcript DOTe"
         TRANSCRIPT_PODLOVE = "transcript_podlove", "Transcript Podlove"
+        TRANSCRIPT_SPEAKERS = "transcript_speakers", "Transcript speaker suggestions"
         SPEECH_WAV = "speech_wav", "Speech WAV"
         SPEECH_MP3 = "speech_mp3", "Speech MP3"
         SPEECH_OGG = "speech_ogg", "Speech OGG"
