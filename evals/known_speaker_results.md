@@ -75,6 +75,47 @@ Top-1 gold vs predicted distribution: gold
 - Anonymous pyannote on the same episode was ~77% (baseline) to ~87% (tuned);
   see `../specs/diarization-quality-research.md`.
 
+## Deployed production validation (2026-05-29)
+
+Validated through the **real deployed** Wagtail → django-cast → Voxhelm flow,
+not just offline. Voxhelm deployed to macstudio (`just deploy-one voxhelm
+macstudio`); python-podcast deployed to staging then production (`just
+deploy-staging`, `just deploy-production`), pinning django-cast develop
+`2a028f7e`. Eight approved same-episode voice references (source ranges into
+the public `pp_64.m4a`) were added for Dominik, Jochen, Johannes, and Ronny on
+episode 137, and a transcript was generated through Voxhelm.
+
+- Voxhelm jobs: staging `f0e2e7ff-ded6-4881-b022-50a60008feb3`, production
+  `7c47b673-f64b-4816-899b-cb8486fb86c8` (`task_ref cast-audio-79-diarized-4-speakers`).
+- Returned `speakers` sidecar: 2191 segments, 1364 confident, 827 uncertain,
+  model `pyannote/wespeaker-voxceleb-resnet34-LM`, all four known speakers.
+
+Scored against the hand-labeled `pp_64` gold transcript (Voxhelm segments
+mapped to gold speakers by time overlap; reference ranges held out of the
+evaluation gold set):
+
+| Metric (production deployed flow) | Value |
+| --- | ---: |
+| Hand-labeled gold set (representative passages, all speakers) — top-1 | **95.06%** |
+| Auto-applied public labels (representative set) | 98.93% |
+| Per-speaker top-1 (Ronny / Jochen / Johannes / Dominik) | 99.0 / 97.6 / 92.0 / 84.0% |
+| Johannes passage 00:38:16–00:38:32 — confident segments | 100% correct |
+| All returned segments — top-1 / DER | 88.22% / 6.71% |
+| All returned segments — auto-applied accuracy / DER (cov 62.6%) | 98.74% / 1.49% |
+
+The hand-labeled gold set clears the >90% bar at **95.06%** segment-level
+top-1. The lower all-segments number reflects Voxhelm's much finer STT
+segmentation (2191 vs the gold's 1249) producing many sub-second/crosstalk
+segments; those are routed to review by the auto-accept policy
+(`min_segment_duration=1.5`) and excluded from auto-applied public labels,
+which are 98.7–98.9% accurate. The editor review/apply path then wrote 1364
+confident labels into the public Podlove/DOTe output.
+
+Privacy verified on the live systems: the suggestion sidecar is stored in
+private server-side `FileSystemStorage` (the `cast_voice_references` alias),
+absent from the public S3 bucket, the public Podlove carries no suggestion
+metadata, and voice references are absent from contributor serialization.
+
 ## Reproduce
 
 ```bash
