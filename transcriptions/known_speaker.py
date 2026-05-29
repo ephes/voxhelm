@@ -27,7 +27,7 @@ import math
 import subprocess
 import tempfile
 import wave
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
@@ -416,23 +416,6 @@ def classify_segments(
     return segments
 
 
-def apply_known_speaker_segments(
-    result: TranscriptionResult,
-    segments: list[KnownSpeakerSegment],
-) -> TranscriptionResult:
-    """Write confident known-speaker names onto the transcript segments.
-
-    Uncertain segments keep no public speaker so a downstream reviewer can
-    approve them instead of trusting a low-margin guess. Full candidate data is
-    preserved in the sidecar artifact regardless.
-    """
-    labeled = [
-        replace(segment, speaker=classified.speaker or None)
-        for segment, classified in zip(result.segments, segments, strict=True)
-    ]
-    return replace(result, segments=labeled)
-
-
 def summarize_known_speaker(
     segments: list[KnownSpeakerSegment],
     *,
@@ -517,6 +500,11 @@ def run_known_speaker_postprocess(
     ``references`` carry already-windowed reference audio; ``job_audio_samples``
     is the decoded mastered-mono job audio. ``raw_turns`` are the anonymous
     pyannote turns kept as a fallback/debug signal and recorded per segment.
+
+    Known-speaker results are *suggestions*: the public Podlove/DOTe/VTT
+    artifacts are intentionally left unlabeled so the consumer applies speaker
+    identity only after review/approval. The per-segment candidates, confidence,
+    margin, uncertainty, and raw labels live in the ``speakers`` sidecar.
     """
     if not references:
         raise KnownSpeakerConfigurationError(
@@ -531,7 +519,6 @@ def run_known_speaker_postprocess(
         config=config,
         backend=backend,
     )
-    labeled_result = apply_known_speaker_segments(result, segments)
     summary = summarize_known_speaker(
         segments,
         centroids=centroids,
@@ -539,7 +526,8 @@ def run_known_speaker_postprocess(
         embedding_version=backend.embedding_version,
         raw_turns=raw_turns,
     )
-    return KnownSpeakerOutcome(result=labeled_result, segments=segments, summary=summary)
+    # Public transcript artifacts stay unlabeled; suggestions ride the sidecar.
+    return KnownSpeakerOutcome(result=result, segments=segments, summary=summary)
 
 
 # --------------------------------------------------------------------------- #

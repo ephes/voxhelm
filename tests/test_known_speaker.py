@@ -251,7 +251,9 @@ def test_run_known_speaker_postprocess_labels_confident_segments() -> None:
         backend=StubEmbeddingBackend(),
     )
 
-    assert [segment.speaker for segment in outcome.result.segments] == ["Johannes", "Dominik"]
+    # Suggestions ride the sidecar; public transcript segments stay unlabeled.
+    assert [segment.speaker for segment in outcome.result.segments] == [None, None]
+    assert [seg.speaker for seg in outcome.segments] == ["Johannes", "Dominik"]
     assert [seg.speaker_uncertain for seg in outcome.segments] == [False, False]
     assert outcome.segments[0].raw_diarization_speaker == "Speaker 1"
     assert outcome.segments[1].raw_diarization_speaker == "Speaker 2"

@@ -799,10 +799,12 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
     assert speakers_payload["segments"][0]["raw_diarization_speaker"] == "Speaker 1"
     assert speakers_payload["segments"][0]["speaker_uncertain"] is False
 
+    # Known-speaker mode leaves public Podlove unlabeled until review/approval;
+    # the suggestion lives only in the speakers sidecar.
     podlove_response = client.get(
         result["artifacts"]["podlove"], HTTP_AUTHORIZATION="Bearer test-token"
     )
-    assert podlove_response.json()["transcripts"][0]["speaker"] == "Johannes"
+    assert podlove_response.json()["transcripts"][0]["speaker"] == ""
 
 
 @pytest.mark.django_db

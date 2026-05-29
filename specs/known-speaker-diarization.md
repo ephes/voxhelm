@@ -77,9 +77,10 @@ Rules:
 ## Response
 
 A new exposed `speakers` artifact (`transcript.speakers.json`) carries the
-reviewable per-segment suggestions. Podlove/DOTe carry the confident speaker
-name only; uncertain segments keep no public speaker so the consumer can review
-them.
+reviewable per-segment suggestions. Known-speaker results are suggestions, so
+the public Podlove/DOTe/VTT artifacts are intentionally left **unlabeled**; the
+consumer applies speaker identity only after review/approval. Each sidecar
+segment still carries the confident speaker name (or `null` when uncertain).
 
 ```json
 {
@@ -125,10 +126,11 @@ The job `result.metadata.diarization` also carries a `known_speaker_summary`
 
 ## Acceptance policy
 
-A segment is auto-accepted (gets a public `speaker`) only when
+A segment is auto-accepted (gets a sidecar `speaker`) only when
 `duration >= min_segment_duration` and `top_similarity >= min_top_similarity`
 and `margin >= auto_accept_margin`. Otherwise it is `speaker_uncertain=true`
-with `speaker=null`, keeping the best-effort candidate list for review. Raw
+with `speaker=null`, keeping the best-effort candidate list for review. The
+sidecar is a suggestion: it never writes the public transcript artifacts. Raw
 anonymous pyannote labels are preserved per segment for audit and remapping.
 
 ## Ownership
