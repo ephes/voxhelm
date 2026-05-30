@@ -55,7 +55,9 @@ def build_gold_index(gold: list[dict]) -> list[tuple[float, float, str]]:
     return [(float(g["start"]), float(g["end"]), g["speaker"]) for g in gold]
 
 
-def gold_speaker_for(seg_start: float, seg_end: float, gold: list[tuple[float, float, str]]) -> str | None:
+def gold_speaker_for(
+    seg_start: float, seg_end: float, gold: list[tuple[float, float, str]]
+) -> str | None:
     """Gold speaker overlapping a production segment the most (None if no overlap)."""
     best_spk, best_ov = None, 0.0
     for gs, ge, spk in gold:
@@ -69,7 +71,9 @@ def gold_speaker_for(seg_start: float, seg_end: float, gold: list[tuple[float, f
     return best_spk
 
 
-def production_label_for(gs: float, ge: float, segs: list[dict], *, confident_only: bool) -> tuple[str | None, float]:
+def production_label_for(
+    gs: float, ge: float, segs: list[dict], *, confident_only: bool
+) -> tuple[str | None, float]:
     """Production top-1 label covering the most of a gold segment.
 
     Returns (label, covered_overlap_seconds). ``confident_only`` restricts to
@@ -180,7 +184,9 @@ def main() -> None:
         "per_speaker_time_weighted_accuracy_pct": {
             spk: pct(per_spk_correct[spk], per_spk_total[spk]) for spk in sorted(per_spk_total)
         },
-        "per_speaker_gold_seconds": {spk: round(per_spk_total[spk], 1) for spk in sorted(per_spk_total)},
+        "per_speaker_gold_seconds": {
+            spk: round(per_spk_total[spk], 1) for spk in sorted(per_spk_total)
+        },
     }
     Path(args.out).write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
