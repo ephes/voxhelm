@@ -123,8 +123,9 @@ def normalize_language_code(language: str | None) -> str:
 
 
 class MlxWhisperBackend:
-    def __init__(self, *, model_name: str) -> None:
+    def __init__(self, *, model_name: str, condition_on_previous_text: bool = False) -> None:
         self.model_name = model_name
+        self.condition_on_previous_text = condition_on_previous_text
 
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
         try:
@@ -140,6 +141,10 @@ class MlxWhisperBackend:
             word_timestamps=False,
             initial_prompt=params.prompt,
             language=params.language,
+            # Off by default: conditioning on prior text is Whisper's main long-form
+            # repetition-loop trigger (see settings). compression_ratio_threshold and
+            # temperature fallback stay at mlx-whisper defaults.
+            condition_on_previous_text=self.condition_on_previous_text,
         )
         return normalize_transcription_payload(
             payload,
@@ -149,10 +154,20 @@ class MlxWhisperBackend:
 
 
 class WhisperCppBackend:
-    def __init__(self, *, binary_path: str, model_name: str, processors: int) -> None:
+    def __init__(
+        self,
+        *,
+        binary_path: str,
+        model_name: str,
+        processors: int,
+        max_context: int = 0,
+        suppress_nst: bool = True,
+    ) -> None:
         self.binary_path = binary_path
         self.model_name = model_name
         self.processors = processors
+        self.max_context = max_context
+        self.suppress_nst = suppress_nst
 
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
         executable = resolve_whispercpp_binary(self.binary_path)
@@ -181,7 +196,15 @@ class WhisperCppBackend:
                 "-l",
                 params.language or "auto",
                 "-np",
+                # Anti-hallucination: bound decoder context (0 = do not condition on
+                # previously generated text, the main long-form repetition-loop trigger).
+                "--max-context",
+                str(self.max_context),
             ]
+            if self.suppress_nst:
+                # Drop non-speech tokens so music/silence stretches stop producing
+                # hallucinated filler (e.g. outro-music loops).
+                args.append("--suppress-nst")
             if params.prompt:
                 args.extend(["--prompt", params.prompt])
 
@@ -534,12 +557,17 @@ def service_for_backend_name(backend_name: str, *, request_model: str) -> Backen
 
 def build_backend_service(*, backend_name: str, model_name: str) -> BackendProtocol:
     if backend_name == "mlx":
-        return MlxWhisperBackend(model_name=model_name)
+        return MlxWhisperBackend(
+            model_name=model_name,
+            condition_on_previous_text=settings.VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT,
+        )
     if backend_name == "whispercpp":
         return WhisperCppBackend(
             binary_path=settings.VOXHELM_WHISPERCPP_BIN,
             model_name=model_name,
             processors=settings.VOXHELM_WHISPERCPP_PROCESSORS,
+            max_context=settings.VOXHELM_WHISPERCPP_MAX_CONTEXT,
+            suppress_nst=settings.VOXHELM_WHISPERCPP_SUPPRESS_NST,
         )
     if backend_name == "whisperkit":
         return WhisperKitBackend(

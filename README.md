@@ -42,9 +42,18 @@ export VOXHELM_CSRF_TRUSTED_ORIGINS="https://voxhelm.example.com"
 export VOXHELM_STT_BACKEND="whispercpp"
 export VOXHELM_STT_FALLBACK_BACKEND="mlx"
 export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
+# Anti-hallucination decoding (defaults shown). Conditioning the Whisper decoder on
+# previously generated text is the main cause of runaway repetition loops on long
+# audio, so it is disabled by default. To restore upstream Whisper behaviour set the
+# mlx flag to "true" and whisper.cpp max-context to "-1".
+export VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT="false"
 export VOXHELM_WHISPERCPP_MODEL="ggml-large-v3.bin"
 export VOXHELM_WHISPERCPP_BIN="/opt/homebrew/bin/whisper-cli"
 export VOXHELM_WHISPERCPP_PROCESSORS="4"
+# max-context 0 disables conditioning on previous text (the loop trigger); -1 = upstream
+# default. suppress-nst drops non-speech tokens to curb hallucinations over music/silence.
+export VOXHELM_WHISPERCPP_MAX_CONTEXT="0"
+export VOXHELM_WHISPERCPP_SUPPRESS_NST="true"
 export VOXHELM_WHISPERKIT_ENABLED="false"
 export VOXHELM_WHISPERKIT_HOST="127.0.0.1"
 export VOXHELM_WHISPERKIT_PORT="50060"

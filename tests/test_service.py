@@ -9,12 +9,14 @@ from pathlib import Path
 from transcriptions.service import (
     BackendInvocation,
     BackendUnavailableError,
+    MlxWhisperBackend,
     TranscribeParams,
     TranscriptionResult,
     TranscriptionSegment,
     WhisperCppBackend,
     WhisperKitBackend,
     _normalize_audio_for_whispercpp,
+    build_backend_service,
     get_backend_services_for_model,
     normalize_interactive_transcript,
     normalize_transcription_payload,
@@ -398,6 +400,135 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
     assert calls[1][calls[1].index("-f") + 1].endswith("input.wav")
     assert result.text == "Hallo Welt"
     assert result.language == "de"
+
+
+def _capture_whispercpp_args(
+    backend: WhisperCppBackend, *, monkeypatch, tmp_path: Path, settings
+) -> list[str]:
+    """Run a fully faked whisper.cpp transcription and return the whisper-cli argv."""
+    input_path = tmp_path / "sample.m4a"
+    input_path.write_bytes(b"not-really-audio")
+    model_path = tmp_path / "ggml-large-v3.bin"
+    model_path.write_text("model", encoding="utf-8")
+    settings.VOXHELM_FFMPEG_BIN = "/tmp/fake-ffmpeg"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_binary",
+        lambda _path: "/tmp/fake-whisper-cli",
+    )
+    monkeypatch.setattr(
+        "transcriptions.service.resolve_whispercpp_model_path",
+        lambda _name: model_path,
+    )
+
+    def fake_run(args, **kwargs):
+        del kwargs
+        call = [str(part) for part in args]
+        calls.append(call)
+        if call[0] == settings.VOXHELM_FFMPEG_BIN:
+            Path(call[-1]).write_bytes(b"RIFFfakewav")
+            return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        output_base = Path(call[call.index("-of") + 1])
+        output_base.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "result": {"language": "de"},
+                    "transcription": [
+                        {
+                            "text": "Hallo Welt",
+                            "timestamps": {"from": "00:00:00,000", "to": "00:00:01,000"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+    backend.transcribe(
+        input_path,
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+    return calls[1]
+
+
+def test_whispercpp_backend_emits_anti_hallucination_flags_by_default(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    args = _capture_whispercpp_args(
+        backend, monkeypatch=monkeypatch, tmp_path=tmp_path, settings=settings
+    )
+    # max-context 0 disables conditioning on previous text (the loop trigger).
+    assert args[args.index("--max-context") + 1] == "0"
+    assert "--suppress-nst" in args
+
+
+def test_whispercpp_backend_honors_context_and_nst_settings(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+        max_context=-1,
+        suppress_nst=False,
+    )
+    args = _capture_whispercpp_args(
+        backend, monkeypatch=monkeypatch, tmp_path=tmp_path, settings=settings
+    )
+    assert args[args.index("--max-context") + 1] == "-1"
+    assert "--suppress-nst" not in args
+
+
+def test_mlx_backend_disables_condition_on_previous_text_by_default(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class _FakeMlxWhisper:
+        @staticmethod
+        def transcribe(_audio, **kwargs):
+            captured.append(kwargs)
+            return {"text": "Hallo", "language": "de", "segments": []}
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", _FakeMlxWhisper)
+
+    MlxWhisperBackend(model_name="mlx-community/whisper-large-v3-mlx").transcribe(
+        Path("/tmp/sample.wav"),
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+    MlxWhisperBackend(
+        model_name="mlx-community/whisper-large-v3-mlx",
+        condition_on_previous_text=True,
+    ).transcribe(
+        Path("/tmp/sample.wav"),
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+
+    assert captured[0]["condition_on_previous_text"] is False
+    assert captured[1]["condition_on_previous_text"] is True
+
+
+def test_build_backend_service_wires_anti_hallucination_settings(settings) -> None:
+    settings.VOXHELM_WHISPERCPP_MAX_CONTEXT = 7
+    settings.VOXHELM_WHISPERCPP_SUPPRESS_NST = False
+    settings.VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT = True
+
+    cpp = build_backend_service(backend_name="whispercpp", model_name="ggml-large-v3.bin")
+    assert isinstance(cpp, WhisperCppBackend)
+    assert cpp.max_context == 7
+    assert cpp.suppress_nst is False
+
+    mlx = build_backend_service(
+        backend_name="mlx", model_name="mlx-community/whisper-large-v3-mlx"
+    )
+    assert isinstance(mlx, MlxWhisperBackend)
+    assert mlx.condition_on_previous_text is True
 
 
 def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(

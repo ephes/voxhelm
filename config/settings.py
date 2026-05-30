@@ -148,9 +148,21 @@ VOXHELM_BEARER_TOKENS = env_tokens("VOXHELM_BEARER_TOKENS")
 VOXHELM_STT_BACKEND = os.getenv("VOXHELM_STT_BACKEND", "whispercpp").strip()
 VOXHELM_STT_FALLBACK_BACKEND = os.getenv("VOXHELM_STT_FALLBACK_BACKEND", "mlx").strip()
 VOXHELM_MLX_MODEL = os.getenv("VOXHELM_MLX_MODEL", "mlx-community/whisper-large-v3-mlx")
+# Conditioning the decoder on previously generated text is Whisper's main cause of
+# runaway repetition loops on long audio (a hallucinated phrase feeds itself across
+# 30s windows). Default off; flip to true to restore upstream Whisper behaviour.
+VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT = env_bool(
+    "VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT", default=False
+)
 VOXHELM_WHISPERCPP_MODEL = os.getenv("VOXHELM_WHISPERCPP_MODEL", "ggml-large-v3.bin").strip()
 VOXHELM_WHISPERCPP_BIN = os.getenv("VOXHELM_WHISPERCPP_BIN", "/opt/homebrew/bin/whisper-cli")
 VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "4"))
+# whisper.cpp anti-hallucination controls. max-context 0 disables conditioning on
+# previous text (the whisper.cpp equivalent of condition_on_previous_text=False);
+# -1 restores the upstream unbounded default. suppress-nst drops non-speech tokens,
+# which curbs hallucinated text over music/silence (e.g. outro-music loops).
+VOXHELM_WHISPERCPP_MAX_CONTEXT = int(os.getenv("VOXHELM_WHISPERCPP_MAX_CONTEXT", "0"))
+VOXHELM_WHISPERCPP_SUPPRESS_NST = env_bool("VOXHELM_WHISPERCPP_SUPPRESS_NST", default=True)
 VOXHELM_WHISPERKIT_ENABLED = env_bool("VOXHELM_WHISPERKIT_ENABLED", default=False)
 VOXHELM_WHISPERKIT_HOST = os.getenv("VOXHELM_WHISPERKIT_HOST", "127.0.0.1").strip()
 VOXHELM_WHISPERKIT_PORT = int(os.getenv("VOXHELM_WHISPERKIT_PORT", "50060"))
