@@ -259,13 +259,25 @@ The batch API is the stable producer contract. How jobs move from `queued` to `r
 
 **Current default:** the control plane enqueues work through Django Tasks, and worker processes on `studio` execute queued tasks.
 
-**Concrete runtime choice:** use `django_tasks_db.backend.DatabaseBackend` with the same local SQLite database as the control plane.
+**Concrete current runtime choice:** use `django_tasks_db.backend.DatabaseBackend` with the same local SQLite database as the control plane.
 
 The current implementation also persists the linked Django task/result identifier in the producer-facing job record and reconciles terminal state from the Django Tasks result backend when jobs are queried.
 
-**Reviewed C13 runtime rule:** Batch jobs continue to use Django Tasks, but any task step that enters local STT/TTS inference on `studio` must participate in the same host-wide lane scheduler as the HTTP API and Wyoming sidecar. C13 does not introduce a second task queue or a separate interactive worker host.
+**Accepted remote-worker follow-on:** add an internal HTTP pull-worker API for trusted remote transcription workers, starting with `atlas.local`. In `remote_pull` mode, `job_type=transcribe` jobs are persisted as normal Voxhelm jobs but are not enqueued into Django Tasks. Remote workers authenticate with worker tokens, claim leased jobs from `studio`, execute STT and advertised diarization/known-speaker capabilities, upload artifacts, and report completion/failure. `job_type=synthesize` stays on Django Tasks in the first slice. Goal completion for the first production worker requires a real python-podcast `pyannote_known_speaker` transcript to run on `atlas.local` and populate the private `speakers` sidecar without changing producer APIs.
 
-**Future-compatible option:** if Voxhelm later needs remote workers or stricter process isolation beyond the current Django Tasks setup, it can add more explicit worker coordination without changing the producer-facing batch API.
+Internal worker endpoints for the accepted slice:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/v1/internal/workers/heartbeat` | Record worker liveness and capabilities |
+| POST | `/v1/internal/work/claim` | Claim one eligible leased transcription job |
+| POST | `/v1/internal/work/{job_id}/heartbeat` | Extend a running job lease |
+| POST | `/v1/internal/work/{job_id}/complete` | Persist result metadata/artifact manifest and mark succeeded |
+| POST | `/v1/internal/work/{job_id}/fail` | Mark failed or requeue when attempts remain |
+
+Remote worker leases are controlled by `studio` server time. Claiming must be SQLite-safe: use short conditional updates with affected-row checks, not row-level locks. Lease tokens are internal and must never be exposed through producer job APIs. Worker-uploaded artifacts use attempt-scoped prefixes such as `jobs/<job_id>/attempt-<n>/...`; the database manifest selects the winning attempt so a zombie worker cannot overwrite producer-visible objects after lease reclaim. Known-speaker jobs may be claimed only by workers or hybrid paths that advertise the required pyannote/wespeaker/reference-fetch capability; they must not silently downgrade to plain transcription.
+
+**Reviewed C13 runtime rule:** Any task step that enters local STT/TTS inference on `studio` must participate in the same host-wide lane scheduler as the HTTP API and Wyoming sidecar. Remote `atlas.local` inference is outside the `studio` host-local scheduler; a future local pull worker on `studio` must still acquire the C13 gate before inference.
 
 **Primary direct consumers:** python-podcast / django-cast and future integrations that need long-running processing, including the current URL-based batch path and the planned large-input follow-on.
 
@@ -330,9 +342,9 @@ voxhelm/
     transcript.vtt
 ```
 
-**Auth:** S3-compatible credentials. Used only by Voxhelm workers and the control plane — never exposed to consumers.
+**Auth:** S3-compatible credentials. Used only by the Voxhelm control plane and trusted Voxhelm worker processes — never exposed to producers/consumers.
 
-**Consumers:** Consumers retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. This keeps the security boundary narrow: only Voxhelm holds MinIO credentials. Django Tasks workers on `studio` read/write directly using S3 credentials.
+**Consumers:** Consumers retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. This keeps the producer/consumer security boundary narrow: producers and consumers never receive MinIO credentials. Django Tasks workers on `studio` read/write directly using S3 credentials. The accepted remote-worker slice extends the same internal credential domain to trusted remote worker hosts such as `atlas.local`, which upload job-owned artifacts and report manifests back to `studio`.
 
 ---
 
@@ -382,7 +394,7 @@ voxhelm/
 
 ## 4. Auth Boundary Map
 
-Voxhelm maintains three required credential domains in v1, plus an optional worker credential domain if a private worker HTTP interface is added later.
+Voxhelm maintains producer, worker, operator/admin, and artifact credential domains. Producer and operator credentials are never valid for internal worker endpoints.
 
 ### 4.1 Producer Tokens (Job Submission)
 
@@ -402,18 +414,24 @@ Archive's existing settings would be reconfigured:
 - `ARCHIVE_TRANSCRIPTION_API_KEY` -> set to `VOXHELM_PRODUCER_TOKEN_ARCHIVE` value
 - `ARCHIVE_TRANSCRIPTION_API_BASE` -> set to `https://voxhelm.home.xn--wersdrfer-47a.de/v1` for the current private edge URL, or the direct `studio` URL when debugging
 
-### 4.2 Django Tasks Runtime
+### 4.2 Internal Worker Runtime
 
-Queued task execution is internal to the service. Producer auth and operator auth remain the relevant external boundaries; worker runtime credentials are an implementation detail of the Django Tasks backend and deployment.
+Queued task execution is internal to the service. Producer auth and operator auth remain separate external boundaries; worker runtime credentials are implementation credentials for Voxhelm-controlled worker processes.
 
-**v1 backend:** `django_tasks_db.backend.DatabaseBackend`
+**Current local backend:** `django_tasks_db.backend.DatabaseBackend`
 
-**v1 settings shape:**
+**Current settings shape:**
 - `TASKS["default"]["BACKEND"] = "django_tasks_db.backend.DatabaseBackend"`
 
-**Model boundary:** Voxhelm keeps a producer-facing job record keyed by its own UUID and stores the linked Django task/result id internally for execution and recovery. Consumers only see the Voxhelm job UUID.
+**Accepted remote transcription backend:** internal HTTP pull workers for batch transcription, configured separately from producer tokens. A setting such as `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull` selects whether transcription jobs are enqueued to Django Tasks or left for remote pull workers. Worker capabilities include STT backend/model support and, for the production goal, pyannote/wespeaker known-speaker support or an explicitly documented hybrid postprocessor path.
 
-**Deferred complexity:** no custom worker registry, launch-token handshake, or heartbeat table in v1. Add those only if the stock database backend and normal process supervision prove insufficient on `studio`.
+**Worker auth shape:** a protected worker token map such as `VOXHELM_WORKER_TOKENS="atlas=..."`. Worker tokens authorize only internal worker endpoints and are not accepted on producer APIs.
+
+**Worker packaging shape:** remote workers should run from the Voxhelm package as a worker-only command such as `voxhelm-remote-worker`. Adding a new machine should require only `uv tool install` or `uvx`, a Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional Hugging Face token; it must not require Django server setup or database credentials on the worker host.
+
+**Model boundary:** Voxhelm keeps a producer-facing job record keyed by its own UUID. For Django Tasks jobs it stores the linked task/result id internally. For remote-pull jobs it stores internal worker assignment, lease, attempt, and heartbeat state. Consumers only see the Voxhelm job UUID and normal queued/running/succeeded/failed states.
+
+**Remote-worker complexity trigger:** D-10 deferred custom worker registry, launch-token/worker-token handshakes, and heartbeat tables while work ran only on `studio`. Adding `atlas.local` as a trusted remote worker is the accepted trigger for introducing that internal coordination.
 
 ### 4.3 Operator / Admin Session
 
@@ -451,6 +469,7 @@ All interfaces assume Tailscale or local-network-only access:
 - Bind to Tailscale IP or `127.0.0.1` by default.
 - Optionally enforce allowed CIDRs (same pattern as OpsGate's `OPSGATE_ALLOWED_CIDRS`).
 - Wyoming binds to a separate port, also on Tailscale/local interface only.
+- `/v1/internal/*` worker endpoints must be blocked at the public Traefik/macmini edge unless explicitly exposed through a private worker-only route; worker-token auth is defense-in-depth, not the only boundary.
 
 ### 4.6 Credential Domain Isolation
 
@@ -466,7 +485,7 @@ All interfaces assume Tailscale or local-network-only access:
    (per-consumer)       (web UI / admin)   (internal only)
          |                    |                  |
    Archive token        Django session      used by Django +
-   Podcast token        + CSRF              task workers only
+   Podcast token        + CSRF              trusted workers only
    OpenClaw token
    Operator token
 ```

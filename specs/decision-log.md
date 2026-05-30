@@ -511,6 +511,43 @@ The follow-on slice should be defined as:
 
 ---
 
+## D-23: How should Voxhelm add `atlas.local` as a second transcription worker?
+
+**Status:** Accepted for the next remote-worker slice; no implementation started. Detailed implementation concept: `specs/remote-transcription-workers.md`.
+
+**Context:** Voxhelm's producer-facing batch API is already stable, but batch execution currently assumes local Django Tasks workers on `studio`. A second Apple Silicon machine, `atlas.local`, can reduce the transcription backlog if it connects to Voxhelm, claims work, runs STT and the required diarization/known-speaker path, uploads artifacts, and reports results without changing consumer APIs.
+
+This reopens a complexity boundary that D-10 and `interface-map.md` intentionally deferred: custom worker registry, worker auth, heartbeat, and leases. Remote workers are the concrete trigger that makes that previously deferred worker coordination worthwhile. Any future local `studio` pull-worker path must still preserve the C13 host-wide lane scheduler for STT/TTS inference; that scheduler is host-local and does not coordinate `atlas.local`.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Shared database workers | Smallest app-level change if Voxhelm first migrates to PostgreSQL, but gives remote workers broad DB access and couples them to full Django internals |
+| B. Internal HTTP pull-worker API | Clean worker trust boundary; `studio` keeps DB ownership; workers claim leased jobs over HTTP; requires a new worker API and daemon |
+| C. HTTP pull-worker API for both `studio` and remote workers | Clean steady state with one transcription execution model, but larger than the first `atlas.local` slice because it changes local `studio` worker deployment too |
+| D. Ad-hoc SSH/NFS offload | Quick for experiments, but brittle and contrary to Voxhelm's goal of avoiding generic remote shell execution |
+
+**Accepted decision:** Option B.
+
+First-slice details:
+
+- `studio` remains the only database owner.
+- Worker auth is separate from producer tokens.
+- New worker machines should be easy to add with a package command such as `voxhelm-remote-worker`, installed/run via `uv tool install` or `uvx`, plus Voxhelm URL and credentials; worker hosts must not need Django server setup or database credentials.
+- `job_type=transcribe` can run in `remote_pull` mode; `job_type=synthesize` stays on Django Tasks.
+- Remote-pull transcription jobs are not enqueued to Django Tasks, avoiding a mixed scheduler race.
+- Trusted workers such as `atlas.local` are included in the internal MinIO credential domain for the first slice and post artifact manifests back to Voxhelm.
+- Worker artifacts are written under attempt-scoped prefixes so stale/zombie workers cannot overwrite the producer-visible winning attempt after lease reclaim.
+- `/v1/internal/*` worker endpoints must be blocked at public edge routes unless explicitly exposed through a private worker-only route.
+- Claiming uses SQLite-safe conditional updates and affected-row checks; all lease time is based on `studio` server time.
+- Goal completion requires a real production python-podcast `pyannote_known_speaker` transcript to execute on `atlas.local`, populate the django-cast `Transcript.speakers` sidecar, and meet the known-speaker runbook quality bar.
+- The implementation must choose and document whether Atlas runs pyannote/wespeaker known-speaker processing itself, or whether a hybrid path has `studio` perform known-speaker classification after Atlas STT/artifact upload.
+
+**Blocks implementation:** No for the architecture choice; implementation should follow `specs/remote-transcription-workers.md` and keep `interface-map.md` in sync as details evolve.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:

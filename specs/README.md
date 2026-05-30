@@ -16,7 +16,7 @@ Current implementation and research snapshot as of 2026-05-27:
 - The same-epic `django-cast` consumer cleanup is now complete: it requests and persists Voxhelm-owned `podlove`, `dote`, and `vtt` artifacts directly instead of converting `dote` / `podlove` locally.
 - Production artifact storage is MinIO-backed via the S3-compatible `VOXHELM_ARTIFACT_*` env vars, using bucket `voxhelm`.
 - Archive-compatible sync transcription, live batch jobs, direct Home Assistant STT, and the restored production debug-logging default have all been validated against the deployed service.
-- Remaining planned work is narrower now: an async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, a large-media batch-input follow-on so consumers do not need their own chunking/transcoding logic, operational work beyond the current `whisper.cpp` + `mlx-whisper` STT set plus the experimental non-default WhisperKit path, C21 diarization backend quality/runtime validation and named-speaker follow-ons, Archive article-audio consumer follow-on, and M4/OpenClaw.
+- Remaining planned work is narrower now: remote transcription workers starting with `atlas.local`, an async Wagtail transcript-completion follow-on for `python-podcast` / `django-cast`, a large-media batch-input follow-on so consumers do not need their own chunking/transcoding logic, operational work beyond the current `whisper.cpp` + `mlx-whisper` STT set plus the experimental non-default WhisperKit path, C21 diarization backend quality/runtime validation and named-speaker follow-ons, Archive article-audio consumer follow-on, and M4/OpenClaw.
 - The STT benchmark spike was re-run on `studio`, and the current source of truth is [`2026-03-13_whisperkit_re_evaluation_studio.md`](./2026-03-13_whisperkit_re_evaluation_studio.md). The revised evidence keeps `whisper.cpp` as the deployed default for now, but WhisperKit is no longer merely provisional: on the tuned `studio` path it is now a real follow-on candidate, with GPU stability caveats.
 
 This directory currently contains both the original PRD and the planning package derived from it. The goal of this file is to make the document stack explicit, so readers know:
@@ -36,17 +36,19 @@ Read the documents in this order:
    The v1 technical shape: service boundaries, auth boundaries, interface contracts, producer/consumer relationships, and storage/access model.
 3. [`decision-log.md`](./decision-log.md)
    The decision register: open or recently resolved choices, available options, recommended default, and blocker status.
-4. [`diarization-quality-research.md`](./diarization-quality-research.md)
+4. [`remote-transcription-workers.md`](./remote-transcription-workers.md)
+   Accepted Option B implementation concept for adding `atlas.local` and later machines as trusted HTTP pull-workers for batch transcription, including the production known-speaker validation goal.
+5. [`diarization-quality-research.md`](./diarization-quality-research.md)
    Current quality research for podcast speaker diarization, including the known four-speaker merge failure, pyannote tuning options, separated-track constraints, and recommended experiments.
-5. [`milestones.md`](./milestones.md)
+6. [`milestones.md`](./milestones.md)
    The delivery slices: what ships in each milestone, what is deferred, milestone dependencies, and milestone success criteria.
-6. [`delivery-chunks.md`](./delivery-chunks.md)
+7. [`delivery-chunks.md`](./delivery-chunks.md)
    The implementation work packages: chunk scope, exclusions, dependencies, interfaces, and acceptance criteria.
-7. [`implementation-sequence.md`](./implementation-sequence.md)
+8. [`implementation-sequence.md`](./implementation-sequence.md)
    The execution plan: ordering, parallelism, spikes, gates, and implementation timing.
-8. [`archive/spec-review.md`](./archive/spec-review.md)
+9. [`archive/spec-review.md`](./archive/spec-review.md)
    The research review against the original PRD and consumer repos.
-9. [`archive/planning-review.md`](./archive/planning-review.md)
+10. [`archive/planning-review.md`](./archive/planning-review.md)
    The review of the planning package itself.
 
 ## Source Of Truth Hierarchy
@@ -198,6 +200,7 @@ Active top-level spec set:
 - [`delivery-chunks.md`](./delivery-chunks.md)
 - [`implementation-sequence.md`](./implementation-sequence.md)
 - [`diarization-quality-research.md`](./diarization-quality-research.md)
+- [`remote-transcription-workers.md`](./remote-transcription-workers.md)
 - [`README.md`](./README.md)
 
 ## Current File Mapping
@@ -218,6 +221,8 @@ The current planning package maps reasonably well to a high-level-to-low-level s
   [`implementation-sequence.md`](./implementation-sequence.md)
 - Diarization quality research:
   [`diarization-quality-research.md`](./diarization-quality-research.md)
+- Remote worker implementation concept:
+  [`remote-transcription-workers.md`](./remote-transcription-workers.md)
 - Review artifacts:
   [`archive/spec-review.md`](./archive/spec-review.md), [`archive/planning-review.md`](./archive/planning-review.md)
 
