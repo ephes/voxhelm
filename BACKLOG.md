@@ -8,49 +8,55 @@ outbound over an internal HTTP pull-worker API to claim leased batch transcripti
 artifacts, and report results without changing producer-facing APIs. The implementation uses a remote-only
 transcription queue and MinIO-backed artifact manifests from trusted workers. Goal completion requires a real
 production python-podcast known-speaker diarized transcript to execute on `atlas.local`.
-No implementation has started.
+Server-side control-plane endpoints and remote dispatch mode are implemented as
+of 2026-05-30, and the checkout-runnable `voxhelm-remote-worker` command is
+implemented as of 2026-05-31. Public PyPI publication, deployment, edge
+protection, and the production proof remain open.
 
 ### Implementation backlog
 
 - [x] Normalize the accepted Option B design into `specs/interface-map.md` and keep D-23 in sync.
-- [ ] Add worker auth and liveness:
+- [x] Add worker auth and liveness:
   - worker token map, e.g. `VOXHELM_WORKER_TOKENS="atlas=..."`;
   - `Worker` runtime/liveness model;
   - `POST /v1/internal/workers/heartbeat`.
-- [ ] Add remote-pull job state:
+- [x] Add remote-pull job state:
   - `execution_mode`, `assigned_worker_id`, `lease_token_hash`, `lease_expires_at`, `attempt_count`,
     `max_attempts`, `last_worker_heartbeat_at`;
   - SQLite-safe conditional claim update with affected-row check;
   - attempt-scoped artifact prefixes such as `jobs/<job_id>/attempt-<n>/` to prevent zombie-worker S3 overwrites;
   - all lease decisions use `studio` server time.
-- [ ] Add worker endpoints:
+- [x] Add worker endpoints:
   - `POST /v1/internal/work/claim`;
   - `POST /v1/internal/work/{job_id}/heartbeat`;
   - `POST /v1/internal/work/{job_id}/complete` with same-token idempotent retry after successful completion;
   - `POST /v1/internal/work/{job_id}/fail`;
   - heartbeat/fail/complete all verify assigned worker plus lease token hash.
-- [ ] Add `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull`; in `remote_pull` mode, transcribe jobs
-  are not enqueued to Django Tasks.
+- [x] Add `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull`; in `remote_pull` mode, transcribe jobs
+  are not enqueued to Django Tasks, startup requires complete shared S3 artifact settings, URL jobs are
+  allowlist-checked before queueing, and remote lease/poll/attempt settings must be positive.
 - [ ] Add deployment/edge protection: block `/v1/internal/*` on public Traefik/macmini routes unless explicitly exposed on a private worker route.
 - [ ] Add easy worker packaging/onboarding:
-  - expose a worker command such as `voxhelm-remote-worker`;
-  - support checkout-based `uv run` plus install/run paths with `uv tool install` or `uvx`;
-  - require only Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional HF token;
-  - document a repeatable new-machine setup with protected env file and launchd.
+  - [x] expose a checkout-runnable `voxhelm-remote-worker` command;
+  - [x] support checkout-based `uv run`;
+  - [x] require only Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional HF token;
+  - [ ] publish/install/run paths with `uv tool install` or `uvx` from public PyPI;
+  - [ ] document a repeatable new-machine setup with protected env file and launchd.
 - [ ] Add the `atlas.local` worker command/process:
-  - claim one job at a time;
-  - materialize URL or staged-upload input;
-  - store source/extracted artifacts in MinIO under attempt-scoped prefixes;
-  - run local STT;
-  - render requested transcript formats;
-  - upload artifacts and post completion manifest.
+  - [x] claim one job at a time;
+  - [x] materialize URL or staged-upload input;
+  - [x] store source/extracted artifacts in MinIO under attempt-scoped prefixes;
+  - [x] run local STT;
+  - [x] render requested transcript formats;
+  - [x] upload artifacts and post completion manifest;
+  - [ ] install and supervise the process on `atlas.local`.
 - [ ] Add remote known-speaker diarization support:
-  - choose Atlas-runs-known-speaker or hybrid classification and document the choice;
-  - support `pyannote_known_speaker` payloads from django-cast/python-podcast;
-  - treat private known-speaker reference descriptors as trusted worker-only data and keep them out of logs;
-  - ensure `transcript.speakers.json` and `result_metadata.diarization` match existing studio behavior;
-  - validate against `python-podcast/docs/known-speaker-runbook.rst` and `evals/known_speaker_results.md`.
-- [ ] Keep claim eligibility bounded by advertised capabilities: `job_type=transcribe`, batch only, and
+  - [x] choose Atlas-runs-known-speaker and document the choice;
+  - [x] support `pyannote_known_speaker` payloads from django-cast/python-podcast;
+  - [x] treat private known-speaker reference descriptors as trusted worker-only data and keep them out of logs;
+  - [x] ensure `transcript.speakers.json` and `result_metadata.diarization` match existing studio behavior in the worker contract;
+  - [ ] validate against `python-podcast/docs/known-speaker-runbook.rst` and `evals/known_speaker_results.md`.
+- [x] Keep claim eligibility bounded by advertised capabilities: `job_type=transcribe`, batch only, and
   known-speaker jobs only when the worker/hybrid path advertises the required pyannote/wespeaker/reference support.
 - [ ] Preserve the C13 lane scheduler for any future local `studio` pull worker; `atlas.local` is outside that
   host-local gate.

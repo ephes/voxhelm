@@ -1,7 +1,11 @@
 # Remote Transcription Workers
 
 **Date:** 2026-05-30  
-**Status:** Accepted implementation concept for the next remote-worker slice; no code implementation started.  
+**Status:** Accepted implementation concept. Server-side worker auth, heartbeat,
+lease claim, completion/failure endpoints, and `remote_pull` dispatch mode are
+implemented as of 2026-05-30. The checkout-runnable `voxhelm-remote-worker`
+command is implemented as of 2026-05-31; public PyPI publication, deployment,
+edge protection, and production `atlas.local` validation remain pending.
 **Chosen architecture:** Option B -- internal HTTP pull-worker API.  
 **First worker target:** `atlas.local`.  
 **Goal-complete validation:** real production python-podcast known-speaker diarized transcript executed on `atlas.local`.
@@ -43,6 +47,7 @@ Use an internal HTTP pull-worker API:
 - Remote workers authenticate to `studio`, heartbeat capabilities, claim leased jobs, execute work locally, and report completion/failure.
 - Remote workers do not receive database credentials.
 - Producer-facing job IDs, polling, and artifact download URLs remain unchanged.
+- Worker token values must be distinct from producer bearer token values; startup configuration rejects overlaps so a producer credential cannot authorize worker endpoints.
 
 ### Dispatch mode
 
@@ -60,6 +65,19 @@ Suggested setting shape:
 VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"   # current/default safe mode
 VOXHELM_TRANSCRIPTION_EXECUTION_MODE="remote_pull"   # remote-worker mode
 ```
+
+`remote_pull` is valid only with worker credentials and a shared artifact
+backend in the first slice. Voxhelm rejects `remote_pull` at startup unless
+`VOXHELM_WORKER_TOKENS` has at least one worker token,
+`VOXHELM_ARTIFACT_BACKEND="s3"`, and the S3 endpoint, credential, and bucket
+settings are complete; the filesystem backend is local-only and cannot move
+staged inputs or result artifacts across hosts. `VOXHELM_TRANSCRIPTION_EXECUTION_MODE`
+must be either `django_tasks` or `remote_pull`. Remote worker lease, poll, and
+max-attempt settings must be positive integers. URL inputs and known-speaker
+reference URLs are checked against `VOXHELM_ALLOWED_URL_HOSTS` during job
+submission so invalid remote jobs do not remain queued waiting for a worker to
+discover them. Remote claims revalidate both URL categories before handing a
+payload to a worker so stale jobs follow the current allowlist.
 
 Avoid mixing Django Tasks transcription and remote-pull transcription for the same job pool in the first slice. The goal is to prevent double execution, not to build a multi-scheduler fallback system immediately.
 
@@ -145,10 +163,13 @@ uvx --from "voxhelm[diarization] @ git+ssh://git.example/voxhelm.git" \
 Repository-checkout mode remains acceptable for development:
 
 ```bash
-uv run voxhelm-remote-worker --once --base-url http://studio.local:8000
+uv run voxhelm-remote-worker \
+  --env-file /etc/voxhelm-worker/worker.env \
+  --once \
+  --base-url http://studio.local:8000
 ```
 
-The worker command should not require Django server setup, database settings, migrations, or access to `studio`'s SQLite database. It may import Voxhelm's shared transcription, diarization, artifact-store, and format-rendering code, but it should run as a worker-only process.
+The worker command should not require Django server setup, database settings, migrations, or access to `studio`'s SQLite database. It imports Voxhelm's shared transcription, diarization, artifact-store, and format-rendering code plus Django settings for local configuration, but runs as a worker-only process.
 
 Minimum worker environment:
 
@@ -182,7 +203,7 @@ Add a separate worker credential domain. Producer bearer tokens must not authori
 Suggested environment shape:
 
 ```bash
-VOXHELM_WORKER_TOKENS="atlas=replace-me"
+VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
 ```
 
 Token behavior:
@@ -190,7 +211,10 @@ Token behavior:
 - Worker requests use `Authorization: Bearer <token>`.
 - A token maps to exactly one configured `worker_id`, for example `atlas`.
 - The request body may include `worker_id`, but the authenticated token identity wins.
-- Unknown, disabled, or mismatched worker IDs return `401` or `403`.
+- Unknown or mismatched worker IDs return `401` or `403`.
+- Disabled workers cannot register heartbeat state or claim new jobs, but a
+  worker that already owns an active lease may still heartbeat, complete, or
+  fail that job so disabling does not strand in-flight work.
 - Tokens are never returned by the API and must not appear in logs.
 
 ## Worker API
@@ -249,6 +273,7 @@ Request:
     "job_types": ["transcribe"],
     "backends": ["whispercpp", "mlx"],
     "models": ["ggml-large-v3.bin", "mlx-community/whisper-large-v3-mlx"],
+    "output_formats": ["text", "json", "vtt", "dote", "podlove", "speakers"],
     "diarization": {
       "anonymous": true,
       "known_speaker": true,
@@ -270,8 +295,10 @@ Claim response:
     "attempt": 1,
     "lease_token": "opaque-random-token",
     "lease_expires_at": "2026-05-30T12:30:00Z",
-    "backend": "auto",
-    "model": "auto",
+    "backend": "whispercpp",
+    "model": "ggml-large-v3.bin",
+    "requested_backend": "auto",
+    "requested_model": "auto",
     "language": "de",
     "input": {
       "kind": "url",
@@ -303,9 +330,11 @@ For staged uploads, the claim response should include enough object-store metada
 }
 ```
 
+Job submission must reject an `upload_id` whose stored artifact backend or non-secret store identity no longer matches the active artifact store, and producers must stage the media again after a filesystem/S3 backend, root, endpoint, or bucket rollout. Accepted upload jobs snapshot the staged object backend/key/identity into job input data so remote claims do not depend on later staged-row backend changes.
+
 For known-speaker jobs, the claim response includes the normalized `diarization` payload from the producer request, including `enabled`, `strategy`, speaker-count hints, `known_speakers`, reference descriptors, and `known_speaker` thresholds. The worker must consume the normalized object; it must not re-derive `strategy` from `enabled`. Worker logs must not print private reference URLs or ranges. If the chosen placement is Atlas-runs-known-speaker, the worker fetches reference audio with the same allow-list and private-media rules as the current `studio` path. If the chosen placement is hybrid, the claim/complete contract must first define an awaiting-postprocess state and studio-side trigger rather than marking the job succeeded at Atlas completion.
 
-The worker should not need database access to resolve staged uploads or known-speaker references.
+The worker should not need database access to resolve staged uploads or known-speaker references. Uploaded known-speaker reference clips are accepted by the producer contract for local execution, but the first remote-worker slice rejects them before claim because the worker does not yet receive signed private delivery metadata for those `upload_id` references. Remote known-speaker jobs should use URL reference audio, usually source-range descriptors, until private reference delivery is implemented.
 
 ### `POST /v1/internal/work/{job_id}/heartbeat`
 
@@ -346,12 +375,10 @@ Request:
   "lease_token": "opaque-random-token",
   "result_text": "Plain transcript text...",
   "result_metadata": {
-    "backend_name": "whisper.cpp",
-    "model_name": "ggml-large-v3.bin",
+    "backend": "whisper.cpp",
+    "model": "ggml-large-v3.bin",
     "language": "de",
-    "processing_seconds": 1234.5,
-    "worker_id": "atlas",
-    "attempt": 1
+    "processing_seconds": 1234.5
   },
   "artifacts": [
     {
@@ -382,13 +409,17 @@ Completion rules:
 
 - The server accepts completion only from the currently assigned worker with the current lease token.
 - Completion is idempotent for the same `(job_id, lease_token)` after a successful commit: if a worker retries the same completion because the HTTP response was lost, return the already-succeeded job/manifest. If the retry supplies a different manifest or the token no longer matches the recorded successful attempt, return a conflict.
+- Completion must include a non-exposed job-owned `source` artifact under the claimed attempt prefix before `studio` accepts the result or deletes any staged upload.
 - Artifact `storage_key` values must be under the claimed attempt-scoped artifact prefix.
+- Each manifest object must already exist in the configured artifact store and its stored byte size must match `size_bytes`; missing or mismatched objects are rejected before `studio` marks the job succeeded.
 - Artifact names must match existing Voxhelm artifact naming rules and be unique per job.
 - Transcript output formats must match the job's requested `output.formats`.
 - Known-speaker jobs must include the `transcript_speakers` artifact (`transcript.speakers.json`) and `result_metadata.diarization.known_speaker_summary` when the request strategy is `pyannote_known_speaker`.
+- `transcript_speakers` artifacts are rejected for jobs that did not request `pyannote_known_speaker`.
 - The `speakers` sidecar remains private/reviewable consumer state; public DOTe/Podlove/VTT labeling behavior must stay consistent with `specs/known-speaker-diarization.md` and django-cast's review/apply policy.
+- Worker-supplied `result_metadata` is allowlisted and type-checked before it becomes producer-visible: backend/model/language/source-name strings must be non-empty, non-URL strings; URL-input jobs always keep the server-owned job input URL as producer-visible `source_url` and ignore worker-supplied redirect URLs; duration fields and known-speaker numeric summary fields must be finite non-negative numbers; server-derived source kind, worker, attempt, execution-mode, requested-model, and normalized diarization metadata override worker values.
 - On success, the server sets `state=succeeded`, `finished_at`, `result_text`, `result_metadata`, and creates `JobArtifact` rows.
-- For staged uploads, after a successful source artifact copy is recorded, `studio` may delete the staged object/row as part of completion cleanup.
+- For staged uploads, after a successful source artifact copy is recorded, `studio` deletes the staged object/row as part of completion cleanup.
 - Losing attempts may leave orphaned attempt-scoped objects; cleanup can be a later retention/sweep task and must not affect the manifest-selected winning attempt.
 
 ### `POST /v1/internal/work/{job_id}/fail`
@@ -409,9 +440,9 @@ Request:
 Failure rules:
 
 - The server accepts heartbeat/fail only from the currently assigned worker with the current lease token hash, same as completion. A stale worker must not be able to extend or fail a reassigned job.
-- If `retryable=true` and attempts remain, reset the job to `queued`, clear assignment, and keep error detail in metadata/logs.
-- If `retryable=false` or attempts are exhausted, mark the job `failed` and set `error_detail`.
-- The first slice can use a conservative maximum such as `VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS=3`.
+- If `retryable=true` and attempts remain, reset the job to `queued`, clear assignment, and store a safe server-owned retryable failure summary rather than exposing the worker's raw detail.
+- If `retryable=false` or attempts are exhausted, mark the job `failed`, set a safe server-owned terminal failure summary, and release any staged upload claim so the producer can retry the same staged object until it expires.
+- The first slice can use a conservative positive maximum such as `VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS=3`.
 
 ## Data model additions
 
@@ -440,6 +471,8 @@ Token storage can remain environment-backed for the first slice; no token needs 
 - `lease_expires_at`: nullable datetime
 - `attempt_count`: integer default `0`
 - `max_attempts`: integer default from settings
+- `leased_artifact_prefix`: string snapshot of the attempt prefix returned in the active claim
+- `leased_artifact_store`: non-secret artifact-store identity snapshot for the active claim
 - `last_worker_heartbeat_at`: nullable datetime
 - optional `worker_progress`: JSON for last phase/message
 
@@ -455,16 +488,21 @@ Claiming must be SQLite-safe and short-lived.
 
 Server-side algorithm shape:
 
-1. Find a small ordered candidate set with `execution_mode=remote_pull`, eligible type/capabilities, and either:
+1. Find an ordered candidate set with `execution_mode=remote_pull`, eligible type/capabilities, and either:
    - `state=queued`, or
    - `state=running` with `lease_expires_at < now` and `attempt_count < max_attempts`.
+   URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction only rechecks capacity and attempts bounded conditional updates for already-filtered candidates.
+   If the authenticated worker already has active leased jobs at the lower of
+   its recorded concurrency and requested `max_jobs`, return no claim instead
+   of handing out another lease.
 2. For each candidate, attempt a single conditional `UPDATE` that sets:
    - `state=running`
    - `assigned_worker_id=<authenticated worker>`
    - `lease_token_hash=hash(new_token)`
    - `lease_expires_at=now + lease_seconds`
    - `attempt_count=attempt_count + 1`
-   - attempt-scoped artifact prefix derived from the new attempt number
+   - `leased_artifact_prefix` set to the attempt-scoped artifact prefix returned in the claim
+   - `leased_artifact_store` set to the current non-secret artifact-store identity
    - `started_at=COALESCE(started_at, now)`
    - `last_worker_heartbeat_at=now`
 3. The `WHERE` clause must restate the claim conditions so a concurrent claimant loses cleanly.
@@ -472,6 +510,11 @@ Server-side algorithm shape:
 5. Return the new opaque lease token only once, in the successful claim response.
 
 All lease and heartbeat comparisons use `studio` server time. Worker-supplied timestamps are informational only.
+
+Producer retries with the same `task_ref` also reconcile stale remote leases before returning an existing job. An expired lease with attempts remaining moves back to `queued` with the stale worker assignment and lease token cleared, so the next worker poll can reclaim it. An expired final attempt is marked `failed` and releases any staged upload claim.
+
+Completion validates artifact manifests against the leased prefix and artifact-store snapshots, not the process's current artifact settings, so an in-flight worker can finish after an artifact prefix, filesystem-root, endpoint, or bucket rollout when the old store remains reachable. Object-store existence and size checks run before the short settlement transaction; the transaction rechecks the lease and manifest shape without waiting on MinIO/S3.
+Committed `JobArtifact` rows also persist the winning non-secret store identity so producer artifact downloads keep reading from the store that accepted the completion manifest.
 
 ## Worker execution loop
 
@@ -481,13 +524,13 @@ The first worker command should be a simple long-running loop:
 2. Claim at most one job.
 3. If no job is available, sleep `poll_after_seconds` and repeat.
 4. Materialize input:
-   - URL input: `studio` validates allowed hosts at submission/claim time, and the worker re-validates the claim-provided URL against the same allow-list before downloading. A worker must reject URLs that fail its local allow-list rather than trusting arbitrary claim payloads.
+   - URL input: `studio` validates allowed hosts at submission/claim time, fails stale expired claims that no longer pass revalidation, and the worker re-validates the claim-provided URL against the same allow-list before downloading. A worker must reject URLs that fail its local allow-list rather than trusting arbitrary claim payloads.
    - Upload input: download/copy the staged object from MinIO using claim-provided storage metadata.
 5. Store the job-owned source artifact under the attempt-scoped job artifact prefix.
 6. If source is video, extract audio locally and store an `extracted_audio` artifact.
 7. Run STT locally using the configured backend/model.
 8. If the job requests anonymous diarization or `pyannote_known_speaker`, run the chosen diarization/known-speaker placement:
-   - Atlas-runs-known-speaker: run pyannote, fetch references, compute embeddings/centroids, classify segments, and build the `speakers` sidecar locally.
+  - Atlas-runs-known-speaker: run pyannote, fetch URL reference audio, compute embeddings/centroids, classify segments, and build the `speakers` sidecar locally.
    - Hybrid: upload required transcript/audio artifacts and let `studio` run the known-speaker postprocessor before producer-visible completion.
 9. Render requested transcript artifacts locally using the same Voxhelm format functions.
 10. Upload artifacts to MinIO/S3 under the attempt-scoped prefix returned by the claim response.
@@ -504,10 +547,12 @@ First-slice claim eligibility:
 - `job_type` must be `transcribe`.
 - `execution_mode` must be `remote_pull`.
 - `state` must be `queued` or stale `running` with attempts remaining.
+- requested transcript output formats must be included in the worker's advertised `output_formats` capability.
 - requested `model`/`backend` must be compatible with worker capabilities:
-  - `auto` can match any worker that advertises a configured default backend/model;
-  - explicit models require exact advertised support or a server-owned alias map;
+  - `auto`, `whisper-1`, and `gpt-4o-mini-transcribe` match workers advertising the configured default backend/model;
+  - explicit concrete models require exact advertised support or a server-owned alias map;
   - `whisperkit` should not match unless the worker explicitly advertises it.
+- successful claims return the server-resolved concrete `backend` and `model`; the producer-submitted aliases remain available as `requested_backend` and `requested_model`.
 - `diarization.enabled=false` or omitted can match a plain transcription-capable worker.
 - `diarization.strategy=pyannote` requires anonymous diarization capability.
 - `diarization.strategy=pyannote_known_speaker` requires known-speaker capability, the requested embedding model, reference-fetch support, and `transcript_speakers` artifact support.
@@ -573,9 +618,9 @@ Before implementation/deployment, validate manually:
 
 ### RW-4: Remote transcription worker command and packaging
 
-- Add a worker command/process, e.g. `voxhelm-remote-worker`, that polls/claims work, runs transcription, uploads artifacts, and reports result.
-- Make it runnable from a repository checkout with `uv run` and installable/runnable on a new machine with `uv tool install` or `uvx` once packaging is available.
-- Keep worker startup configuration to env file / CLI options for Voxhelm base URL, worker id/token, artifact credentials, model cache, backend/model, and optional Hugging Face token.
+- Implemented for repository checkouts: `voxhelm-remote-worker` heartbeats, claims one job at a time, materializes URL/staged-upload input, runs STT plus anonymous or Atlas-runs-known-speaker diarization, uploads source/transcript/sidecar artifacts, and reports completion/failure.
+- Still pending for full packaging: public PyPI publication and install/run validation with `uv tool install` or `uvx` on a new machine.
+- Worker startup configuration stays in env file / CLI options for Voxhelm base URL, worker id/token, artifact credentials, model cache, backend/model, and optional Hugging Face token.
 - Default to one concurrent job per worker.
 - Include structured logs with worker ID and Voxhelm job ID.
 

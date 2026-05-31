@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
+voxhelm-remote-worker = "jobs.remote_worker_cli:main"
 voxhelm-wyoming-stt = "transcriptions.wyoming:main"
 
 [project.optional-dependencies]
@@ -73,3 +74,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["config", "jobs", "operators", "synthesis", "transcriptions"]
+force-include = { "lane_scheduler.py" = "lane_scheduler.py" }

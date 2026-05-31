@@ -80,6 +80,11 @@ export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
 export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
+export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"
+export VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
+export VOXHELM_REMOTE_WORKER_LEASE_SECONDS="1800"
+export VOXHELM_REMOTE_WORKER_POLL_SECONDS="5"
+export VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS="3"
 export VOXHELM_BOOTSTRAP_OPERATOR_USERNAME="jochen"
 export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
@@ -141,12 +146,17 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
   }'
 ```
 
-Staged uploads are stored in Voxhelm's configured artifact backend before worker
-execution. The worker copies staged input into the normal job-owned source
-artifact, then deletes the temporary staged object immediately after
-materialization. Unclaimed staged uploads expire after
+Staged uploads are stored in Voxhelm's configured artifact backend before
+execution. Django Tasks jobs delete the temporary staged object immediately after
+materialization; remote worker jobs delete it after a successful completion
+records the worker-copied job-owned source artifact. Terminal remote failures
+release the staged upload claim so the same `upload_id` can be retried until the
+staged object expires. Unclaimed staged uploads expire after
 `VOXHELM_STAGED_INPUT_RETENTION_SECONDS` and are opportunistically cleaned on
 later staging/submission requests.
+If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
+staging, submitters must stage the media again; Voxhelm rejects `upload_id`
+values whose store identity no longer matches the active artifact store.
 
 Current scope note: batch staged uploads are audio-only in this slice. URL
 audio and URL video keep working on the existing path. Uploaded video and true
@@ -233,6 +243,116 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
 
 After the job succeeds, verify the JSON, DOTe, and Podlove artifacts contain
 `Speaker 1` / `Speaker 2` labels.
+
+## Remote Pull Transcription Workers
+
+Voxhelm can keep the producer-facing batch API unchanged while routing new
+batch transcription jobs to trusted HTTP pull workers:
+
+```bash
+export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="remote_pull"
+export VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
+export VOXHELM_ARTIFACT_BACKEND="s3"
+export VOXHELM_ARTIFACT_S3_ENDPOINT_URL="https://minio.example"
+export VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID="replace-me"
+export VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY="replace-me"
+export VOXHELM_ARTIFACT_BUCKET="voxhelm"
+```
+
+In `remote_pull` mode, `job_type=transcribe` submissions through `POST /v1/jobs`
+are persisted as normal queued Voxhelm jobs but are not enqueued into Django
+Tasks. `job_type=synthesize` continues to use Django Tasks. Switching
+`VOXHELM_TRANSCRIPTION_EXECUTION_MODE` back to `django_tasks` restores the
+studio-only local transcription path without a migration.
+`remote_pull` requires a valid `VOXHELM_WORKER_TOKENS` entry plus the shared S3
+artifact backend and complete S3 endpoint, credential, and bucket settings at
+startup; the local filesystem artifact backend is valid for `django_tasks` mode
+only. `VOXHELM_TRANSCRIPTION_EXECUTION_MODE` must be either `django_tasks` or
+`remote_pull`. The remote lease, poll, and max-attempt settings must be positive
+integers. URL inputs are validated against `VOXHELM_ALLOWED_URL_HOSTS` when the
+job is submitted, before a remote job can remain queued.
+
+Worker endpoints are internal and use a separate bearer-token domain from
+producer tokens. Startup configuration rejects any raw token value shared
+between `VOXHELM_BEARER_TOKENS` and `VOXHELM_WORKER_TOKENS`:
+
+- `POST /v1/internal/workers/heartbeat`
+- `POST /v1/internal/work/claim`
+- `POST /v1/internal/work/<job_id>/heartbeat`
+- `POST /v1/internal/work/<job_id>/complete`
+- `POST /v1/internal/work/<job_id>/fail`
+
+Claims use studio server time, a bounded lease, and an atomic conditional
+database update so concurrent workers cannot claim the same SQLite-backed job.
+Workers at their advertised/requested active-claim capacity receive no new claim.
+When a producer retries the same `task_ref`, Voxhelm reconciles any expired
+remote lease first: attempts that remain move back to `queued`, while exhausted
+attempts fail clearly.
+Claim responses snapshot the attempt-scoped artifact prefix and non-secret
+artifact-store identity on the job, and completion validates manifests against
+that leased snapshot even if `VOXHELM_ARTIFACT_PREFIX`, the filesystem root, or
+the S3 endpoint/bucket changes before the worker reports back. Voxhelm checks
+artifact object existence and size before the short settlement transaction so a
+slow object store does not hold SQLite's write lock. The committed artifact rows
+keep the winning store identity so producer downloads continue to read from the
+store that accepted the completion manifest.
+Workers must advertise supported transcript `output_formats`, concrete STT
+backend names, and concrete STT model names when claiming work. `auto`,
+`whisper-1`, and `gpt-4o-mini-transcribe` match the configured default backend
+and model; claim responses send that resolved concrete backend/model while
+preserving the submitted aliases as `requested_backend`/`requested_model`.
+Disabled workers are rejected before heartbeat state is updated.
+Disabling a worker stops new claims but does not block completion, failure, or
+lease heartbeat for a job the worker already owns. Worker completion accepts
+only the currently assigned worker and lease token.
+Completions must include a non-exposed job-owned source artifact plus the
+requested transcript artifacts. Artifacts must be reported under the claimed
+attempt prefix, for example `voxhelm/jobs/<job_id>/attempt-1/transcript.txt`;
+Voxhelm verifies that each reported object exists in the configured artifact
+store and that its stored size matches the manifest before marking the job
+succeeded. The producer still downloads winning artifacts through
+`GET /v1/jobs/<job_id>/artifacts/<name>`. Transcript and speaker-sidecar
+artifacts must use the exact expected MIME types before Voxhelm exposes them.
+
+Known-speaker jobs are claimable only by workers advertising the required
+pyannote/wespeaker speaker-sidecar capability. Known-speaker reference URLs are
+checked against `VOXHELM_ALLOWED_URL_HOSTS` at submission and again before a
+remote claim is handed out. Uploaded known-speaker reference clips are rejected
+before remote claim in this slice; use URL reference audio for remote-worker
+jobs. Completion metadata stores only type-checked scalar worker fields plus
+server-derived source, worker, attempt, and request metadata. URL completions
+keep the server-owned job input URL as `source_url` and ignore worker-supplied
+redirect URLs. URL-shaped strings, nested values, negative or non-finite
+timings/summary metrics, and private known-speaker reference
+URLs/ranges are not echoed through producer-visible job metadata. Speaker
+sidecars are accepted only for known-speaker jobs.
+
+Run a checkout-based worker on a trusted host with an env file containing the
+worker token, Voxhelm URL, shared artifact credentials, local STT/model cache
+settings, `VOXHELM_ALLOWED_URL_HOSTS`, and optional Hugging Face token:
+
+```bash
+uv run voxhelm-remote-worker \
+  --env-file /etc/voxhelm-worker/worker.env \
+  --once
+```
+
+Use `--once` for smoke tests; omit it under launchd or another supervisor for
+the long-running poll loop. The worker defaults to one active job, periodically
+heartbeats the leased job while local inference runs, uploads the source,
+optional extracted audio, requested transcript artifacts, and known-speaker
+`transcript.speakers.json` sidecar under the claimed attempt prefix, then posts
+the completion manifest.
+
+Operational note: the application endpoints still require worker auth, but the
+macmini/Traefik edge must also block `/v1/internal/*` on public routes unless a
+deliberately private worker route is configured.
+
+Current implementation status: the studio control-plane endpoints and
+`remote_pull` dispatch switch are implemented, and `voxhelm-remote-worker` is
+runnable from a repository checkout. Public PyPI publication, deployment on
+`atlas.local`, edge protection, and the production python-podcast proof remain
+follow-up work.
 
 ## Wyoming STT
 

@@ -12,6 +12,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from django_tasks import task_backends
 
+from jobs.artifacts import get_artifact_store
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
 from transcriptions.diarization import DiarizationParams, SpeakerTurn
@@ -121,6 +122,36 @@ def test_create_job_queued_with_dummy_backend(client, settings):
 
 
 @pytest.mark.django_db
+def test_task_ref_reuse_survives_transcription_execution_mode_switch(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE = "remote_pull"
+    payload = build_job_payload(task_ref="archive-item-mode-switch")
+
+    remote_response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE = "django_tasks"
+    local_response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert remote_response.status_code == 201
+    assert local_response.status_code == 200
+    assert local_response.json()["id"] == remote_response.json()["id"]
+    remote_job = Job.objects.get(id=remote_response.json()["id"])
+    assert remote_job.execution_mode == Job.ExecutionMode.REMOTE_PULL
+    assert not remote_job.django_task_id
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "diarization",
     [
@@ -202,6 +233,45 @@ def test_transcription_job_accepts_diarization_speaker_hints(client, settings):
 
 
 @pytest.mark.django_db
+def test_known_speaker_reference_urls_must_be_allowlisted(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="archive-item-known-speaker-blocked-reference")
+    payload["diarization"] = {
+        "enabled": True,
+        "strategy": "pyannote_known_speaker",
+        "known_speakers": [
+            {
+                "id": "12",
+                "name": "Johannes",
+                "references": [
+                    {
+                        "kind": "source_range",
+                        "audio": {
+                            "kind": "url",
+                            "url": "https://blocked.example.com/reference.m4a",
+                        },
+                        "start": 0.0,
+                        "end": 2.0,
+                    }
+                ],
+            }
+        ],
+    }
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "allowlist" in response.json()["error"]["message"]
+    assert not Job.objects.exists()
+
+
+@pytest.mark.django_db
 def test_job_submission_is_idempotent(client, settings):
     configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
@@ -223,6 +293,32 @@ def test_job_submission_is_idempotent(client, settings):
     assert first.status_code == 201
     assert second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_task_ref_retry_returns_existing_job_before_revalidating_url_allowlist(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    body = json.dumps(build_job_payload(task_ref="archive-item-allowlist-retry"))
+
+    first = client.post(
+        "/v1/jobs",
+        data=body,
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"other.example.com"}
+    retry = client.post(
+        "/v1/jobs",
+        data=body,
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert first.status_code == 201
+    assert retry.status_code == 200
+    assert first.json()["id"] == retry.json()["id"]
     assert Job.objects.count() == 1
 
 
@@ -586,6 +682,87 @@ def test_staged_audio_job_executes_and_serves_artifacts(client, settings, monkey
     )
     assert artifact_response.status_code == 200
     assert artifact_response.content.decode() == "Batch hello world"
+
+
+@pytest.mark.django_db
+def test_staged_audio_submission_rejects_upload_from_previous_artifact_backend(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    staged_response = stage_upload(
+        client,
+        name="private-episode.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+    settings.VOXHELM_ARTIFACT_BACKEND = "s3"
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "different artifact store" in response.json()["error"]["message"]
+    assert not Job.objects.exists()
+
+
+@pytest.mark.django_db
+def test_staged_audio_submission_rejects_upload_from_previous_artifact_root(
+    client,
+    settings,
+    tmp_path,
+):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    staged_response = stage_upload(
+        client,
+        name="private-episode.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+    settings.VOXHELM_ARTIFACT_ROOT = tmp_path / "new-artifact-root"
+    get_artifact_store.cache_clear()
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "different artifact store" in response.json()["error"]["message"]
+    assert not Job.objects.exists()
+
+
+@pytest.mark.django_db
+def test_staged_audio_submission_accepts_pre_migration_upload_without_identity(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+    staged_response = stage_upload(
+        client,
+        name="private-episode.mp3",
+        content=b"private-audio",
+        content_type="audio/mpeg",
+    )
+    upload_id = staged_response.json()["id"]
+    StagedMedia.objects.filter(id=upload_id).update(storage_identity={})
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(build_job_payload(input_data={"kind": "upload", "upload_id": upload_id})),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    staged = StagedMedia.objects.get(id=upload_id)
+    assert staged.storage_identity == {}
+    assert staged.claimed_by_job_id == Job.objects.get(id=response.json()["id"]).id
 
 
 @pytest.mark.django_db

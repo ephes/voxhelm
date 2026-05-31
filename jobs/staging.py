@@ -8,7 +8,11 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from jobs.artifacts import get_artifact_store
+from jobs.artifacts import (
+    current_artifact_store_identity,
+    get_artifact_store,
+    get_artifact_store_for_identity,
+)
 from jobs.media import (
     DownloadedMedia,
     detect_media_suffix,
@@ -61,6 +65,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
         )
         staged.storage_backend = stored.backend
         staged.storage_key = stored.key
+        staged.storage_identity = current_artifact_store_identity()
         staged.size_bytes = stored.size_bytes
         staged.save()
         return staged
@@ -97,6 +102,13 @@ def claim_staged_media_for_job(*, staged: StagedMedia, job: Job) -> None:
     staged.save(update_fields=["claimed_by_job", "claimed_at"])
 
 
+def release_staged_media_claims_for_job(*, job: Job) -> None:
+    StagedMedia.objects.filter(claimed_by_job=job).update(
+        claimed_by_job=None,
+        claimed_at=None,
+    )
+
+
 def materialize_staged_media(*, staged: StagedMedia) -> DownloadedMedia:
     suffix = detect_media_suffix(staged.original_filename, staged.content_type)
     if not suffix:
@@ -106,7 +118,10 @@ def materialize_staged_media(*, staged: StagedMedia) -> DownloadedMedia:
 
     target_path = reserve_temp_media_path(suffix=suffix)
     try:
-        get_artifact_store().download_file(key=staged.storage_key, destination_path=target_path)
+        get_artifact_store_for_identity(staged.storage_identity).download_file(
+            key=staged.storage_key,
+            destination_path=target_path,
+        )
     except Exception as exc:
         target_path.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to materialize staged input: {exc}") from exc
@@ -121,7 +136,7 @@ def materialize_staged_media(*, staged: StagedMedia) -> DownloadedMedia:
 
 def delete_staged_media(*, staged: StagedMedia, missing_ok: bool) -> None:
     try:
-        get_artifact_store().delete(key=staged.storage_key)
+        get_artifact_store_for_identity(staged.storage_identity).delete(key=staged.storage_key)
     except Exception:
         if not missing_ok:
             raise

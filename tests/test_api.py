@@ -11,7 +11,15 @@ from typing import Any, cast
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from config.settings import env_tokens
+from config.settings import (
+    env_tokens,
+    validate_disjoint_token_values,
+    validate_positive_int,
+    validate_remote_pull_artifact_backend,
+    validate_remote_pull_s3_configuration,
+    validate_remote_pull_worker_tokens,
+    validate_transcription_execution_mode,
+)
 from transcriptions.errors import ApiError
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
@@ -211,6 +219,104 @@ def test_env_tokens_rejects_reserved_label_in_json_syntax(monkeypatch):
         assert "reserved label" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("Expected reserved bearer token label to be rejected")
+
+
+def test_env_tokens_rejects_empty_token_values(monkeypatch):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKENS", "atlas= ")
+
+    with pytest.raises(ValueError, match="empty token value"):
+        env_tokens("VOXHELM_WORKER_TOKENS")
+
+
+def test_env_tokens_normalizes_json_labels_and_values(monkeypatch):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKENS", '{" atlas ": " atlas-token "}')
+
+    assert env_tokens("VOXHELM_WORKER_TOKENS") == {"atlas": "atlas-token"}
+
+
+def test_env_tokens_rejects_json_whitespace_token_values(monkeypatch):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKENS", '{"atlas": " "}')
+
+    with pytest.raises(ValueError, match="empty token value"):
+        env_tokens("VOXHELM_WORKER_TOKENS")
+
+
+def test_env_tokens_rejects_json_whitespace_labels(monkeypatch):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKENS", '{" ": "atlas-token"}')
+
+    with pytest.raises(ValueError, match="empty label"):
+        env_tokens("VOXHELM_WORKER_TOKENS")
+
+
+def test_worker_tokens_reject_producer_token_overlap():
+    with pytest.raises(ValueError, match="must not share bearer token values"):
+        validate_disjoint_token_values(
+            "VOXHELM_BEARER_TOKENS",
+            {"archive": "shared-secret"},
+            "VOXHELM_WORKER_TOKENS",
+            {"atlas": "shared-secret"},
+        )
+
+
+def test_validate_positive_int_rejects_zero_or_negative_values():
+    assert validate_positive_int("VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS", 1) == 1
+
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_positive_int("VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS", 0)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        validate_positive_int("VOXHELM_REMOTE_WORKER_LEASE_SECONDS", -1)
+
+
+def test_validate_transcription_execution_mode_rejects_unknown_values():
+    assert validate_transcription_execution_mode("django_tasks") == "django_tasks"
+    assert validate_transcription_execution_mode("remote_pull") == "remote_pull"
+
+    with pytest.raises(ValueError, match="VOXHELM_TRANSCRIPTION_EXECUTION_MODE"):
+        validate_transcription_execution_mode("remote-pull")
+
+
+def test_remote_pull_requires_worker_tokens():
+    with pytest.raises(ValueError, match="VOXHELM_WORKER_TOKENS"):
+        validate_remote_pull_worker_tokens("remote_pull", {})
+
+    validate_remote_pull_worker_tokens("remote_pull", {"atlas": "atlas-token"})
+    validate_remote_pull_worker_tokens("django_tasks", {})
+
+
+def test_remote_pull_requires_shared_artifact_backend():
+    with pytest.raises(ValueError, match="remote_pull requires VOXHELM_ARTIFACT_BACKEND"):
+        validate_remote_pull_artifact_backend("remote_pull", "filesystem")
+
+
+def test_remote_pull_allows_s3_artifact_backend():
+    validate_remote_pull_artifact_backend("remote_pull", "s3")
+    validate_remote_pull_artifact_backend("django_tasks", "filesystem")
+
+
+def test_remote_pull_requires_complete_s3_artifact_configuration():
+    with pytest.raises(ValueError, match="requires complete S3 artifact configuration"):
+        validate_remote_pull_s3_configuration(
+            "remote_pull",
+            "s3",
+            {
+                "VOXHELM_ARTIFACT_S3_ENDPOINT_URL": "",
+                "VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID": "access",
+                "VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY": "",
+                "VOXHELM_ARTIFACT_BUCKET": "voxhelm",
+            },
+        )
+
+
+def test_remote_pull_s3_configuration_allows_non_remote_modes():
+    validate_remote_pull_s3_configuration(
+        "django_tasks",
+        "filesystem",
+        {
+            "VOXHELM_ARTIFACT_S3_ENDPOINT_URL": "",
+            "VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID": "",
+        },
+    )
 
 
 def test_url_mode_uses_allowlist(client, monkeypatch, settings):

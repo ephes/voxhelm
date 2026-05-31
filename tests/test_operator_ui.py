@@ -12,6 +12,7 @@ from django.core.management import call_command
 from django.test import Client
 from django_tasks import task_backends
 
+from jobs.artifacts import get_artifact_store
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
@@ -279,6 +280,50 @@ def test_operator_artifact_rejects_other_operator_job(client):
     response = client.get(f"/transcripts/{job.id}/artifacts/text")
 
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_operator_artifact_uses_stored_artifact_identity(client, settings, tmp_path):
+    user = get_user_model().objects.create_user(username="jochen", password="secret", is_staff=True)
+    job = Job.objects.create(
+        producer="__operator_ui__",
+        operator=user,
+        job_type=Job.JobType.TRANSCRIBE,
+        lane=Job.Lane.BATCH,
+        dispatch_mode=Job.DispatchMode.SYNC,
+        priority=Job.Priority.NORMAL,
+        backend="auto",
+        model="gpt-4o-mini-transcribe",
+        input_data={"kind": "upload", "filename": "jochen.mp3"},
+        output_data={"formats": ["text"]},
+        context_data={},
+        state=Job.State.SUCCEEDED,
+        result_text="Operator transcript",
+    )
+    storage_key = f"voxhelm/jobs/{job.id}/transcript.txt"
+    old_root = settings.VOXHELM_ARTIFACT_ROOT
+    (old_root / storage_key).parent.mkdir(parents=True, exist_ok=True)
+    (old_root / storage_key).write_bytes(b"operator transcript")
+    JobArtifact.objects.create(
+        job=job,
+        name="transcript.txt",
+        kind=JobArtifact.Kind.TRANSCRIPT_TEXT,
+        format="text",
+        storage_backend="filesystem",
+        storage_key=storage_key,
+        storage_identity={"backend": "filesystem", "root": str(old_root.resolve())},
+        content_type="text/plain; charset=utf-8",
+        size_bytes=len(b"operator transcript"),
+        exposed=True,
+    )
+    settings.VOXHELM_ARTIFACT_ROOT = tmp_path / "new-artifact-root"
+    get_artifact_store.cache_clear()
+    client.force_login(user)
+
+    response = client.get(f"/transcripts/{job.id}/artifacts/text")
+
+    assert response.status_code == 200
+    assert response.content == b"operator transcript"
 
 
 @pytest.mark.django_db

@@ -1,7 +1,10 @@
 # Voxhelm Interface Map
 
 **Date:** 2026-03-11
-**Status:** Active architecture doc; M1-M3 core runtime slices, the operator transcript UI, the shared transcript-output follow-on, and the first C21 speaker-output slice are implemented as of 2026-05-19
+**Status:** Active architecture doc; M1-M3 core runtime slices, the operator
+transcript UI, the shared transcript-output follow-on, the first C21
+speaker-output slice, and the server-side remote-pull worker control-plane
+slice are implemented as of 2026-05-30
 
 This document is the active source of truth for Voxhelm's architecture boundaries, interface contracts, artifact access model, and auth domains.
 
@@ -180,7 +183,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 **Job types (current v1):** `transcribe`, `synthesize`
 **Job types (later):** `extract_audio`, `analyze_media`; a separate `diarize` job type remains deferred unless a later lifecycle needs it.
 
-For `job_type=transcribe`, `diarization` is optional. Omitted `diarization` is treated as `{"enabled": false}` and stored in normalized job output metadata. `{"enabled": true}` runs speaker diarization after STT and before artifact rendering. Enabled diarization may include pyannote speaker-count hints: either an exact `num_speakers` or `min_speakers` / `max_speakers` bounds. Malformed values, unknown diarization keys, disabled diarization with speaker hints, and exact-plus-bound combinations are rejected with `invalid_request_error`. If diarization is requested but the configured backend is unavailable, misconfigured, returns no usable turns, or returns turns that cannot align with transcript segments, the job fails clearly instead of emitting unlabeled speaker artifacts. Jobs with the same `task_ref` are deduplicated only when the normalized result-affecting transcription request fields match, including input, model, language, output formats, and diarization payload; output-format order is not significant. Synthesis jobs currently retain the original looser `task_ref` idempotency behavior for same-type non-failed jobs.
+For `job_type=transcribe`, `diarization` is optional. Omitted `diarization` is treated as `{"enabled": false}` and stored in normalized job output metadata. `{"enabled": true}` runs speaker diarization after STT and before artifact rendering. Enabled diarization may include pyannote speaker-count hints: either an exact `num_speakers` or `min_speakers` / `max_speakers` bounds. Malformed values, unknown diarization keys, disabled diarization with speaker hints, and exact-plus-bound combinations are rejected with `invalid_request_error`. If diarization is requested but the configured backend is unavailable, misconfigured, returns no usable turns, or returns turns that cannot align with transcript segments, the job fails clearly instead of emitting unlabeled speaker artifacts. Jobs with the same `task_ref` are deduplicated only when the normalized result-affecting transcription request fields match, including input, model, language, output formats, and diarization payload; output-format order is not significant. Deduplication reuses a matching non-failed job even if `VOXHELM_TRANSCRIPTION_EXECUTION_MODE` changed since submission, so producer retries do not duplicate work during mode switches. Synthesis jobs currently retain the original looser `task_ref` idempotency behavior for same-type non-failed jobs.
 
 **Input kinds (current M1b):** `url`
 **Input kinds (planned follow-ons):** `upload`, `minio_ref`
@@ -275,7 +278,7 @@ Internal worker endpoints for the accepted slice:
 | POST | `/v1/internal/work/{job_id}/complete` | Persist result metadata/artifact manifest and mark succeeded |
 | POST | `/v1/internal/work/{job_id}/fail` | Mark failed or requeue when attempts remain |
 
-Remote worker leases are controlled by `studio` server time. Claiming must be SQLite-safe: use short conditional updates with affected-row checks, not row-level locks. Lease tokens are internal and must never be exposed through producer job APIs. Worker-uploaded artifacts use attempt-scoped prefixes such as `jobs/<job_id>/attempt-<n>/...`; the database manifest selects the winning attempt so a zombie worker cannot overwrite producer-visible objects after lease reclaim. Known-speaker jobs may be claimed only by workers or hybrid paths that advertise the required pyannote/wespeaker/reference-fetch capability; they must not silently downgrade to plain transcription.
+Remote worker leases are controlled by `studio` server time. Claiming must be SQLite-safe: use short conditional updates with affected-row checks, not row-level locks. A worker that already has active leases at its recorded/requested capacity receives no new claim. Producer retries of the same `task_ref` reconcile stale remote leases before returning an existing job: attempts that remain are requeued with the stale lease cleared, while exhausted attempts fail. Lease tokens are internal and must never be exposed through producer job APIs. Worker-uploaded artifacts use attempt-scoped prefixes such as `jobs/<job_id>/attempt-<n>/...`; the prefix and non-secret artifact-store identity returned at claim time are snapshotted on the job and used for completion validation, and the database manifest selects the winning attempt so a zombie worker cannot overwrite producer-visible objects after lease reclaim. Known-speaker jobs may be claimed only by workers or hybrid paths that advertise the required pyannote/wespeaker/reference-fetch capability; they must not silently downgrade to plain transcription. Uploaded known-speaker reference clips are rejected before remote claim until the worker contract includes private reference delivery metadata; remote jobs should use URL reference audio.
 
 **Reviewed C13 runtime rule:** Any task step that enters local STT/TTS inference on `studio` must participate in the same host-wide lane scheduler as the HTTP API and Wyoming sidecar. Remote `atlas.local` inference is outside the `studio` host-local scheduler; a future local pull worker on `studio` must still acquire the C13 gate before inference.
 
@@ -345,6 +348,8 @@ voxhelm/
 **Auth:** S3-compatible credentials. Used only by the Voxhelm control plane and trusted Voxhelm worker processes — never exposed to producers/consumers.
 
 **Consumers:** Consumers retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. This keeps the producer/consumer security boundary narrow: producers and consumers never receive MinIO credentials. Django Tasks workers on `studio` read/write directly using S3 credentials. The accepted remote-worker slice extends the same internal credential domain to trusted remote worker hosts such as `atlas.local`, which upload job-owned artifacts and report manifests back to `studio`.
+
+`VOXHELM_TRANSCRIPTION_EXECUTION_MODE=remote_pull` requires at least one `VOXHELM_WORKER_TOKENS` entry, `VOXHELM_ARTIFACT_BACKEND=s3`, and complete S3 endpoint, credential, and bucket settings at startup. The execution mode value must be either `django_tasks` or `remote_pull`. The filesystem artifact backend is allowed for local `django_tasks` execution only; it is not a cross-host remote-worker transport.
 
 ---
 
@@ -423,9 +428,9 @@ Queued task execution is internal to the service. Producer auth and operator aut
 **Current settings shape:**
 - `TASKS["default"]["BACKEND"] = "django_tasks_db.backend.DatabaseBackend"`
 
-**Accepted remote transcription backend:** internal HTTP pull workers for batch transcription, configured separately from producer tokens. A setting such as `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull` selects whether transcription jobs are enqueued to Django Tasks or left for remote pull workers. Worker capabilities include STT backend/model support and, for the production goal, pyannote/wespeaker known-speaker support or an explicitly documented hybrid postprocessor path.
+**Accepted remote transcription backend:** internal HTTP pull workers for batch transcription, configured separately from producer tokens. A setting such as `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull` selects whether transcription jobs are enqueued to Django Tasks or left for remote pull workers. Worker capabilities include STT backend/model support, transcript output-format support, and, for the production goal, pyannote/wespeaker known-speaker support or an explicitly documented hybrid postprocessor path. Claim responses provide the server-resolved concrete STT backend/model plus the producer-submitted requested aliases for auditability.
 
-**Worker auth shape:** a protected worker token map such as `VOXHELM_WORKER_TOKENS="atlas=..."`. Worker tokens authorize only internal worker endpoints and are not accepted on producer APIs.
+**Worker auth shape:** a protected worker token map such as `VOXHELM_WORKER_TOKENS="atlas=..."`. Worker tokens authorize only internal worker endpoints and are not accepted on producer APIs. The configured raw token values must not overlap with producer bearer tokens; Voxhelm rejects overlapping values at startup. `remote_pull` startup also requires at least one configured worker token so jobs cannot be accepted into an unclaimable queue.
 
 **Worker packaging shape:** remote workers should run from the Voxhelm package as a worker-only command such as `voxhelm-remote-worker`. Adding a new machine should require only `uv tool install` or `uvx`, a Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional Hugging Face token; it must not require Django server setup or database credentials on the worker host.
 

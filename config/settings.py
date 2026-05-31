@@ -44,7 +44,7 @@ def env_tokens(name: str) -> dict[str, str]:
             raise ValueError(f"{name} must be a JSON object when JSON syntax is used.")
         return validate_bearer_token_labels(
             name,
-            {str(key): str(value) for key, value in parsed.items()},
+            {str(key).strip(): str(value).strip() for key, value in parsed.items()},
         )
 
     tokens: dict[str, str] = {}
@@ -59,12 +59,108 @@ def env_tokens(name: str) -> dict[str, str]:
     return validate_bearer_token_labels(name, tokens)
 
 
+def validate_unique_token_values(name: str, tokens: dict[str, str]) -> dict[str, str]:
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    for label, token in tokens.items():
+        if token in seen:
+            duplicates.append(f"{seen[token]} and {label}")
+        seen[token] = label
+    if duplicates:
+        joined = ", ".join(duplicates)
+        raise ValueError(f"{name} maps one bearer token to multiple labels: {joined}.")
+    return tokens
+
+
+def validate_disjoint_token_values(
+    left_name: str,
+    left_tokens: dict[str, str],
+    right_name: str,
+    right_tokens: dict[str, str],
+) -> dict[str, str]:
+    left_labels_by_token = {token: label for label, token in left_tokens.items()}
+    overlaps = [
+        f"{left_labels_by_token[token]} and {label}"
+        for label, token in right_tokens.items()
+        if token in left_labels_by_token
+    ]
+    if overlaps:
+        joined = ", ".join(overlaps)
+        raise ValueError(
+            f"{left_name} and {right_name} must not share bearer token values: {joined}."
+        )
+    return right_tokens
+
+
 def validate_bearer_token_labels(name: str, tokens: dict[str, str]) -> dict[str, str]:
+    empty_labels = [label for label in tokens if not label]
+    if empty_labels:
+        raise ValueError(f"{name} contains an empty label.")
+    empty_token_labels = sorted(label for label, token in tokens.items() if not token)
+    if empty_token_labels:
+        labels = ", ".join(empty_token_labels)
+        raise ValueError(f"{name} contains empty token value(s) for label(s): {labels}.")
     reserved = sorted(VOXHELM_RESERVED_BEARER_TOKEN_LABELS.intersection(tokens))
     if reserved:
         labels = ", ".join(reserved)
         raise ValueError(f"{name} contains reserved label(s): {labels}.")
     return tokens
+
+
+def validate_positive_int(name: str, value: int) -> int:
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+REMOTE_PULL_SHARED_ARTIFACT_BACKENDS = {"s3"}
+TRANSCRIPTION_EXECUTION_MODES = {"django_tasks", "remote_pull"}
+
+
+def validate_transcription_execution_mode(mode: str) -> str:
+    if mode not in TRANSCRIPTION_EXECUTION_MODES:
+        accepted = ", ".join(sorted(TRANSCRIPTION_EXECUTION_MODES))
+        raise ValueError(f"VOXHELM_TRANSCRIPTION_EXECUTION_MODE must be one of: {accepted}.")
+    return mode
+
+
+def validate_remote_pull_worker_tokens(
+    execution_mode: str,
+    worker_tokens: dict[str, str],
+) -> None:
+    if execution_mode == "remote_pull" and not worker_tokens:
+        raise ValueError(
+            "VOXHELM_TRANSCRIPTION_EXECUTION_MODE=remote_pull requires "
+            "VOXHELM_WORKER_TOKENS to configure at least one worker token."
+        )
+
+
+def validate_remote_pull_artifact_backend(execution_mode: str, artifact_backend: str) -> None:
+    if execution_mode != "remote_pull":
+        return
+    if artifact_backend in REMOTE_PULL_SHARED_ARTIFACT_BACKENDS:
+        return
+    accepted = ", ".join(sorted(REMOTE_PULL_SHARED_ARTIFACT_BACKENDS))
+    raise ValueError(
+        "VOXHELM_TRANSCRIPTION_EXECUTION_MODE=remote_pull requires "
+        f"VOXHELM_ARTIFACT_BACKEND to be one of: {accepted}."
+    )
+
+
+def validate_remote_pull_s3_configuration(
+    execution_mode: str,
+    artifact_backend: str,
+    values: dict[str, str],
+) -> None:
+    if execution_mode != "remote_pull" or artifact_backend != "s3":
+        return
+    missing = sorted(name for name, value in values.items() if not value)
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(
+            "VOXHELM_TRANSCRIPTION_EXECUTION_MODE=remote_pull requires complete "
+            f"S3 artifact configuration: {joined}."
+        )
 
 
 def get_accepted_stt_models() -> set[str]:
@@ -145,6 +241,15 @@ LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/"
 
 VOXHELM_BEARER_TOKENS = env_tokens("VOXHELM_BEARER_TOKENS")
+VOXHELM_WORKER_TOKENS = validate_disjoint_token_values(
+    "VOXHELM_BEARER_TOKENS",
+    VOXHELM_BEARER_TOKENS,
+    "VOXHELM_WORKER_TOKENS",
+    validate_unique_token_values(
+        "VOXHELM_WORKER_TOKENS",
+        env_tokens("VOXHELM_WORKER_TOKENS"),
+    ),
+)
 VOXHELM_STT_BACKEND = os.getenv("VOXHELM_STT_BACKEND", "whispercpp").strip()
 VOXHELM_STT_FALLBACK_BACKEND = os.getenv("VOXHELM_STT_FALLBACK_BACKEND", "mlx").strip()
 VOXHELM_MLX_MODEL = os.getenv("VOXHELM_MLX_MODEL", "mlx-community/whisper-large-v3-mlx")
@@ -260,8 +365,7 @@ VOXHELM_ACCEPTED_SPEECH_MODELS = {
 }
 VOXHELM_TASK_QUEUE = os.getenv("VOXHELM_TASK_QUEUE", "default")
 VOXHELM_FFMPEG_BIN = os.getenv("VOXHELM_FFMPEG_BIN", "ffmpeg")
-
-VOXHELM_ARTIFACT_BACKEND = os.getenv("VOXHELM_ARTIFACT_BACKEND", "filesystem")
+VOXHELM_ARTIFACT_BACKEND = os.getenv("VOXHELM_ARTIFACT_BACKEND", "filesystem").strip()
 VOXHELM_ARTIFACT_ROOT = Path(
     os.getenv("VOXHELM_ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifacts"))
 )
@@ -276,6 +380,42 @@ VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY = os.getenv(
 VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE = env_bool(
     "VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE",
     default=True,
+)
+VOXHELM_TRANSCRIPTION_EXECUTION_MODE = validate_transcription_execution_mode(
+    os.getenv(
+        "VOXHELM_TRANSCRIPTION_EXECUTION_MODE",
+        "django_tasks",
+    ).strip()
+)
+VOXHELM_REMOTE_WORKER_LEASE_SECONDS = validate_positive_int(
+    "VOXHELM_REMOTE_WORKER_LEASE_SECONDS",
+    int(os.getenv("VOXHELM_REMOTE_WORKER_LEASE_SECONDS", str(30 * 60))),
+)
+VOXHELM_REMOTE_WORKER_POLL_SECONDS = validate_positive_int(
+    "VOXHELM_REMOTE_WORKER_POLL_SECONDS",
+    int(os.getenv("VOXHELM_REMOTE_WORKER_POLL_SECONDS", "5")),
+)
+VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = validate_positive_int(
+    "VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS",
+    int(os.getenv("VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS", "3")),
+)
+validate_remote_pull_worker_tokens(
+    VOXHELM_TRANSCRIPTION_EXECUTION_MODE,
+    VOXHELM_WORKER_TOKENS,
+)
+validate_remote_pull_artifact_backend(
+    VOXHELM_TRANSCRIPTION_EXECUTION_MODE,
+    VOXHELM_ARTIFACT_BACKEND,
+)
+validate_remote_pull_s3_configuration(
+    VOXHELM_TRANSCRIPTION_EXECUTION_MODE,
+    VOXHELM_ARTIFACT_BACKEND,
+    {
+        "VOXHELM_ARTIFACT_S3_ENDPOINT_URL": VOXHELM_ARTIFACT_S3_ENDPOINT_URL,
+        "VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID": VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID,
+        "VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY": VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY,
+        "VOXHELM_ARTIFACT_BUCKET": VOXHELM_ARTIFACT_BUCKET,
+    },
 )
 
 TASKS = {

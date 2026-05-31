@@ -10,18 +10,20 @@ from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from django_tasks import default_task_backend
 from django_tasks.base import TaskResultStatus
 from django_tasks.exceptions import TaskResultDoesNotExist
 
 from config.settings import get_batch_accepted_stt_models
-from jobs.artifacts import get_artifact_store
+from jobs.artifacts import current_artifact_store_identity, get_artifact_store
 from jobs.media import (
     DownloadedMedia,
     download_allowed_media,
     extract_audio_from_video,
     is_video_path,
+    validate_allowed_media_url,
 )
 from jobs.models import Job, JobArtifact, StagedMedia
 from jobs.staging import (
@@ -30,6 +32,7 @@ from jobs.staging import (
     delete_staged_media,
     get_staged_media_for_submission,
     materialize_staged_media,
+    release_staged_media_claims_for_job,
 )
 from synthesis.service import (
     AUDIO_OUTPUT_FORMATS,
@@ -111,6 +114,7 @@ def create_job_from_payload_for_actor(
     request = parse_job_request(payload)
     from jobs.tasks import run_synthesis_job, run_transcription_job
 
+    execution_mode = execution_mode_for_request(request)
     if request.task_ref:
         existing_jobs = (
             Job.objects.filter(producer=producer, task_ref=request.task_ref)
@@ -119,12 +123,17 @@ def create_job_from_payload_for_actor(
         )
         for existing in existing_jobs.iterator():
             if existing_job_matches_request(existing, request):
-                reconcile_job_state(existing)
-                return existing, False
+                reconciled = reconcile_job_state(existing)
+                if reconciled.state == Job.State.FAILED:
+                    continue
+                return reconciled, False
+
+    validate_job_request_media_urls(request)
 
     task_callable = (
         run_synthesis_job if request.job_type == Job.JobType.SYNTHESIZE else run_transcription_job
     )
+    enqueue_django_task = execution_mode == Job.ExecutionMode.DJANGO_TASKS
     if request.job_type == Job.JobType.TRANSCRIBE and request.input_data.get("kind") == "upload":
         cleanup_expired_staged_media(exclude_upload_id=str(request.input_data["upload_id"]))
 
@@ -132,16 +141,24 @@ def create_job_from_payload_for_actor(
         staged_media: StagedMedia | None = None
         input_data = request.input_data
         if request.job_type == Job.JobType.TRANSCRIBE and input_data.get("kind") == "upload":
+            reconcile_remote_staged_upload_claim_for_submission(
+                producer=producer,
+                upload_id=str(input_data["upload_id"]),
+            )
             staged_media = get_staged_media_for_submission(
                 producer=producer,
                 upload_id=str(input_data["upload_id"]),
             )
+            validate_staged_media_backend_for_submission(staged=staged_media)
             input_data = {
                 "kind": "upload",
                 "upload_id": str(staged_media.id),
                 "filename": staged_media.original_filename,
                 "content_type": staged_media.content_type,
                 "size_bytes": staged_media.size_bytes,
+                "staged_storage_backend": staged_media.storage_backend,
+                "staged_storage_key": staged_media.storage_key,
+                "staged_storage_identity": staged_media.storage_identity,
             }
         output_data: dict[str, Any] = {"formats": request.output_formats}
         if request.job_type == Job.JobType.TRANSCRIBE:
@@ -154,6 +171,7 @@ def create_job_from_payload_for_actor(
             job_type=request.job_type,
             lane=request.lane,
             dispatch_mode=Job.DispatchMode.BATCH,
+            execution_mode=execution_mode,
             priority=request.priority,
             backend=request.backend,
             model=request.model,
@@ -162,19 +180,71 @@ def create_job_from_payload_for_actor(
             output_data=output_data,
             context_data=request.context,
             state=Job.State.QUEUED,
+            max_attempts=settings.VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS,
         )
         if staged_media is not None:
             claim_staged_media_for_job(staged=staged_media, job=job)
-        task_result = task_callable.using(
-            priority=PRIORITY_TO_TASK_PRIORITY[Job.Priority(request.priority)],
-            queue_name=settings.VOXHELM_TASK_QUEUE,
-        ).enqueue(str(job.id))
-        job.django_task_id = str(task_result.id)
-        job.save(update_fields=["django_task_id", "updated_at"])
+        if enqueue_django_task:
+            task_result = task_callable.using(
+                priority=PRIORITY_TO_TASK_PRIORITY[Job.Priority(request.priority)],
+                queue_name=settings.VOXHELM_TASK_QUEUE,
+            ).enqueue(str(job.id))
+            job.django_task_id = str(task_result.id)
+            job.save(update_fields=["django_task_id", "updated_at"])
 
     job.refresh_from_db()
     reconcile_job_state(job)
     return job, True
+
+
+def reconcile_remote_staged_upload_claim_for_submission(*, producer: str, upload_id: str) -> None:
+    try:
+        staged = StagedMedia.objects.select_related("claimed_by_job").get(
+            id=upload_id,
+            producer=producer,
+        )
+    except (StagedMedia.DoesNotExist, ValueError):
+        return
+    job = staged.claimed_by_job
+    if job is None or job.execution_mode != Job.ExecutionMode.REMOTE_PULL:
+        return
+    reconcile_remote_job_state(job)
+    if job.state == Job.State.FAILED:
+        release_staged_media_claims_for_job(job=job)
+
+
+def validate_staged_media_backend_for_submission(*, staged: StagedMedia) -> None:
+    current_identity = current_artifact_store_identity()
+    if (
+        staged.storage_backend == current_identity.get("backend")
+        and staged.storage_identity == current_identity
+    ):
+        return
+    if not staged.storage_identity and staged.storage_backend == current_identity.get("backend"):
+        return
+    raise ApiError(
+        "input.upload_id was staged with a different artifact store. Stage the media again."
+    )
+
+
+def execution_mode_for_request(request: JobRequest) -> str:
+    if request.job_type != Job.JobType.TRANSCRIBE:
+        return Job.ExecutionMode.DJANGO_TASKS
+    mode = settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE
+    if mode not in Job.ExecutionMode.values:
+        accepted = ", ".join(sorted(Job.ExecutionMode.values))
+        raise RuntimeError(
+            "VOXHELM_TRANSCRIPTION_EXECUTION_MODE must be one of: " f"{accepted}."
+        )
+    return mode
+
+
+def validate_job_request_media_urls(request: JobRequest) -> None:
+    if request.job_type != Job.JobType.TRANSCRIBE:
+        return
+    if request.input_data.get("kind") == "url":
+        validate_allowed_media_url(str(request.input_data.get("url") or ""))
+    validate_known_speaker_reference_urls(request.diarization)
 
 
 def create_operator_sync_transcription(
@@ -194,6 +264,7 @@ def create_operator_sync_transcription(
         job_type=Job.JobType.TRANSCRIBE,
         lane=Job.Lane.BATCH,
         dispatch_mode=Job.DispatchMode.SYNC,
+        execution_mode=Job.ExecutionMode.DJANGO_TASKS,
         priority=Job.Priority.NORMAL,
         backend="auto",
         model=request_model,
@@ -289,7 +360,10 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
     )
 
 
-def existing_job_matches_request(existing: Job, request: JobRequest) -> bool:
+def existing_job_matches_request(
+    existing: Job,
+    request: JobRequest,
+) -> bool:
     if existing.job_type != request.job_type:
         return False
     if request.job_type != Job.JobType.TRANSCRIBE:
@@ -555,6 +629,29 @@ def parse_reference_audio(value: object) -> dict[str, Any]:
             raise ApiError("An upload reference audio requires audio.upload_id.")
         return {"kind": "upload", "upload_id": ensure_uuid_string(upload_id, "audio.upload_id")}
     raise ApiError("reference audio.kind must be 'url' or 'upload'.")
+
+
+def validate_known_speaker_reference_urls(diarization: object) -> None:
+    if not isinstance(diarization, dict):
+        return
+    if diarization.get("strategy") != KNOWN_SPEAKER_STRATEGY:
+        return
+    known_speakers = diarization.get("known_speakers")
+    if not isinstance(known_speakers, list):
+        return
+    for speaker in known_speakers:
+        if not isinstance(speaker, dict):
+            continue
+        references = speaker.get("references")
+        if not isinstance(references, list):
+            continue
+        for reference in references:
+            if not isinstance(reference, dict):
+                continue
+            audio = reference.get("audio")
+            if not isinstance(audio, dict) or audio.get("kind") != "url":
+                continue
+            validate_allowed_media_url(str(audio.get("url") or ""))
 
 
 def parse_known_speaker_config(value: object) -> dict[str, Any]:
@@ -1223,6 +1320,7 @@ def create_or_replace_artifact(
             "format": format_name,
             "storage_backend": stored.backend,
             "storage_key": stored.key,
+            "storage_identity": current_artifact_store_identity(),
             "content_type": content_type,
             "size_bytes": stored.size_bytes,
             "exposed": exposed,
@@ -1252,6 +1350,7 @@ def create_or_replace_artifact_from_file(
             "format": format_name,
             "storage_backend": stored.backend,
             "storage_key": stored.key,
+            "storage_identity": current_artifact_store_identity(),
             "content_type": content_type,
             "size_bytes": stored.size_bytes,
             "exposed": exposed,
@@ -1304,6 +1403,8 @@ def isoformat_or_none(value) -> str | None:
 
 
 def reconcile_job_state(job: Job) -> Job:
+    if reconcile_remote_job_state(job):
+        return job
     if not job.django_task_id or not default_task_backend.supports_get_result:
         return job
     try:
@@ -1329,6 +1430,72 @@ def reconcile_job_state(job: Job) -> Job:
         updates.append("updated_at")
         job.save(update_fields=updates)
     return job
+
+
+def reconcile_remote_job_state(job: Job) -> bool:
+    now = timezone.now()
+    if (
+        job.execution_mode != Job.ExecutionMode.REMOTE_PULL
+        or job.state != Job.State.RUNNING
+        or job.lease_expires_at is None
+        or job.lease_expires_at >= now
+    ):
+        return False
+    if job.attempt_count < job.max_attempts:
+        updated = Job.objects.filter(
+            id=job.id,
+            execution_mode=Job.ExecutionMode.REMOTE_PULL,
+            state=Job.State.RUNNING,
+            lease_expires_at__lt=now,
+            attempt_count__lt=F("max_attempts"),
+        ).update(
+            state=Job.State.QUEUED,
+            assigned_worker_id="",
+            lease_token_hash="",
+            lease_expires_at=None,
+            leased_artifact_prefix="",
+            leased_artifact_store={},
+            last_worker_heartbeat_at=None,
+            worker_progress={},
+            updated_at=now,
+        )
+        if updated != 1:
+            job.refresh_from_db()
+            return False
+        job.state = Job.State.QUEUED
+        job.assigned_worker_id = ""
+        job.lease_token_hash = ""
+        job.lease_expires_at = None
+        job.leased_artifact_prefix = ""
+        job.leased_artifact_store = {}
+        job.last_worker_heartbeat_at = None
+        job.worker_progress = {}
+        return True
+
+    error_detail = "Remote worker lease expired after maximum attempts."
+    updated = Job.objects.filter(
+        id=job.id,
+        execution_mode=Job.ExecutionMode.REMOTE_PULL,
+        state=Job.State.RUNNING,
+        lease_expires_at__lt=now,
+        attempt_count__gte=F("max_attempts"),
+    ).update(
+        state=Job.State.FAILED,
+        error_detail=error_detail,
+        finished_at=now,
+        worker_progress={},
+        updated_at=now,
+    )
+    if updated != 1:
+        job.refresh_from_db()
+        return False
+
+    release_staged_media_claims_for_job(job=job)
+    job.state = Job.State.FAILED
+    job.error_detail = error_detail
+    job.finished_at = now
+    job.worker_progress = {}
+    return True
 
 
 def map_task_status(status: TaskResultStatus) -> str | None:

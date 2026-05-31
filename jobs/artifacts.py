@@ -4,7 +4,7 @@ import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import boto3
 from botocore.config import Config
@@ -28,6 +28,8 @@ class ArtifactStore(Protocol):
     def read_bytes(self, *, key: str) -> bytes: ...
 
     def download_file(self, *, key: str, destination_path: Path) -> None: ...
+
+    def stat(self, *, key: str) -> StoredArtifact: ...
 
     def delete(self, *, key: str) -> None: ...
 
@@ -67,6 +69,14 @@ class FilesystemArtifactStore:
         source = self.root / key
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination_path)
+
+    def stat(self, *, key: str) -> StoredArtifact:
+        target = self.root / key
+        return StoredArtifact(
+            backend=self.backend_name,
+            key=key,
+            size_bytes=target.stat().st_size,
+        )
 
     def delete(self, *, key: str) -> None:
         target = self.root / key
@@ -130,6 +140,14 @@ class S3ArtifactStore:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         self.client.download_file(self.bucket, key, str(destination_path))
 
+    def stat(self, *, key: str) -> StoredArtifact:
+        response = self.client.head_object(Bucket=self.bucket, Key=key)
+        return StoredArtifact(
+            backend=self.backend_name,
+            key=key,
+            size_bytes=int(response["ContentLength"]),
+        )
+
     def delete(self, *, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
 
@@ -157,5 +175,59 @@ def get_artifact_store() -> ArtifactStore:
             secret_access_key=settings.VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY,
             bucket=settings.VOXHELM_ARTIFACT_BUCKET,
             force_path_style=settings.VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE,
+        )
+    raise RuntimeError(f"Unsupported artifact backend '{backend}'.")
+
+
+def current_artifact_store_identity() -> dict[str, Any]:
+    backend = settings.VOXHELM_ARTIFACT_BACKEND
+    if backend == "filesystem":
+        return {
+            "backend": backend,
+            "root": str(settings.VOXHELM_ARTIFACT_ROOT.expanduser().resolve()),
+        }
+    if backend == "s3":
+        return {
+            "backend": backend,
+            "endpoint_url": settings.VOXHELM_ARTIFACT_S3_ENDPOINT_URL,
+            "region": settings.VOXHELM_ARTIFACT_S3_REGION,
+            "bucket": settings.VOXHELM_ARTIFACT_BUCKET,
+            "force_path_style": settings.VOXHELM_ARTIFACT_S3_FORCE_PATH_STYLE,
+        }
+    raise RuntimeError(f"Unsupported artifact backend '{backend}'.")
+
+
+def get_artifact_store_for_identity(identity: dict[str, Any] | None) -> ArtifactStore:
+    if not identity or identity == current_artifact_store_identity():
+        return get_artifact_store()
+    backend = identity.get("backend")
+    if backend == "filesystem":
+        root = identity.get("root")
+        if not isinstance(root, str) or not root:
+            raise RuntimeError("Filesystem artifact store identity is missing root.")
+        return FilesystemArtifactStore(root=Path(root))
+    if backend == "s3":
+        required = {
+            "VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID": settings.VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID,
+            "VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY": settings.VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            joined = ", ".join(sorted(missing))
+            raise RuntimeError(f"S3 artifact backend is missing configuration: {joined}.")
+        endpoint_url = identity.get("endpoint_url")
+        bucket = identity.get("bucket")
+        region = identity.get("region") or settings.VOXHELM_ARTIFACT_S3_REGION
+        if not isinstance(endpoint_url, str) or not endpoint_url:
+            raise RuntimeError("S3 artifact store identity is missing endpoint_url.")
+        if not isinstance(bucket, str) or not bucket:
+            raise RuntimeError("S3 artifact store identity is missing bucket.")
+        return S3ArtifactStore(
+            endpoint_url=endpoint_url,
+            region_name=str(region),
+            access_key_id=settings.VOXHELM_ARTIFACT_S3_ACCESS_KEY_ID,
+            secret_access_key=settings.VOXHELM_ARTIFACT_S3_SECRET_ACCESS_KEY,
+            bucket=bucket,
+            force_path_style=identity.get("force_path_style") is not False,
         )
     raise RuntimeError(f"Unsupported artifact backend '{backend}'.")

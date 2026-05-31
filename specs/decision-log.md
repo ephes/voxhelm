@@ -513,7 +513,10 @@ The follow-on slice should be defined as:
 
 ## D-23: How should Voxhelm add `atlas.local` as a second transcription worker?
 
-**Status:** Accepted for the next remote-worker slice; no implementation started. Detailed implementation concept: `specs/remote-transcription-workers.md`.
+**Status:** Accepted. The server-side control-plane slice is implemented as of
+2026-05-30; the installable worker command, public PyPI publication, deployment,
+and production `atlas.local` validation remain pending. Detailed implementation
+concept: `specs/remote-transcription-workers.md`.
 
 **Context:** Voxhelm's producer-facing batch API is already stable, but batch execution currently assumes local Django Tasks workers on `studio`. A second Apple Silicon machine, `atlas.local`, can reduce the transcription backlog if it connects to Voxhelm, claims work, runs STT and the required diarization/known-speaker path, uploads artifacts, and reports results without changing consumer APIs.
 

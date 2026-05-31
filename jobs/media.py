@@ -93,7 +93,7 @@ def write_uploaded_media_to_tempfile(chunks: Iterable[bytes], *, suffix: str) ->
     return Path(file_handle.name)
 
 
-def download_allowed_media(*, source_url: str) -> DownloadedMedia:
+def validate_allowed_media_url(source_url: str) -> None:
     parsed = urlparse(source_url)
     hostname = (parsed.hostname or "").lower()
     if not hostname:
@@ -101,13 +101,17 @@ def download_allowed_media(*, source_url: str) -> DownloadedMedia:
     if hostname not in settings.VOXHELM_ALLOWED_URL_HOSTS:
         raise ApiError("URL host is not in the configured allowlist.")
     if parsed.scheme == "https":
-        pass
+        return
     elif parsed.scheme == "http":
         if hostname not in settings.VOXHELM_TRUSTED_HTTP_HOSTS:
             raise ApiError("Plain HTTP URLs are only allowed for trusted internal hosts.")
+        return
     else:
         raise ApiError("Only https URLs are allowed by default.")
 
+
+def download_allowed_media(*, source_url: str) -> DownloadedMedia:
+    validate_allowed_media_url(source_url)
     request = Request(
         source_url,
         headers={"User-Agent": "voxhelm/0.1", "Accept": "audio/*,video/*;q=1.0,*/*;q=0.1"},

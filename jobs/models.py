@@ -18,6 +18,10 @@ class Job(models.Model):
         SYNC = "sync", "Sync"
         BATCH = "batch", "Batch"
 
+    class ExecutionMode(models.TextChoices):
+        DJANGO_TASKS = "django_tasks", "Django Tasks"
+        REMOTE_PULL = "remote_pull", "Remote pull"
+
     class Priority(models.TextChoices):
         LOW = "low", "Low"
         NORMAL = "normal", "Normal"
@@ -48,6 +52,11 @@ class Job(models.Model):
         choices=DispatchMode.choices,
         default=DispatchMode.BATCH,
     )
+    execution_mode = models.CharField(
+        max_length=32,
+        choices=ExecutionMode.choices,
+        default=ExecutionMode.DJANGO_TASKS,
+    )
     priority = models.CharField(
         max_length=32,
         choices=Priority.choices,
@@ -61,6 +70,15 @@ class Job(models.Model):
     context_data = models.JSONField(default=dict)
     state = models.CharField(max_length=32, choices=State.choices, default=State.QUEUED)
     django_task_id = models.CharField(max_length=64, blank=True)
+    assigned_worker_id = models.CharField(max_length=64, blank=True)
+    lease_token_hash = models.CharField(max_length=64, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=3)
+    leased_artifact_prefix = models.CharField(max_length=512, blank=True)
+    leased_artifact_store = models.JSONField(default=dict)
+    last_worker_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    worker_progress = models.JSONField(default=dict)
     error_detail = models.TextField(blank=True)
     result_text = models.TextField(blank=True)
     result_metadata = models.JSONField(default=dict)
@@ -75,7 +93,25 @@ class Job(models.Model):
             models.Index(fields=["producer", "task_ref"]),
             models.Index(fields=["operator", "created_at"]),
             models.Index(fields=["state"]),
+            models.Index(fields=["execution_mode", "state", "priority", "created_at"]),
+            models.Index(fields=["assigned_worker_id", "state"]),
+            models.Index(fields=["lease_expires_at"]),
         ]
+
+
+class Worker(models.Model):
+    worker_id = models.CharField(max_length=64, primary_key=True)
+    hostname = models.CharField(max_length=255, blank=True)
+    enabled = models.BooleanField(default=True)
+    capabilities = models.JSONField(default=dict)
+    concurrency = models.PositiveIntegerField(default=1)
+    running_job_ids = models.JSONField(default=list)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["worker_id"]
 
 
 class JobArtifact(models.Model):
@@ -99,6 +135,7 @@ class JobArtifact(models.Model):
     format = models.CharField(max_length=32, blank=True)
     storage_backend = models.CharField(max_length=32)
     storage_key = models.CharField(max_length=512)
+    storage_identity = models.JSONField(default=dict)
     content_type = models.CharField(max_length=255)
     size_bytes = models.PositiveBigIntegerField(default=0)
     exposed = models.BooleanField(default=True)
@@ -119,6 +156,7 @@ class StagedMedia(models.Model):
     size_bytes = models.PositiveBigIntegerField(default=0)
     storage_backend = models.CharField(max_length=32)
     storage_key = models.CharField(max_length=512)
+    storage_identity = models.JSONField(default=dict)
     claimed_by_job = models.ForeignKey(
         Job,
         on_delete=models.SET_NULL,
