@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +102,31 @@ def test_transcribe_claim_audio_sanitizes_repeated_loop(monkeypatch: Any) -> Non
     assert len(result.segments) == 1
     assert result.segments[0].text == "Das ist auch sehr subjektiv."
     assert result.text == "Das ist auch sehr subjektiv."
+
+
+def test_worker_version_reports_installed_package_version() -> None:
+    try:
+        expected = importlib.metadata.version("voxhelm")
+    except importlib.metadata.PackageNotFoundError:
+        expected = "unknown"
+    assert worker_cli.worker_version() == expected
+
+
+def test_log_startup_emits_version_and_worker_id(caplog: Any) -> None:
+    config = worker_cli.WorkerConfig(
+        base_url="http://voxhelm.local",
+        worker_id="studio",
+        token="token",
+        hostname="studio.tailde2ec.ts.net",
+    )
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        worker_cli.log_startup(config)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        f"version={worker_cli.worker_version()}" in message and "worker_id=studio" in message
+        for message in messages
+    )
 
 
 def base_claim() -> dict[str, Any]:

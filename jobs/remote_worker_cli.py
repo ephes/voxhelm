@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import json
 import logging
@@ -986,6 +987,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def worker_version() -> str:
+    try:
+        return importlib.metadata.version("voxhelm")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def log_startup(config: WorkerConfig) -> None:
+    LOGGER.info(
+        "voxhelm-remote-worker starting version=%s worker_id=%s hostname=%s base_url=%s",
+        worker_version(),
+        config.worker_id,
+        config.hostname,
+        config.base_url,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -998,6 +1016,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     setup_django_for_worker()
     config = parse_worker_config(args)
+    log_startup(config)
     capabilities = build_capabilities()
     client = WorkerClient(config=config)
 
