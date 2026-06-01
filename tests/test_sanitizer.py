@@ -201,6 +201,12 @@ def test_preserves_genuine_speech_about_subtitling() -> None:
                              text="Untertitelung ist ein unterschätztes Handwerk."),
         TranscriptionSegment(id=2, start=8.0, end=12.0,
                              text="Untertitel der ARD waren früher Teletext."),
+        # Sentences that continue past the credit shape into a real predicate
+        # must survive: a credit cue terminates at the org name or a year.
+        TranscriptionSegment(id=3, start=12.0, end=16.0,
+                             text="Untertitelung des Films war schlecht synchronisiert."),
+        TranscriptionSegment(id=4, start=16.0, end=20.0,
+                             text="Untertitel beim ZDF funktionieren inzwischen automatisch."),
     ]
     result = sanitize_result(_result(segments))
 

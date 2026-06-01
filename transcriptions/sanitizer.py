@@ -40,19 +40,24 @@ _DOT_RUN_PATTERN = re.compile(r"\.(?:\s*\.){3,}")
 # loop detection.
 _EDGE_CHARS = " \t\r\n.,;:!?-–—…\"'`„“”»«()[]{}"
 
-# Subtitle-credit hallucination family. Each pattern requires a tell-tale credit
-# token ("untertitelung des …", "im Auftrag", a broadcaster like ZDF, or
-# amara.org) so that genuine talk *about* subtitles or a broadcaster as a topic
-# ("Das ZDF hat darüber berichtet.", "Untertitel sind wichtig für die
-# Barrierefreiheit.", "Untertitel von Filmen sind oft schlecht.",
-# "Untertitelung ist ein Handwerk.") is left untouched. Documented production
-# artifacts are ZDF/funk credits and Amara.org; ARD-style credits are not in the
-# observed set and are deliberately left alone to avoid false positives.
+# Subtitle-credit hallucination family. Each pattern matches the *whole* cue as a
+# terminal attribution — a credit ends at the broadcaster name (optionally
+# "für funk") with an optional trailing year, or trails off on "amara.org". This
+# is what distinguishes a credit from genuine topic talk that merely mentions
+# subtitles or a broadcaster and then continues into a real predicate. All of
+# these are therefore left untouched: "Das ZDF hat darüber berichtet.",
+# "Untertitel sind wichtig für die Barrierefreiheit.", "Untertitel von Filmen
+# sind oft schlecht.", "Untertitelung ist ein Handwerk.", "Untertitelung des
+# Films war schlecht synchronisiert.", "Untertitel beim ZDF funktionieren
+# automatisch." Documented production artifacts are ZDF/funk credits and
+# Amara.org; broadcasters outside that observed set are deliberately left alone.
 _CREDIT_PATTERNS = (
-    re.compile(r"^untertitelung\s+des\b.*"),
-    re.compile(r"^untertitel(?:ung)?\s+im auftrag\b.*"),
-    re.compile(r"^untertitel\b.*\bzdf\b.*"),
-    re.compile(r".*\bamara\.org\b.*"),
+    re.compile(
+        r"^untertitel(?:ung)?(?:\s+im auftrag)?\s+des\s+zdf"
+        r"(?:\s+für\s+funk)?(?:[,\s]+\d{4})?$"
+    ),
+    re.compile(r"^untertitel(?:ung)?\b.*\bamara\.org$"),
+    re.compile(r"^amara\.org$"),
 )
 
 
