@@ -370,16 +370,17 @@ settings, `VOXHELM_ALLOWED_URL_HOSTS`, and optional Hugging Face token. The
 running:
 
 ```bash
-caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
-  --env-file /etc/voxhelm-worker/worker.env \
+/usr/bin/caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
+  --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
   --once
 ```
 
 From this checkout, `just worker-once` runs the same one-job command. Override
-`VOXHELM_WORKER_ENV_FILE` for a non-default env-file path and
-`VOXHELM_WORKER_UVX_SOURCE` for a package or git source instead of the local
-checkout. Use `just worker-loop` only when you want to keep polling manually
-until `Ctrl-C`.
+`VOXHELM_WORKER_ENV_FILE` for a non-default env-file path. It defaults to
+`$HOME/Library/Application Support/voxhelm-remote-worker/worker.env`.
+Override `VOXHELM_WORKER_UVX_SOURCE` for a package or git source instead of
+the local checkout. Use `just worker-loop` only when you want to keep polling
+manually until `Ctrl-C`.
 
 The worker defaults to one active job, periodically heartbeats the leased job
 while local inference runs, uploads the source, optional extracted audio,

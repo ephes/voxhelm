@@ -147,10 +147,10 @@ Preferred operator experience after the first implementation is a manual command
 that keeps macOS awake only while the worker is running:
 
 ```bash
-caffeinate -i -m -s -- uvx \
+/usr/bin/caffeinate -i -m -s -- uvx \
   --from "voxhelm[diarization] @ git+ssh://git.example/voxhelm.git" \
   voxhelm-remote-worker \
-  --env-file /etc/voxhelm-worker/worker.env \
+  --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
   --once
 ```
 
@@ -158,8 +158,8 @@ Repository-checkout mode remains acceptable for development and is wrapped by
 `just worker-once`:
 
 ```bash
-caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
-  --env-file /etc/voxhelm-worker/worker.env \
+/usr/bin/caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
+  --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
   --once \
   --base-url https://voxhelm.home.xn--wersdrfer-47a.de \
   --worker-id atlas
@@ -199,7 +199,7 @@ Adding a future worker should be a repeatable ops task:
 1. Install `ffmpeg` and the chosen STT backend/model.
 2. Install the Voxhelm worker package with `uv tool install` or run it with `uvx`.
 3. Create a protected worker env file containing worker token, Voxhelm base URL, MinIO credentials, model cache, and optional Hugging Face token.
-4. Start `caffeinate -i -m -s -- uvx --from ... voxhelm-remote-worker --env-file ... --once` when work should run.
+4. Start `/usr/bin/caffeinate -i -m -s -- uvx --from ... voxhelm-remote-worker --env-file ... --once` when work should run.
 5. Confirm the worker appears through heartbeat and can claim only jobs matching its advertised capabilities.
 
 ## Worker auth
