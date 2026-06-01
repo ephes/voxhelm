@@ -385,10 +385,10 @@ macmini/Traefik edge must also block `/v1/internal/*` on public routes unless a
 deliberately private worker route is configured.
 
 Current implementation status: the studio control-plane endpoints and
-`remote_pull` dispatch switch are implemented, and `voxhelm-remote-worker` is
-runnable from a repository checkout. Public PyPI publication, deployment on
-`atlas.local`, edge protection, and the production python-podcast proof remain
-follow-up work.
+`remote_pull` dispatch switch are implemented, `voxhelm` is published to PyPI
+and installable as a `uv` tool (`uv tool install "voxhelm[diarization]"`), and a
+`voxhelm-remote-worker` is deployed on `atlas`. Edge protection and the
+production python-podcast proof remain follow-up work.
 
 ## Wyoming STT
 
