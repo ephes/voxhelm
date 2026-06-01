@@ -158,7 +158,7 @@ Repository-checkout mode remains acceptable for development and is wrapped by
 `just worker-once`:
 
 ```bash
-/usr/bin/caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
+/usr/bin/caffeinate -i -m -s -- uvx --from ".[diarization]" voxhelm-remote-worker \
   --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
   --once \
   --base-url https://voxhelm.home.xn--wersdrfer-47a.de \

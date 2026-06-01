@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -768,10 +769,7 @@ def build_capabilities() -> dict[str, Any]:
         if model
     )
 
-    diarization_available = settings.VOXHELM_DIARIZATION_BACKEND.strip().lower() not in {
-        "",
-        "none",
-    }
+    diarization_available = diarization_runtime_available()
     output_formats = ["text", "json", "vtt", "dote", "podlove"]
     embedding_models: list[str] = []
     if diarization_available:
@@ -789,6 +787,37 @@ def build_capabilities() -> dict[str, Any]:
             "embedding_models": embedding_models,
         },
     }
+
+
+def diarization_runtime_available() -> bool:
+    backend = settings.VOXHELM_DIARIZATION_BACKEND.strip().lower()
+    if backend in {"", "none"}:
+        return False
+    if backend != "pyannote":
+        LOGGER.warning("unsupported diarization backend for remote worker backend=%s", backend)
+        return False
+    if not settings.VOXHELM_HUGGINGFACE_TOKEN:
+        LOGGER.warning("diarization disabled for worker capabilities: missing HF token")
+        return False
+    missing = [
+        module_name
+        for module_name in ("pyannote.audio", "torch", "numpy")
+        if not module_available(module_name)
+    ]
+    if missing:
+        LOGGER.warning(
+            "diarization disabled for worker capabilities: missing modules=%s",
+            ",".join(missing),
+        )
+        return False
+    return True
+
+
+def module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def claim_artifact_store_identity(claim: dict[str, Any]) -> dict[str, Any] | None:

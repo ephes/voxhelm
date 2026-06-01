@@ -266,12 +266,15 @@ def test_process_claim_uploads_known_speaker_sidecar(
 
 def test_build_capabilities_advertises_known_speaker_when_diarization_enabled(
     settings: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings.VOXHELM_STT_BACKEND = "whispercpp"
     settings.VOXHELM_STT_FALLBACK_BACKEND = ""
     settings.VOXHELM_WHISPERCPP_MODEL = "ggml-large-v3.bin"
     settings.VOXHELM_WHISPERKIT_ENABLED = False
     settings.VOXHELM_DIARIZATION_BACKEND = "pyannote"
+    settings.VOXHELM_HUGGINGFACE_TOKEN = "hf-token"
+    monkeypatch.setattr(worker_cli, "module_available", lambda module_name: True)
 
     capabilities = worker_cli.build_capabilities()
 
@@ -282,6 +285,32 @@ def test_build_capabilities_advertises_known_speaker_when_diarization_enabled(
         "anonymous": True,
         "known_speaker": True,
         "embedding_models": ["pyannote/wespeaker-voxceleb-resnet34-LM"],
+    }
+
+
+def test_build_capabilities_does_not_advertise_missing_diarization_runtime(
+    settings: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.VOXHELM_STT_BACKEND = "whispercpp"
+    settings.VOXHELM_STT_FALLBACK_BACKEND = ""
+    settings.VOXHELM_WHISPERCPP_MODEL = "ggml-large-v3.bin"
+    settings.VOXHELM_WHISPERKIT_ENABLED = False
+    settings.VOXHELM_DIARIZATION_BACKEND = "pyannote"
+    settings.VOXHELM_HUGGINGFACE_TOKEN = "hf-token"
+    monkeypatch.setattr(
+        worker_cli,
+        "module_available",
+        lambda module_name: module_name != "pyannote.audio",
+    )
+
+    capabilities = worker_cli.build_capabilities()
+
+    assert "speakers" not in capabilities["output_formats"]
+    assert capabilities["diarization"] == {
+        "anonymous": False,
+        "known_speaker": False,
+        "embedding_models": [],
     }
 
 

@@ -1,7 +1,7 @@
 set shell := ["zsh", "-cu"]
 
 worker_env := env_var_or_default("VOXHELM_WORKER_ENV_FILE", "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env")
-worker_source := env_var_or_default("VOXHELM_WORKER_UVX_SOURCE", ".")
+worker_source := env_var_or_default("VOXHELM_WORKER_UVX_SOURCE", ".[diarization]")
 
 default:
 	@just --list
