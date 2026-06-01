@@ -5,7 +5,7 @@ import hmac
 import math
 import secrets
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any
 from uuid import UUID
@@ -224,6 +224,11 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
                 requested_max_jobs=max_jobs,
                 now=now,
             ):
+                return None
+            # Fair-share: yield this round to a fresh, idle, less-loaded peer so
+            # both workers converge on ~50/50 instead of the fastest poller
+            # winning every race. No eligible peer => never defers.
+            if worker_should_defer_for_fairness(worker_id=worker_id, now=now):
                 return None
 
             for candidate in candidates:
@@ -581,6 +586,55 @@ def lock_worker_for_claim(*, worker_id: str, now: object) -> None:
 def lock_job_for_settlement(*, job_id: UUID, now: object) -> None:
     # Serialize duplicate completion/failure requests before artifact mutation.
     Job.objects.filter(id=job_id).update(updated_at=now)
+
+
+def worker_recent_claim_load(*, worker_id: str, window_start: datetime) -> int:
+    return Job.objects.filter(
+        execution_mode=Job.ExecutionMode.REMOTE_PULL,
+        assigned_worker_id=worker_id,
+        started_at__gte=window_start,
+    ).count()
+
+
+def worker_should_defer_for_fairness(*, worker_id: str, now: datetime) -> bool:
+    """Return True if this worker should yield the next claim to a less-loaded peer.
+
+    Defers only when another worker is enabled, freshly heartbeating (really
+    online), has spare capacity, and has handled strictly fewer recent claims.
+    With no such peer it never defers, so a lone worker keeps claiming everything
+    and the fleet self-heals when a peer goes away.
+    """
+
+    if not settings.VOXHELM_REMOTE_WORKER_BALANCE_ENABLED:
+        return False
+
+    window_start = now - timedelta(
+        seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS
+    )
+    fresh_cutoff = now - timedelta(
+        seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS
+    )
+    my_load = worker_recent_claim_load(worker_id=worker_id, window_start=window_start)
+
+    peers = (
+        Worker.objects.filter(enabled=True, last_seen_at__gte=fresh_cutoff)
+        .exclude(worker_id=worker_id)
+    )
+    for peer in peers:
+        peer_running = Job.objects.filter(
+            execution_mode=Job.ExecutionMode.REMOTE_PULL,
+            state=Job.State.RUNNING,
+            assigned_worker_id=peer.worker_id,
+            lease_expires_at__gt=now,
+        ).count()
+        if peer_running >= peer.concurrency:
+            continue
+        peer_load = worker_recent_claim_load(
+            worker_id=peer.worker_id, window_start=window_start
+        )
+        if peer_load < my_load:
+            return True
+    return False
 
 
 def worker_has_claim_capacity(

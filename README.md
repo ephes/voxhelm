@@ -308,6 +308,18 @@ only. `VOXHELM_TRANSCRIPTION_EXECUTION_MODE` must be either `django_tasks` or
 integers. URL inputs are validated against `VOXHELM_ALLOWED_URL_HOSTS` when the
 job is submitted, before a remote job can remain queued.
 
+When more than one remote worker is active, the control plane balances claims
+fairly instead of letting the lowest-latency poller win every race: at claim
+time a worker that is "ahead" on recent claims defers to a fresh, idle, enabled
+peer that has handled strictly fewer recent claims, so two workers converge on a
+roughly even split. With no eligible peer (the other worker is offline, busy, or
+disabled) a worker never defers, so a lone worker still claims everything and the
+fleet self-heals. Tunable via `VOXHELM_REMOTE_WORKER_BALANCE_ENABLED` (default
+`true`), `VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS` (recent-claim comparison
+window, default `3600`), and `VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS`
+(how recently a peer must have heartbeated to count, default `30`). This is
+control-plane-only behavior; workers need no changes.
+
 Worker endpoints are internal and use a separate bearer-token domain from
 producer tokens. Startup configuration rejects any raw token value shared
 between `VOXHELM_BEARER_TOKENS` and `VOXHELM_WORKER_TOKENS`:

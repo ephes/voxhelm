@@ -2016,3 +2016,103 @@ def test_job_heartbeat_rejects_stale_lease_token(client, settings):
         **worker_headers(),
     )
     assert stale_response.status_code == 409
+
+
+# --- Least-loaded fairness balancing (control-plane claim gate) ---
+
+from jobs.remote_workers import worker_should_defer_for_fairness  # noqa: E402
+
+
+def _make_worker(worker_id, *, enabled=True, seen_seconds_ago=2, concurrency=1):
+    return Worker.objects.create(
+        worker_id=worker_id,
+        hostname=worker_id,
+        enabled=enabled,
+        capabilities=plain_capabilities(),
+        concurrency=concurrency,
+        running_job_ids=[],
+        last_seen_at=timezone.now() - timedelta(seconds=seen_seconds_ago),
+    )
+
+
+def _make_load_job(
+    worker_id,
+    *,
+    started_seconds_ago=10,
+    state=Job.State.SUCCEEDED,
+    running_lease=False,
+):
+    now = timezone.now()
+    return Job.objects.create(
+        producer="archive",
+        job_type=Job.JobType.TRANSCRIBE,
+        execution_mode=Job.ExecutionMode.REMOTE_PULL,
+        input_data={"kind": "url", "url": "https://media.example.com/e.mp3"},
+        state=state,
+        assigned_worker_id=worker_id,
+        started_at=now - timedelta(seconds=started_seconds_ago),
+        lease_expires_at=(now + timedelta(minutes=10)) if running_lease else None,
+    )
+
+
+@pytest.mark.django_db
+def test_fairness_defers_when_fresh_idle_peer_is_less_loaded(settings):
+    _make_worker("atlas")
+    _make_worker("studio")
+    _make_load_job("atlas")
+    _make_load_job("atlas")  # atlas=2, studio=0
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is True
+
+
+@pytest.mark.django_db
+def test_fairness_allows_when_worker_is_not_ahead(settings):
+    _make_worker("atlas")
+    _make_worker("studio")
+    _make_load_job("studio")
+    _make_load_job("studio")  # atlas=0, studio=2 -> atlas is behind
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_fairness_allows_on_tie(settings):
+    _make_worker("atlas")
+    _make_worker("studio")
+    _make_load_job("atlas")
+    _make_load_job("studio")  # 1 vs 1
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_fairness_ignores_stale_peer(settings):
+    _make_worker("atlas")
+    _make_worker("studio", seen_seconds_ago=600)  # peer not polling
+    _make_load_job("atlas")
+    _make_load_job("atlas")  # atlas ahead, but peer is gone
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_fairness_ignores_busy_peer_with_no_spare_capacity(settings):
+    _make_worker("atlas")
+    _make_worker("studio")
+    _make_load_job("atlas")
+    _make_load_job("atlas")  # atlas ahead
+    _make_load_job("studio", state=Job.State.RUNNING, running_lease=True)  # studio busy 1/1
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_fairness_disabled_never_defers(settings):
+    settings.VOXHELM_REMOTE_WORKER_BALANCE_ENABLED = False
+    _make_worker("atlas")
+    _make_worker("studio")
+    _make_load_job("atlas")
+    _make_load_job("atlas")
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_fairness_no_peers_never_defers(settings):
+    _make_worker("atlas")
+    _make_load_job("atlas")
+    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False

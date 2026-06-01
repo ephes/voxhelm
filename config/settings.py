@@ -412,6 +412,25 @@ VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = validate_positive_int(
     "VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS",
     int(os.getenv("VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS", "3")),
 )
+# Fair-share claim balancing. When multiple remote workers are active, the
+# control plane defers a worker that is "ahead" on recent claims so a fresh,
+# idle, less-loaded peer can take the next job — yielding a roughly even split
+# instead of the lowest-latency worker winning every race. Self-heals to a
+# single worker (no peer => never defer).
+VOXHELM_REMOTE_WORKER_BALANCE_ENABLED = env_bool(
+    "VOXHELM_REMOTE_WORKER_BALANCE_ENABLED", default=True
+)
+# Rolling window (seconds) over which recent per-worker claim counts are compared.
+VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS = validate_positive_int(
+    "VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS",
+    int(os.getenv("VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS", "3600")),
+)
+# A peer only counts as a deferral target if it heartbeated within this many
+# seconds (i.e. it is really online and polling). Bounds worst-case claim delay.
+VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS = validate_positive_int(
+    "VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS",
+    int(os.getenv("VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS", "30")),
+)
 validate_remote_pull_worker_tokens(
     VOXHELM_TRANSCRIPTION_EXECUTION_MODE,
     VOXHELM_WORKER_TOKENS,
