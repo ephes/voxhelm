@@ -72,6 +72,36 @@ def sample_transcription_result() -> TranscriptionResult:
     )
 
 
+class LoopSttService:
+    def transcribe(self, audio_path: Path, params: object) -> TranscriptionResult:
+        del audio_path, params
+        loop = [
+            TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
+                                 text="Das ist auch sehr subjektiv.")
+            for index in range(18)
+        ]
+        return TranscriptionResult(
+            text=" ".join(segment.text for segment in loop),
+            language="de",
+            segments=loop,
+            backend_name="whisper.cpp",
+            model_name="ggml-large-v3.bin",
+        )
+
+
+def test_transcribe_claim_audio_sanitizes_repeated_loop(monkeypatch: Any) -> None:
+    monkeypatch.setattr(worker_cli, "build_backend_service", lambda **_: LoopSttService())
+
+    result = worker_cli.transcribe_claim_audio(
+        claim=base_claim(),
+        audio_path=Path("/tmp/episode.wav"),
+    )
+
+    assert len(result.segments) == 1
+    assert result.segments[0].text == "Das ist auch sehr subjektiv."
+    assert result.text == "Das ist auch sehr subjektiv."
+
+
 def base_claim() -> dict[str, Any]:
     return {
         "id": "job-1",

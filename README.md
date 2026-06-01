@@ -26,8 +26,9 @@ Whisper occasionally emits artifacts that the decode-level guards
 but cannot fully eliminate. Voxhelm applies a deterministic post-decode
 sanitizer to every produced `TranscriptionResult` once at the segment level —
 before any format is rendered — so `text`, `json`, `vtt`, `dote`, and `podlove`
-all stay consistent regardless of which backend ran. It removes two artifact
-classes:
+all stay consistent regardless of which backend ran. It applies on both the
+local transcription path and the `remote_pull` worker path, ahead of speaker
+diarization in each. It removes two artifact classes:
 
 - **Repeated-sentence loops** — a run of consecutive segments whose text is
   identical after light normalization (casefold, collapsed whitespace, stripped

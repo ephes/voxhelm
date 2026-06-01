@@ -40,13 +40,17 @@ _DOT_RUN_PATTERN = re.compile(r"\.(?:\s*\.){3,}")
 # loop detection.
 _EDGE_CHARS = " \t\r\n.,;:!?-–—…\"'`„“”»«()[]{}"
 
-# Subtitle-credit hallucination family. Each pattern is anchored and requires a
-# tell-tale broadcaster/site token so that genuine talk *about* subtitles or the
-# ZDF as a topic ("Das ZDF hat darüber berichtet.", "Untertitel sind wichtig
-# für die Barrierefreiheit.") is not removed.
+# Subtitle-credit hallucination family. Each pattern requires a tell-tale credit
+# token ("untertitelung des …", "im Auftrag", a broadcaster like ZDF, or
+# amara.org) so that genuine talk *about* subtitles or a broadcaster as a topic
+# ("Das ZDF hat darüber berichtet.", "Untertitel sind wichtig für die
+# Barrierefreiheit.", "Untertitel von Filmen sind oft schlecht.",
+# "Untertitelung ist ein Handwerk.") is left untouched. Documented production
+# artifacts are ZDF/funk credits and Amara.org; ARD-style credits are not in the
+# observed set and are deliberately left alone to avoid false positives.
 _CREDIT_PATTERNS = (
-    re.compile(r"^untertitelung\b.*"),
-    re.compile(r"^untertitel\s+(?:im auftrag|von|des|der)\b.*"),
+    re.compile(r"^untertitelung\s+des\b.*"),
+    re.compile(r"^untertitel(?:ung)?\s+im auftrag\b.*"),
     re.compile(r"^untertitel\b.*\bzdf\b.*"),
     re.compile(r".*\bamara\.org\b.*"),
 )

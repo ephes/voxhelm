@@ -46,6 +46,7 @@ from transcriptions.known_speaker import (
     run_known_speaker_postprocess,
     slice_samples,
 )
+from transcriptions.sanitizer import sanitize_result
 from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
@@ -477,13 +478,20 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
     backend_name = require_string(claim.get("backend"), "claim.backend")
     model_name = require_string(claim.get("model"), "claim.model")
     service = build_backend_service(backend_name=backend_name, model_name=model_name)
-    return service.transcribe(
+    result = service.transcribe(
         audio_path,
         TranscribeParams(
             request_model=model_name,
             prompt=None,
             language=optional_string(claim.get("language")),
         ),
+    )
+    # Mirror the local transcribe_audio path: sanitize before diarization and
+    # artifact rendering so remote_pull workers emit the same clean transcripts.
+    return sanitize_result(
+        result,
+        enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
+        repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
     )
 
 

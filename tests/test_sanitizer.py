@@ -191,6 +191,22 @@ def test_preserves_signoffs_and_topic_talk_about_subtitles() -> None:
     assert result.segments == segments
 
 
+def test_preserves_genuine_speech_about_subtitling() -> None:
+    # Genuine topic talk that merely starts with "Untertitel"/"Untertitelung" but
+    # carries no broadcaster/site credit token must survive.
+    segments = [
+        TranscriptionSegment(id=0, start=0.0, end=4.0,
+                             text="Untertitel von Filmen sind oft schlecht synchronisiert."),
+        TranscriptionSegment(id=1, start=4.0, end=8.0,
+                             text="Untertitelung ist ein unterschätztes Handwerk."),
+        TranscriptionSegment(id=2, start=8.0, end=12.0,
+                             text="Untertitel der ARD waren früher Teletext."),
+    ]
+    result = sanitize_result(_result(segments))
+
+    assert result.segments == segments
+
+
 def test_returns_input_unchanged_when_nothing_to_sanitize() -> None:
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=2.0, text="Ein ganz normaler Satz."),
