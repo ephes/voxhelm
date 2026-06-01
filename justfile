@@ -3,6 +3,9 @@ set shell := ["zsh", "-cu"]
 worker_env := env_var_or_default("VOXHELM_WORKER_ENV_FILE", "/etc/voxhelm-worker/worker.env")
 worker_source := env_var_or_default("VOXHELM_WORKER_UVX_SOURCE", ".")
 
+default:
+	@just --list
+
 test:
 	uv run pytest
 
