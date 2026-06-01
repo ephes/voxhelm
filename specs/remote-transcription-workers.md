@@ -143,30 +143,36 @@ Voxhelm already has a clean producer-facing batch API and a separated worker exe
 
 Adding another worker machine should not require cloning private deployment logic or configuring database access. The worker should be installable and runnable as a normal Python command with only Voxhelm URL, worker credentials, artifact credentials, backend/model settings, and optional diarization secrets.
 
-Preferred operator experience after the first implementation:
+Preferred operator experience after the first implementation is a manual command
+that keeps macOS awake only while the worker is running:
 
 ```bash
-uv tool install "voxhelm[diarization] @ git+ssh://git.example/voxhelm.git"
-voxhelm-remote-worker \
-  --base-url https://voxhelm.home.xn--wersdrfer-47a.de \
-  --worker-id atlas \
-  --env-file /etc/voxhelm-worker/worker.env
+caffeinate -i -m -s -- uvx \
+  --from "voxhelm[diarization] @ git+ssh://git.example/voxhelm.git" \
+  voxhelm-remote-worker \
+  --env-file /etc/voxhelm-worker/worker.env \
+  --once
 ```
 
-A one-shot/smoke-test mode should also work through `uvx` once packaging is available:
+Repository-checkout mode remains acceptable for development and is wrapped by
+`just worker-once`:
 
 ```bash
-uvx --from "voxhelm[diarization] @ git+ssh://git.example/voxhelm.git" \
-  voxhelm-remote-worker --once --base-url https://voxhelm.home.xn--wersdrfer-47a.de
-```
-
-Repository-checkout mode remains acceptable for development:
-
-```bash
-uv run voxhelm-remote-worker \
+caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
   --env-file /etc/voxhelm-worker/worker.env \
   --once \
-  --base-url http://studio.local:8000
+  --base-url https://voxhelm.home.xn--wersdrfer-47a.de \
+  --worker-id atlas
+```
+
+The worker may still run without `--once` when an operator wants to poll until
+`Ctrl-C`, but the default documented workflow should be explicit, manually
+started work:
+
+```bash
+just worker-once
+VOXHELM_WORKER_ENV_FILE=/path/to/worker.env just worker-once
+VOXHELM_WORKER_UVX_SOURCE='voxhelm[diarization] @ git+ssh://git.example/voxhelm.git' just worker-once
 ```
 
 The worker command should not require Django server setup, database settings, migrations, or access to `studio`'s SQLite database. It imports Voxhelm's shared transcription, diarization, artifact-store, and format-rendering code plus Django settings for local configuration, but runs as a worker-only process.
@@ -193,7 +199,7 @@ Adding a future worker should be a repeatable ops task:
 1. Install `ffmpeg` and the chosen STT backend/model.
 2. Install the Voxhelm worker package with `uv tool install` or run it with `uvx`.
 3. Create a protected worker env file containing worker token, Voxhelm base URL, MinIO credentials, model cache, and optional Hugging Face token.
-4. Start `voxhelm-remote-worker --env-file ...` under launchd or another supervisor.
+4. Start `caffeinate -i -m -s -- uvx --from ... voxhelm-remote-worker --env-file ... --once` when work should run.
 5. Confirm the worker appears through heartbeat and can claim only jobs matching its advertised capabilities.
 
 ## Worker auth
@@ -591,7 +597,7 @@ Before implementation/deployment, validate manually:
 - `VOXHELM_ALLOWED_URL_HOSTS` / worker equivalent includes the CloudFront media host used for production source-range references.
 - model cache paths are explicit and not assumed to match `studio`.
 - protected worker env file contains worker token, MinIO credentials, and any required Hugging Face token/model-cache settings.
-- worker process supervision is clear: launchd or another existing ops pattern.
+- manual worker start/stop flow is clear, including when to use `--once` versus manual polling.
 - logs are local to `atlas.local` but contain Voxhelm job IDs and worker ID for correlation.
 
 ## Backlog chunks
@@ -641,8 +647,8 @@ Before implementation/deployment, validate manually:
 ### RW-7: Deployment and operations
 
 - Add deployment variables for worker token, Voxhelm base URL, artifact access, model cache, backend selection, lease durations, max attempts, concurrency, Hugging Face token, and allowed reference URL hosts.
-- Add a repeatable new-worker onboarding recipe using `uv tool install`/`uvx`, a protected env file, and launchd.
-- Add launchd service for `atlas.local`.
+- Add a repeatable new-worker onboarding recipe using `uv tool install`/`uvx`, a protected env file, and `caffeinate` on macOS.
+- Add a documented manual `atlas.local` worker command that an operator can start and stop directly.
 - Add minimal operator/log visibility for queued/running/worker-stale states if logs are not sufficient.
 
 ## Acceptance criteria for the first deployed goal

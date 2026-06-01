@@ -363,22 +363,28 @@ timings/summary metrics, and private known-speaker reference
 URLs/ranges are not echoed through producer-visible job metadata. Speaker
 sidecars are accepted only for known-speaker jobs.
 
-Run a checkout-based worker on a trusted host with an env file containing the
+Run a manual worker on a trusted macOS host with an env file containing the
 worker token, Voxhelm URL, shared artifact credentials, local STT/model cache
-settings, `VOXHELM_ALLOWED_URL_HOSTS`, and optional Hugging Face token:
+settings, `VOXHELM_ALLOWED_URL_HOSTS`, and optional Hugging Face token. The
+`caffeinate` wrapper keeps the machine awake only while the worker command is
+running:
 
 ```bash
-uv run voxhelm-remote-worker \
+caffeinate -i -m -s -- uvx --from . voxhelm-remote-worker \
   --env-file /etc/voxhelm-worker/worker.env \
   --once
 ```
 
-Use `--once` for smoke tests; omit it under launchd or another supervisor for
-the long-running poll loop. The worker defaults to one active job, periodically
-heartbeats the leased job while local inference runs, uploads the source,
-optional extracted audio, requested transcript artifacts, and known-speaker
-`transcript.speakers.json` sidecar under the claimed attempt prefix, then posts
-the completion manifest.
+From this checkout, `just worker-once` runs the same one-job command. Override
+`VOXHELM_WORKER_ENV_FILE` for a non-default env-file path and
+`VOXHELM_WORKER_UVX_SOURCE` for a package or git source instead of the local
+checkout. Use `just worker-loop` only when you want to keep polling manually
+until `Ctrl-C`.
+
+The worker defaults to one active job, periodically heartbeats the leased job
+while local inference runs, uploads the source, optional extracted audio,
+requested transcript artifacts, and known-speaker `transcript.speakers.json`
+sidecar under the claimed attempt prefix, then posts the completion manifest.
 
 Operational note: the application endpoints still require worker auth, but the
 macmini/Traefik edge must also block `/v1/internal/*` on public routes unless a

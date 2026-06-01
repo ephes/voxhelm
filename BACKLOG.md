@@ -41,7 +41,7 @@ protection, and the production proof remain open.
   - [x] support checkout-based `uv run`;
   - [x] require only Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional HF token;
   - [ ] publish/install/run paths with `uv tool install` or `uvx` from public PyPI;
-  - [ ] document a repeatable new-machine setup with protected env file and launchd.
+  - [ ] document a repeatable new-machine setup with protected env file and manual `uvx`/`caffeinate` execution.
 - [ ] Add the `atlas.local` worker command/process:
   - [x] claim one job at a time;
   - [x] materialize URL or staged-upload input;
@@ -73,7 +73,7 @@ Summary of RW-2 in `specs/remote-transcription-workers.md`:
 - [ ] Verify `ffmpeg` and at least one STT backend/model locally on `atlas.local`.
 - [ ] Verify pyannote/wespeaker or the chosen hybrid postprocessor path for known-speaker jobs.
 - [ ] Record a short and long transcription smoke-test baseline on `atlas.local` before implementing the worker API.
-- [ ] Decide launchd/service supervision and log location for the future remote worker process.
+- [ ] Decide manual worker start/stop command and log location for the future remote worker process.
 
 ## Speaker diarization deployment and consumer follow-through
 
@@ -121,7 +121,7 @@ clean contributor reference material are the preferred follow-up direction.
 - [ ] Make the role install optional dependencies when pyannote is enabled:
   - current: `uv sync --frozen --no-dev`
   - needed: `uv sync --frozen --no-dev --extra diarization`
-- [ ] Ensure the token is only present in the protected env file, not inline in launchd plists or task logs.
+- [ ] Ensure the token is only present in the protected env file, not inline in command lines, plists, or task logs.
 - [ ] Ensure app and worker restart when the env file or dependency set changes.
 
 ### ops-control
