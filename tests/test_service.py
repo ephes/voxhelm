@@ -123,6 +123,63 @@ def test_transcribe_audio_uses_fallback_backend(monkeypatch) -> None:
     assert result.text == "fallback"
 
 
+def test_transcribe_audio_sanitizes_repeated_loop_segments(monkeypatch) -> None:
+    loop = [
+        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
+                             text="Das ist auch sehr subjektiv.")
+        for index in range(18)
+    ]
+
+    class LoopBackend:
+        def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+            del audio_path, params
+            return TranscriptionResult(
+                text=" ".join(segment.text for segment in loop),
+                language="de",
+                segments=loop,
+            )
+
+    monkeypatch.setattr(
+        "transcriptions.service.get_backend_services_for_model",
+        lambda _request_model: [BackendInvocation("stub", LoopBackend())],
+    )
+
+    result = transcribe_audio(
+        Path("/tmp/sample.mp3"),
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+
+    assert len(result.segments) == 1
+    assert result.segments[0].text == "Das ist auch sehr subjektiv."
+    assert result.text == "Das ist auch sehr subjektiv."
+
+
+def test_transcribe_audio_respects_disabled_sanitizer(monkeypatch, settings) -> None:
+    settings.VOXHELM_SANITIZE_TRANSCRIPT = False
+    loop = [
+        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
+                             text="Das ist auch sehr subjektiv.")
+        for index in range(18)
+    ]
+
+    class LoopBackend:
+        def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+            del audio_path, params
+            return TranscriptionResult(text="", language="de", segments=list(loop))
+
+    monkeypatch.setattr(
+        "transcriptions.service.get_backend_services_for_model",
+        lambda _request_model: [BackendInvocation("stub", LoopBackend())],
+    )
+
+    result = transcribe_audio(
+        Path("/tmp/sample.mp3"),
+        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+    )
+
+    assert len(result.segments) == 18
+
+
 def test_transcribe_audio_raises_when_all_backends_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(
         "transcriptions.service.get_backend_services_for_model",

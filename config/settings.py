@@ -268,6 +268,19 @@ VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "
 # which curbs hallucinated text over music/silence (e.g. outro-music loops).
 VOXHELM_WHISPERCPP_MAX_CONTEXT = int(os.getenv("VOXHELM_WHISPERCPP_MAX_CONTEXT", "0"))
 VOXHELM_WHISPERCPP_SUPPRESS_NST = env_bool("VOXHELM_WHISPERCPP_SUPPRESS_NST", default=True)
+# Post-decode transcript sanitizer. A deterministic backstop that runs after
+# every backend transcription (before format rendering) to collapse repeated-
+# sentence loops and drop subtitle-credit / punctuation-only hallucinations the
+# decode-level guards above reduce but cannot fully eliminate. Conservative by
+# design; disable only for debugging raw decoder output.
+VOXHELM_SANITIZE_TRANSCRIPT = env_bool("VOXHELM_SANITIZE_TRANSCRIPT", default=True)
+# Minimum consecutive identical (normalized) segments before a run is collapsed
+# to a single instance. 4 catches real loops (9-84x) without touching natural
+# backchannels or rhetorical repetition.
+VOXHELM_SANITIZE_REPEAT_THRESHOLD = validate_positive_int(
+    "VOXHELM_SANITIZE_REPEAT_THRESHOLD",
+    int(os.getenv("VOXHELM_SANITIZE_REPEAT_THRESHOLD", "4")),
+)
 VOXHELM_WHISPERKIT_ENABLED = env_bool("VOXHELM_WHISPERKIT_ENABLED", default=False)
 VOXHELM_WHISPERKIT_HOST = os.getenv("VOXHELM_WHISPERKIT_HOST", "127.0.0.1").strip()
 VOXHELM_WHISPERKIT_PORT = int(os.getenv("VOXHELM_WHISPERKIT_PORT", "50060"))

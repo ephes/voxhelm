@@ -18,6 +18,7 @@ from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions import formats as transcript_formats
+from transcriptions.sanitizer import sanitize_result
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
@@ -651,9 +652,15 @@ def transcribe_audio(audio_path: Path, params: TranscribeParams) -> Transcriptio
             unavailable_errors: list[str] = []
             for invocation in get_backend_services_for_model(params.request_model):
                 try:
-                    return invocation.service.transcribe(audio_path, params)
+                    result = invocation.service.transcribe(audio_path, params)
                 except BackendUnavailableError as exc:
                     unavailable_errors.append(f"{invocation.name}: {exc}")
+                    continue
+                return sanitize_result(
+                    result,
+                    enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
+                    repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
+                )
 
             joined = "; ".join(unavailable_errors)
             raise RuntimeError(f"No configured STT backend is available. {joined}")

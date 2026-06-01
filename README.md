@@ -19,6 +19,35 @@ The current slice also adds the first Voxhelm-owned operator UI:
 `whisper.cpp` inputs are normalized through `ffmpeg` to 16 kHz mono PCM WAV before
 inference so AAC/M4A and other container/codec quirks do not leak into the backend.
 
+## Transcript Sanitization
+
+Whisper occasionally emits artifacts that the decode-level guards
+(`condition_on_previous_text=False`, `--max-context 0`, `--suppress-nst`) reduce
+but cannot fully eliminate. Voxhelm applies a deterministic post-decode
+sanitizer to every produced `TranscriptionResult` once at the segment level —
+before any format is rendered — so `text`, `json`, `vtt`, `dote`, and `podlove`
+all stay consistent regardless of which backend ran. It removes two artifact
+classes:
+
+- **Repeated-sentence loops** — a run of consecutive segments whose text is
+  identical after light normalization (casefold, collapsed whitespace, stripped
+  surrounding punctuation) is collapsed to a single segment. The first segment's
+  start is kept and its end extended to the run's last end. The run must reach
+  `VOXHELM_SANITIZE_REPEAT_THRESHOLD` (default `4`) consecutive repeats, which
+  catches the real loops (9–84×) while leaving natural backchannels and
+  rhetorical repetition inside a single cue untouched.
+- **Non-speech / credit hallucinations** — subtitle-credit cues
+  (`Untertitelung des ZDF, 2020`, `Untertitel im Auftrag des ZDF für funk, 2017`,
+  `Untertitel von Amara.org`, and the related `Untertitel…`/`Amara.org` family)
+  and punctuation-only noise such as long dot-runs are dropped. A long dot-run
+  embedded in an otherwise-real segment is stripped while the real text and
+  adjacent genuine segments survive.
+
+The sanitizer is conservative by design: it biases toward false negatives over
+removing genuine speech, only ever removes or collapses artifact segments, and
+returns clean transcripts unchanged. Disable it with
+`VOXHELM_SANITIZE_TRANSCRIPT=false` only to inspect raw decoder output.
+
 ## Local Development
 
 ```bash
@@ -54,6 +83,12 @@ export VOXHELM_WHISPERCPP_PROCESSORS="4"
 # default. suppress-nst drops non-speech tokens to curb hallucinations over music/silence.
 export VOXHELM_WHISPERCPP_MAX_CONTEXT="0"
 export VOXHELM_WHISPERCPP_SUPPRESS_NST="true"
+# Post-decode transcript sanitizer (defaults shown). Deterministic backstop that
+# collapses repeated-sentence loops and drops subtitle-credit / punctuation-only
+# hallucinations from every produced transcript. Disable only to inspect raw
+# decoder output.
+export VOXHELM_SANITIZE_TRANSCRIPT="true"
+export VOXHELM_SANITIZE_REPEAT_THRESHOLD="4"
 export VOXHELM_WHISPERKIT_ENABLED="false"
 export VOXHELM_WHISPERKIT_HOST="127.0.0.1"
 export VOXHELM_WHISPERKIT_PORT="50060"
