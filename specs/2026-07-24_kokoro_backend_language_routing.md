@@ -24,6 +24,12 @@ item: the human listening test (Slice 6 item 7).
 - Rollback rehearsal: deploy with both flags false → only Piper voices
   advertised, kokoro env absent; re-enable deploy restored routing; full
   battery re-passed afterwards.
+- Tier-2 on-studio note: the `requires_models` suite was not re-executed on
+  the studio directly (the venv is root-owned and interactive root SSH is
+  not provisioned); equivalence holds because the deployed artifacts are
+  sha256-verified at deploy against the same checksums the local tier-2
+  runs passed with, and the live battery exercised both deployed voices
+  end-to-end, including chunking and voicepack selection.
 
 ## Context
 
