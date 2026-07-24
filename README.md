@@ -112,6 +112,20 @@ export VOXHELM_WYOMING_STT_MODEL=""
 export VOXHELM_WYOMING_STT_LANGUAGE=""
 export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
+# Text-to-speech. Piper is the default backend. The optional Kokoro ONNX backend
+# (English "af_heart" + the German "Martin" fine-tune) needs the `kokoro` extra
+# (`uv sync --extra kokoro`) plus espeak-ng (`brew install espeak-ng`). Each
+# VOXHELM_KOKORO_MODELS entry is voice_key=model:voicepack:voicepack_key:language;
+# relative paths resolve against VOXHELM_KOKORO_MODEL_DIR. With no models
+# configured the voice registry exposes no Kokoro voices and Piper is untouched.
+# VOXHELM_KOKORO_DEFAULT_VOICE names the voice used when a request reaches the
+# Kokoro backend without an explicit voice; unset falls back to the first
+# VOXHELM_KOKORO_MODELS entry in sorted-key order.
+# VOXHELM_ESPEAK_LIBRARY overrides the libespeak-ng shared library when set.
+export VOXHELM_KOKORO_MODEL_DIR="$PWD/var/kokoro"
+export VOXHELM_KOKORO_MODELS="kokoro-af_heart=kokoro-v1.0.onnx:voices-v1.0.bin:af_heart:en-us,kokoro-martin=kokoro-martin.onnx:voices-martin.npz:martin:de"
+export VOXHELM_KOKORO_DEFAULT_VOICE=""
+export VOXHELM_ESPEAK_LIBRARY=""
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"

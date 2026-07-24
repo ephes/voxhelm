@@ -224,9 +224,25 @@ def get_backend_service(params: SynthesizeParams | None = None) -> BackendProtoc
 
 
 def build_backend_service(backend_name: str) -> BackendProtocol:
-    if resolve_backend_name_for_model(backend_name) == "piper":
+    resolved = resolve_backend_name_for_model(backend_name)
+    if resolved == "piper":
         return build_piper_backend()
+    if resolved == "kokoro":
+        return build_kokoro_backend()
     raise RuntimeError(f"Unsupported TTS backend '{backend_name}'.")
+
+
+def build_kokoro_backend() -> BackendProtocol:
+    from synthesis.kokoro import KokoroBackend, kokoro_model_configs
+
+    return KokoroBackend(
+        models=kokoro_model_configs(
+            models=dict(settings.VOXHELM_KOKORO_MODELS),
+            model_dir=settings.VOXHELM_KOKORO_MODEL_DIR,
+        ),
+        default_voice=settings.VOXHELM_KOKORO_DEFAULT_VOICE,
+        espeak_library=settings.VOXHELM_ESPEAK_LIBRARY,
+    )
 
 
 def build_piper_backend() -> PiperBackend:
@@ -247,13 +263,26 @@ def resolve_backend_name_for_model(request_model: str) -> str:
 def build_voice_registry() -> VoiceRegistry:
     """Collect installed voices from every backend into one dispatch table.
 
-    Only Piper contributes voices today; additional backends append their own
-    records here and the requested/resolved voice key selects the backend.
+    Each backend appends its own records here and the requested/resolved voice
+    key selects the backend. A deploy with no Kokoro models configured simply
+    contributes no Kokoro voices, leaving Piper behavior untouched.
     """
     voices: list[InstalledVoice] = list(piper_registry_voices().values())
+    voices.extend(kokoro_registry_voices().values())
     return VoiceRegistry(
         voices=tuple(voices),
         default_backend=settings.VOXHELM_TTS_BACKEND,
+    )
+
+
+def kokoro_registry_voices() -> dict[str, InstalledVoice]:
+    if not settings.VOXHELM_KOKORO_MODELS:
+        return {}
+    from synthesis.kokoro import kokoro_registry_voices as _kokoro_registry_voices
+
+    return _kokoro_registry_voices(
+        models=dict(settings.VOXHELM_KOKORO_MODELS),
+        model_dir=settings.VOXHELM_KOKORO_MODEL_DIR,
     )
 
 

@@ -34,6 +34,33 @@ def env_map(name: str) -> dict[str, str]:
     }
 
 
+def env_kokoro_models(name: str) -> dict[str, dict[str, str]]:
+    """Parse the Kokoro voice map from a compact ``env_map``-style encoding.
+
+    Each comma/newline-separated entry is ``voice_key=model:voicepack:key:lang``
+    where the four colon-delimited fields are the ONNX model file, the voicepack
+    file, the embedding key inside that pack (e.g. ``af_heart``/``martin``), and
+    the espeak phoneme language (e.g. ``en-us``/``de``). Relative file paths are
+    resolved against ``VOXHELM_KOKORO_MODEL_DIR`` by the backend.
+    """
+    models: dict[str, dict[str, str]] = {}
+    for voice_key, value in env_map(name).items():
+        fields = [field.strip() for field in value.split(":")]
+        if len(fields) != 4 or not all(fields):
+            raise ValueError(
+                f"Invalid {name} entry for '{voice_key}'. Use "
+                "voice_key=model:voicepack:voicepack_key:language."
+            )
+        model, voicepack, voicepack_key, language = fields
+        models[voice_key] = {
+            "model": model,
+            "voicepack": voicepack,
+            "voicepack_key": voicepack_key,
+            "language": language,
+        }
+    return models
+
+
 def env_tokens(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -369,10 +396,32 @@ VOXHELM_PIPER_VOICE_DIR = Path(
 VOXHELM_PIPER_VOICES = env_list("VOXHELM_PIPER_VOICES")
 VOXHELM_PIPER_DEFAULT_VOICE = os.getenv("VOXHELM_PIPER_DEFAULT_VOICE", "").strip()
 VOXHELM_PIPER_LANGUAGE_VOICES = env_map("VOXHELM_PIPER_LANGUAGE_VOICES")
+# Kokoro ONNX TTS backend (optional; requires the `kokoro` extra + espeak-ng).
+# VOXHELM_KOKORO_MODELS maps registry voice keys (convention: kokoro-<voicepack_key>)
+# to their artifacts, e.g.:
+#   kokoro-af_heart=kokoro-v1.0.onnx:voices-v1.0.bin:af_heart:en-us,
+#   kokoro-martin=kokoro-martin.onnx:voices-martin.npz:martin:de
+# Relative model/voicepack paths resolve against VOXHELM_KOKORO_MODEL_DIR. With
+# no models configured the registry has no kokoro voices and Piper is untouched.
+VOXHELM_KOKORO_MODEL_DIR = Path(
+    os.getenv("VOXHELM_KOKORO_MODEL_DIR", str(BASE_DIR / "var" / "kokoro"))
+)
+VOXHELM_KOKORO_MODELS = env_kokoro_models("VOXHELM_KOKORO_MODELS")
+# Default Kokoro voice used when a request reaches the Kokoro backend without an
+# explicit voice. When unset the backend falls back to the first configured
+# VOXHELM_KOKORO_MODELS entry in sorted-key order (mirrors VOXHELM_PIPER_DEFAULT_VOICE).
+VOXHELM_KOKORO_DEFAULT_VOICE = os.getenv("VOXHELM_KOKORO_DEFAULT_VOICE", "").strip()
+# Optional override for the libespeak-ng shared library (else espeakng-loader's
+# bundled library is used).
+VOXHELM_ESPEAK_LIBRARY = os.getenv("VOXHELM_ESPEAK_LIBRARY", "").strip()
 VOXHELM_TTS_MAX_INPUT_CHARS = int(os.getenv("VOXHELM_TTS_MAX_INPUT_CHARS", "5000"))
+# Accepted `model` field values for /v1/audio/speech. "auto"/"piper"/"tts-1"/
+# "tts-1-hd" resolve to the default backend (see AUTO_BACKEND_MODEL_NAMES);
+# "kokoro" explicitly forces the Kokoro backend for that request.
 VOXHELM_ACCEPTED_SPEECH_MODELS = {
     "auto",
     "piper",
+    "kokoro",
     "tts-1",
     "tts-1-hd",
 }

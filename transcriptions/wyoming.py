@@ -55,11 +55,17 @@ _VOXHELM_ATTRIBUTION = Attribution(
     name="Voxhelm",
     url="https://github.com/jochen/Voxhelm",
 )
+_KOKORO_ATTRIBUTION = Attribution(
+    name="Kokoro",
+    url="https://github.com/thewh1teagle/kokoro-onnx",
+)
 
 
 def _tts_voice_attribution(backend: str) -> Attribution:
     if backend == "piper":
         return _PIPER_ATTRIBUTION
+    if backend == "kokoro":
+        return _KOKORO_ATTRIBUTION
     return _VOXHELM_ATTRIBUTION
 
 

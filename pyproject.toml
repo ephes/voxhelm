@@ -23,6 +23,12 @@ voxhelm-wyoming-stt = "transcriptions.wyoming:main"
 diarization = [
     "pyannote-audio>=4.0.4",
 ]
+kokoro = [
+    "onnxruntime>=1.27.0",
+    "phonemizer-fork>=3.3.2",
+    "espeakng-loader>=0.2.4",
+    "numpy>=2.0",
+]
 
 [dependency-groups]
 dev = [
@@ -37,6 +43,9 @@ dev = [
 DJANGO_SETTINGS_MODULE = "config.settings"
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+  "requires_models: needs the real Kokoro ONNX models/voicepacks and espeak-ng (skipped when absent)",
+]
 
 [tool.ruff]
 line-length = 100
@@ -66,6 +75,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "phonemizer", "phonemizer.*", "espeakng_loader"]
 ignore_missing_imports = true
 
 [build-system]
