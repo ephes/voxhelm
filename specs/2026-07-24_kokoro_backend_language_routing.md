@@ -1,8 +1,10 @@
 # Kokoro TTS Backend + Automatic Language Routing
 
 Status: DEPLOYED — implemented and live-verified on the studio 2026-07-24.
-Active branch: PRIMARY (de→kokoro-martin, en→kokoro-af_heart). One open
-item: the human listening test (Slice 6 item 7).
+Active branch: PRIMARY (de→kokoro-martin, en→kokoro-af_heart). The human
+listening test (Slice 6 item 7) passed on 2026-07-24: Jochen confirmed via
+the Voice PE that German answers use the German voice and English answers
+the English voice. All acceptance items are closed.
 
 ## Verified results (2026-07-24, studio, via loopback HTTP + HA API)
 
