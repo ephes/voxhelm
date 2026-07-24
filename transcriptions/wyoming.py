@@ -32,8 +32,8 @@ from wyoming.tts import Synthesize
 from lane_scheduler import LANE_INTERACTIVE
 from synthesis.service import (
     SynthesizeParams,
+    build_voice_registry,
     cleanup_paths,
-    discover_installed_voices,
     synthesize_text,
 )
 
@@ -46,6 +46,21 @@ from .service import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_PIPER_ATTRIBUTION = Attribution(
+    name="Piper",
+    url="https://github.com/OHF-Voice/piper1-gpl",
+)
+_VOXHELM_ATTRIBUTION = Attribution(
+    name="Voxhelm",
+    url="https://github.com/jochen/Voxhelm",
+)
+
+
+def _tts_voice_attribution(backend: str) -> Attribution:
+    if backend == "piper":
+        return _PIPER_ATTRIBUTION
+    return _VOXHELM_ATTRIBUTION
 
 
 @dataclass(frozen=True)
@@ -182,20 +197,14 @@ def build_wyoming_info(config: WyomingSttConfig) -> Info:
                     TtsVoice(
                         name=voice.key,
                         description=voice.name,
-                        attribution=Attribution(
-                            name="Piper",
-                            url="https://github.com/OHF-Voice/piper1-gpl",
-                        ),
+                        attribution=_tts_voice_attribution(voice.backend),
                         installed=True,
                         version="0.1.0",
                         languages=list(voice.languages),
                         speakers=[TtsVoiceSpeaker(name=speaker) for speaker in voice.speakers]
                         or None,
                     )
-                    for voice in discover_installed_voices(
-                        voice_dir=settings.VOXHELM_PIPER_VOICE_DIR,
-                        configured_voices=list(settings.VOXHELM_PIPER_VOICES),
-                    ).values()
+                    for voice in build_voice_registry().voices
                 ],
                 supports_synthesize_streaming=False,
             )

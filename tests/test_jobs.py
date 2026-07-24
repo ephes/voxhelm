@@ -1513,7 +1513,7 @@ def test_synthesize_job_uses_non_interactive_scheduler_lane(
     monkeypatch.setattr("synthesis.service.admit_local_inference", fake_admit)
     monkeypatch.setattr(
         "synthesis.service.get_backend_service",
-        lambda: type(
+        lambda *args, **kwargs: type(
             "Backend",
             (),
             {

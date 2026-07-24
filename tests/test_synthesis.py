@@ -10,7 +10,9 @@ from synthesis.service import (
     InstalledVoice,
     PiperBackend,
     SynthesisResult,
+    VoiceRegistry,
     build_voice_metadata,
+    build_voice_registry,
     discover_installed_voices,
     export_audio,
 )
@@ -62,11 +64,61 @@ def test_piper_backend_resolves_voice_by_language(tmp_path: Path) -> None:
     assert resolved == InstalledVoice(
         key="en_US-lessac-medium",
         name="en_US-lessac-medium",
+        backend="piper",
         languages=("en", "en_US"),
-        model_path=model_path,
-        config_path=config_path,
+        artifacts={"model": model_path, "config": config_path},
         speakers=("speaker_0",),
     )
+    assert resolved.model_path == model_path
+    assert resolved.config_path == config_path
+
+
+def test_build_voice_registry_lists_piper_voices(tmp_path: Path, settings) -> None:
+    write_voice_fixture(tmp_path, "en_US-lessac-medium")
+    settings.VOXHELM_TTS_BACKEND = "piper"
+    settings.VOXHELM_PIPER_VOICE_DIR = tmp_path
+    settings.VOXHELM_PIPER_VOICES = ["en_US-lessac-medium"]
+
+    registry = build_voice_registry()
+
+    assert [voice.key for voice in registry.voices] == ["en_US-lessac-medium"]
+    assert registry.voices[0].backend == "piper"
+    assert registry.default_backend == "piper"
+
+
+def test_voice_registry_dispatches_known_voice_to_its_backend() -> None:
+    registry = VoiceRegistry(
+        voices=(
+            InstalledVoice(
+                key="kokoro-martin",
+                name="kokoro-martin",
+                backend="kokoro",
+                languages=("de",),
+                artifacts={},
+            ),
+        ),
+        default_backend="piper",
+    )
+
+    assert registry.resolve_backend(voice="kokoro-martin", request_model="auto") == "kokoro"
+    # Case-insensitive alias resolves to the same backend.
+    assert registry.resolve_backend(voice="KOKORO-MARTIN", request_model="auto") == "kokoro"
+
+
+def test_voice_registry_unknown_or_unpinned_voice_uses_default_backend() -> None:
+    registry = VoiceRegistry(voices=(), default_backend="piper")
+
+    assert registry.resolve_backend(voice=None, request_model="auto") == "piper"
+    assert registry.resolve_backend(voice="", request_model="tts-1") == "piper"
+    # A pinned voice the registry does not know (e.g. a language alias) also
+    # falls back to the default backend so that backend resolves it internally.
+    assert registry.resolve_backend(voice="de", request_model="auto") == "piper"
+
+
+def test_voice_registry_default_backend_follows_configuration() -> None:
+    registry = VoiceRegistry(voices=(), default_backend="kokoro")
+
+    assert registry.resolve_backend(voice=None, request_model="auto") == "kokoro"
 
 
 def test_export_audio_returns_wav_without_conversion(tmp_path: Path) -> None:

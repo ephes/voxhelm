@@ -37,10 +37,49 @@ class SynthesizeParams:
 class InstalledVoice:
     key: str
     name: str
+    backend: str
     languages: tuple[str, ...]
-    model_path: Path
-    config_path: Path
+    artifacts: dict[str, Path]
     speakers: tuple[str, ...] = ()
+
+    @property
+    def model_path(self) -> Path:
+        return self.artifacts["model"]
+
+    @property
+    def config_path(self) -> Path:
+        return self.artifacts["config"]
+
+
+@dataclass(frozen=True)
+class VoiceRegistry:
+    """Backend-agnostic view of every installed voice across all backends."""
+
+    voices: tuple[InstalledVoice, ...]
+    default_backend: str
+
+    def by_key(self) -> dict[str, InstalledVoice]:
+        return {voice.key: voice for voice in self.voices}
+
+    def lookup(self, voice_key: str | None) -> InstalledVoice | None:
+        key = (voice_key or "").strip()
+        if not key:
+            return None
+        by_key = self.by_key()
+        exact = by_key.get(key)
+        if exact is not None:
+            return exact
+        lowered = {existing.lower(): existing for existing in by_key}
+        alias = lowered.get(key.lower())
+        return by_key[alias] if alias is not None else None
+
+    def resolve_backend(self, *, voice: str | None, request_model: str) -> str:
+        record = self.lookup(voice)
+        if record is not None:
+            return record.backend
+        if request_model in AUTO_BACKEND_MODEL_NAMES:
+            return self.default_backend
+        return request_model
 
 
 @dataclass(frozen=True)
@@ -174,28 +213,60 @@ class PiperBackend:
         return next(iter(installed.values()))
 
 
-def get_backend_service() -> BackendProtocol:
-    return build_backend_service(settings.VOXHELM_TTS_BACKEND)
+def get_backend_service(params: SynthesizeParams | None = None) -> BackendProtocol:
+    if params is None:
+        return build_backend_service(settings.VOXHELM_TTS_BACKEND)
+    backend_name = build_voice_registry().resolve_backend(
+        voice=params.voice,
+        request_model=params.request_model,
+    )
+    return build_backend_service(backend_name)
 
 
 def build_backend_service(backend_name: str) -> BackendProtocol:
     if resolve_backend_name_for_model(backend_name) == "piper":
-        return PiperBackend(
-            voice_dir=settings.VOXHELM_PIPER_VOICE_DIR,
-            configured_voices=list(settings.VOXHELM_PIPER_VOICES),
-            default_voice=settings.VOXHELM_PIPER_DEFAULT_VOICE,
-            language_voices=dict(settings.VOXHELM_PIPER_LANGUAGE_VOICES),
-        )
+        return build_piper_backend()
     raise RuntimeError(f"Unsupported TTS backend '{backend_name}'.")
 
 
+def build_piper_backend() -> PiperBackend:
+    return PiperBackend(
+        voice_dir=settings.VOXHELM_PIPER_VOICE_DIR,
+        configured_voices=list(settings.VOXHELM_PIPER_VOICES),
+        default_voice=settings.VOXHELM_PIPER_DEFAULT_VOICE,
+        language_voices=dict(settings.VOXHELM_PIPER_LANGUAGE_VOICES),
+    )
+
+
 def resolve_backend_name_for_model(request_model: str) -> str:
-    return "piper" if request_model in AUTO_BACKEND_MODEL_NAMES else request_model
+    if request_model in AUTO_BACKEND_MODEL_NAMES:
+        return settings.VOXHELM_TTS_BACKEND
+    return request_model
+
+
+def build_voice_registry() -> VoiceRegistry:
+    """Collect installed voices from every backend into one dispatch table.
+
+    Only Piper contributes voices today; additional backends append their own
+    records here and the requested/resolved voice key selects the backend.
+    """
+    voices: list[InstalledVoice] = list(piper_registry_voices().values())
+    return VoiceRegistry(
+        voices=tuple(voices),
+        default_backend=settings.VOXHELM_TTS_BACKEND,
+    )
+
+
+def piper_registry_voices() -> dict[str, InstalledVoice]:
+    return discover_installed_voices(
+        voice_dir=settings.VOXHELM_PIPER_VOICE_DIR,
+        configured_voices=list(settings.VOXHELM_PIPER_VOICES),
+    )
 
 
 def synthesize_text(text: str, params: SynthesizeParams) -> SynthesisResult:
     with admit_local_inference(params.scheduler_lane):
-        backend = get_backend_service()
+        backend = get_backend_service(params)
         return backend.synthesize(text, params)
 
 
@@ -279,9 +350,9 @@ def build_voice_metadata(*, voice_name: str, model_path: Path, config_path: Path
     return InstalledVoice(
         key=voice_name,
         name=voice_name,
+        backend="piper",
         languages=languages,
-        model_path=model_path,
-        config_path=config_path,
+        artifacts={"model": model_path, "config": config_path},
         speakers=speakers,
     )
 
