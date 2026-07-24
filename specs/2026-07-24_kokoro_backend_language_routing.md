@@ -1,7 +1,29 @@
 # Kokoro TTS Backend + Automatic Language Routing
 
-Status: PLAN — under review. Becomes the reference spec once implemented;
-verification sections get replaced with observed results.
+Status: DEPLOYED — implemented and live-verified on the studio 2026-07-24.
+Active branch: PRIMARY (de→kokoro-martin, en→kokoro-af_heart). One open
+item: the human listening test (Slice 6 item 7).
+
+## Verified results (2026-07-24, studio, via loopback HTTP + HA API)
+
+- Wyoming describe: Piper voices + kokoro-af_heart/kokoro-martin advertised,
+  ASR intact.
+- /v1/audio/speech: DE→kokoro-martin @24kHz, EN→kokoro-af_heart @24kHz
+  (X-Voxhelm headers asserted); German rules check (numbers/abbreviations,
+  pinned martin + routing:false) 7.0s audio, no errors; long-text chunking:
+  65.9s of audio synthesized in 6.4s wall (>510-token input, pinned martin).
+- Routing override: pinned de_DE-thorsten-high + English text →
+  kokoro-af_heart with effective language en. Floor: "Okay." with pinned
+  German voice stays on the pinned Piper voice.
+- HA E2E (DE pipeline, intent→tts): German question answered in German and
+  synthesized; English question answered in English and synthesized; TTS
+  proxy audio fetched for both.
+- Latency (median of 5 warm, ~15-word sentence): martin 0.43s,
+  af_heart 0.44s — both far under the 2.0s threshold; the int8 fallback
+  stays unused.
+- Rollback rehearsal: deploy with both flags false → only Piper voices
+  advertised, kokoro env absent; re-enable deploy restored routing; full
+  battery re-passed afterwards.
 
 ## Context
 
