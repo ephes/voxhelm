@@ -20,6 +20,7 @@ from config.settings import (
     validate_remote_pull_worker_tokens,
     validate_transcription_execution_mode,
 )
+from synthesis.service import SynthesizeParams
 from transcriptions.errors import ApiError
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
@@ -41,8 +42,18 @@ class DummyBackend:
 
 
 class DummySpeechResult:
-    def __init__(self, audio_path: Path) -> None:
+    def __init__(
+        self,
+        audio_path: Path,
+        *,
+        backend_name: str = "piper",
+        voice_name: str = "en_US-lessac-medium",
+        language: str | None = "en",
+    ) -> None:
         self.audio_path = audio_path
+        self.backend_name = backend_name
+        self.voice_name = voice_name
+        self.language = language
 
 
 def wav_bytes(*, frames: int = 320) -> bytes:
@@ -610,3 +621,113 @@ def test_speech_endpoint_rejects_out_of_range_speed(client):
 
     assert response.status_code == 400
     assert "between 0.25 and 4.0" in response.json()["error"]["message"]
+
+
+def _stub_export_audio(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "synthesis.views.export_audio",
+        lambda result, output_format: type(
+            "ExportedAudio",
+            (),
+            {"path": result.audio_path, "format_name": output_format, "content_type": "audio/wav"},
+        )(),
+    )
+
+
+def test_speech_endpoint_sets_voxhelm_headers(client, monkeypatch, tmp_path):
+    audio_path = tmp_path / "speech.wav"
+    audio_path.write_bytes(b"RIFFtest")
+
+    monkeypatch.setattr(
+        "synthesis.views.synthesize_text",
+        lambda text, params: DummySpeechResult(
+            audio_path, backend_name="kokoro", voice_name="kokoro-martin", language="de"
+        ),
+    )
+    _stub_export_audio(monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "auto", "input": "Ein hinreichend langer Satz."}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 200
+    assert response["X-Voxhelm-Backend"] == "kokoro"
+    assert response["X-Voxhelm-Voice"] == "kokoro-martin"
+    assert response["X-Voxhelm-Language"] == "de"
+
+
+def test_speech_endpoint_routing_field_reaches_params(client, monkeypatch, tmp_path):
+    audio_path = tmp_path / "speech.wav"
+    audio_path.write_bytes(b"RIFFtest")
+    captured: list[SynthesizeParams] = []
+
+    def fake_synthesize(text: str, params: SynthesizeParams) -> DummySpeechResult:
+        captured.append(params)
+        # The endpoint unlinks the audio file in its finally block, so recreate it
+        # for each request (this helper serves two POSTs).
+        audio_path.write_bytes(b"RIFFtest")
+        return DummySpeechResult(audio_path)
+
+    monkeypatch.setattr("synthesis.views.synthesize_text", fake_synthesize)
+    _stub_export_audio(monkeypatch)
+
+    bypass = client.post(
+        "/v1/audio/speech",
+        data=json.dumps(
+            {
+                "model": "kokoro",
+                "input": "Force this voice.",
+                "voice": "kokoro-martin",
+                "routing": False,
+            }
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    default = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "auto", "input": "Route this text please."}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert bypass.status_code == 200
+    assert default.status_code == 200
+    assert captured[0].routing is False
+    # Omitting the field defaults to routing enabled for the request.
+    assert captured[1].routing is True
+
+
+def test_speech_endpoint_rejects_non_boolean_routing(client):
+    response = client.post(
+        "/v1/audio/speech",
+        data=json.dumps({"model": "tts-1", "input": "Hello world", "routing": "yes"}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert "must be a boolean" in response.json()["error"]["message"]
+
+
+def test_language_routing_requires_extra_at_startup(monkeypatch):
+    import importlib.util
+
+    from config.settings import validate_language_routing_dependencies
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(ValueError, match="'routing' extra is not installed"):
+        validate_language_routing_dependencies(True)
+
+
+def test_language_routing_disabled_skips_dependency_check(monkeypatch):
+    import importlib.util
+
+    from config.settings import validate_language_routing_dependencies
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    # Disabled routing must never trip the startup dependency check.
+    validate_language_routing_dependencies(False)

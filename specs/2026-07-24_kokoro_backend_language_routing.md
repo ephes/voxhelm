@@ -155,7 +155,14 @@ One new backend, one routing layer, minimal surgery elsewhere:
 - **Verification surface:** `/v1/audio/speech` responses gain
   `X-Voxhelm-Backend`, `X-Voxhelm-Voice`, and `X-Voxhelm-Language` headers
   populated from `SynthesisResult` (added in Slice 3; also serves ongoing
-  debugging). Slice 6's metadata assertions read these headers.
+  debugging). The headers are UNCONDITIONAL new response surface —
+  present regardless of the routing flag; the "routing off =
+  byte-for-byte today's behavior" guarantee applies to synthesis
+  parameters and audio, not to these additive headers. Slice 6's metadata
+  assertions read them. When routing applies, it must also release an
+  explicitly pinned `request_model` (reset to auto) so registry dispatch
+  follows the mapped voice's backend — a language-routed voice can never
+  be held on the wrong backend by a pinned model name.
 
 ## Slices
 

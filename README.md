@@ -126,6 +126,18 @@ export VOXHELM_KOKORO_MODEL_DIR="$PWD/var/kokoro"
 export VOXHELM_KOKORO_MODELS="kokoro-af_heart=kokoro-v1.0.onnx:voices-v1.0.bin:af_heart:en-us,kokoro-martin=kokoro-martin.onnx:voices-martin.npz:martin:de"
 export VOXHELM_KOKORO_DEFAULT_VOICE=""
 export VOXHELM_ESPEAK_LIBRARY=""
+# Automatic language routing detects the language of outgoing TTS text and, when
+# the detection clears the routing floor (>=20 chars, >=0.90 confidence, a mapped
+# and registered voice), swaps the pinned voice for the language's mapped voice
+# and makes the detected language effective end-to-end (backend, SynthesisResult,
+# and the X-Voxhelm-Backend/Voice/Language response headers on /v1/audio/speech).
+# Needs the `routing` extra (`uv sync --extra routing`); enabling it without the
+# extra fails fast at startup. Default off (behavior byte-for-byte unchanged).
+# VOXHELM_TTS_LANGUAGE_VOICES maps a language code to a registry voice key across
+# all backends. Per HTTP request, `routing: false` bypasses routing (the Wyoming
+# path always routes).
+export VOXHELM_TTS_LANGUAGE_ROUTING="false"
+export VOXHELM_TTS_LANGUAGE_VOICES="de=kokoro-martin,en=kokoro-af_heart"
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"

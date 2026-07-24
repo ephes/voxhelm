@@ -29,6 +29,7 @@ class ParsedSpeechRequest:
     voice: str | None
     language: str | None
     speed: float
+    routing: bool
 
 
 @csrf_exempt
@@ -46,6 +47,7 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
                 voice=parsed_request.voice,
                 language=parsed_request.language,
                 speed=parsed_request.speed,
+                routing=parsed_request.routing,
             ),
         )
         exported = export_audio(result, output_format=parsed_request.response_format)
@@ -56,6 +58,11 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
         response["Content-Disposition"] = (
             f'inline; filename="speech.{exported.format_name}"'
         )
+        # Expose the effective backend/voice/language (post-routing) for debugging
+        # and Slice 6's metadata assertions.
+        response["X-Voxhelm-Backend"] = result.backend_name
+        response["X-Voxhelm-Voice"] = result.voice_name
+        response["X-Voxhelm-Language"] = result.language or ""
         return response
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
@@ -93,6 +100,7 @@ def parse_speech_request(request: HttpRequest) -> ParsedSpeechRequest:
     voice = optional_string(payload.get("voice"))
     language = optional_string(payload.get("language"))
     speed = validate_speed(payload.get("speed"))
+    routing = validate_routing(payload.get("routing"))
     return ParsedSpeechRequest(
         text=normalized_text,
         request_model=request_model,
@@ -100,6 +108,7 @@ def parse_speech_request(request: HttpRequest) -> ParsedSpeechRequest:
         voice=voice,
         language=language,
         speed=speed,
+        routing=routing,
     )
 
 
@@ -123,6 +132,14 @@ def validate_response_format(value: object) -> str:
         accepted = ", ".join(sorted(RESPONSE_FORMATS))
         raise ApiError(f"Unsupported response_format '{normalized}'. Accepted values: {accepted}.")
     return normalized
+
+
+def validate_routing(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise ApiError("The 'routing' field must be a boolean.")
+    return value
 
 
 def validate_speed(value: object) -> float:

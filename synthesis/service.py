@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import tempfile
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
-from typing import Protocol
+from typing import Any, NamedTuple, Protocol
 
 from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+
+_LOGGER = logging.getLogger(__name__)
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "piper", "tts-1", "tts-1-hd"}
 AUDIO_OUTPUT_FORMATS = {"wav", "mp3", "ogg"}
@@ -31,6 +34,10 @@ class SynthesizeParams:
     language: str | None
     speed: float
     scheduler_lane: str = LANE_NON_INTERACTIVE
+    # Per-request switch for automatic language routing. Defaults to True so
+    # callers that do not opt out (Wyoming, batch) always route when routing is
+    # enabled; /v1/audio/speech sets it from the request's `routing` field.
+    routing: bool = True
 
 
 @dataclass(frozen=True)
@@ -295,8 +302,121 @@ def piper_registry_voices() -> dict[str, InstalledVoice]:
 
 def synthesize_text(text: str, params: SynthesizeParams) -> SynthesisResult:
     with admit_local_inference(params.scheduler_lane):
-        backend = get_backend_service(params)
-        return backend.synthesize(text, params)
+        routed = apply_language_routing(text, params)
+        backend = get_backend_service(routed)
+        return backend.synthesize(text, routed)
+
+
+# Deterministic routing floor (spec §Architecture / Language routing). Routing
+# applies only when ALL criteria hold; any failure keeps the pinned voice/language.
+ROUTING_MIN_CHARS = 20
+ROUTING_MIN_CONFIDENCE = 0.90
+
+# lingua is restricted to these two languages; the detector is a lazy singleton so
+# importing this module never requires the optional `routing` extra.
+_ROUTING_DETECTOR: Any = None
+_ROUTING_DETECTOR_LOCK = Lock()
+
+
+class RoutingDetection(NamedTuple):
+    language: str
+    confidence: float
+
+
+def _routing_detector() -> Any:
+    global _ROUTING_DETECTOR
+    if _ROUTING_DETECTOR is None:
+        with _ROUTING_DETECTOR_LOCK:
+            if _ROUTING_DETECTOR is None:
+                from lingua import Language, LanguageDetectorBuilder
+
+                _ROUTING_DETECTOR = LanguageDetectorBuilder.from_languages(
+                    Language.GERMAN, Language.ENGLISH
+                ).build()
+    return _ROUTING_DETECTOR
+
+
+def detect_routing_language(text: str) -> RoutingDetection | None:
+    """Detect ``text``'s language with the de/en-restricted lingua detector.
+
+    Returns the top language's ISO-639-1 code (``de``/``en``) and its confidence
+    via ``compute_language_confidence_values`` so the routing floor can gate on
+    the confidence, or ``None`` when the detector yields no candidate.
+    """
+    values = _routing_detector().compute_language_confidence_values(text)
+    if not values:
+        return None
+    top = values[0]
+    return RoutingDetection(
+        language=top.language.iso_code_639_1.name.lower(),
+        confidence=float(top.value),
+    )
+
+
+def apply_language_routing(text: str, params: SynthesizeParams) -> SynthesizeParams:
+    """Route ``params`` to the detected language's voice, or return it unchanged.
+
+    Routing applies only when it is enabled, not bypassed for this request, and
+    every deterministic floor criterion holds: (a) stripped text >= 20 chars,
+    (b) top-language confidence >= 0.90, (c) the detected language is mapped in
+    VOXHELM_TTS_LANGUAGE_VOICES, and (d) the mapped voice exists in the registry
+    ((d) failing additionally logs a warning naming the voice). When it applies,
+    the mapped voice AND the detected language become effective end-to-end, and an
+    explicitly pinned ``request_model`` is released to ``auto`` so registry backend
+    dispatch follows the mapped voice's backend rather than the pinned model name.
+    Any failure keeps the pinned voice/language; this never raises for routing reasons.
+    """
+    if not params.routing or not settings.VOXHELM_TTS_LANGUAGE_ROUTING:
+        return params
+    language_voices = {
+        normalize_language_key(language): voice
+        for language, voice in settings.VOXHELM_TTS_LANGUAGE_VOICES.items()
+        if voice.strip()
+    }
+    if not language_voices:
+        return params
+
+    stripped = text.strip()
+    if len(stripped) < ROUTING_MIN_CHARS:  # (a)
+        return params
+
+    try:
+        detection = detect_routing_language(stripped)
+    except Exception:  # pragma: no cover - defensive; routing must never raise
+        _LOGGER.warning("Language routing detection failed; keeping pinned voice.", exc_info=True)
+        return params
+    if detection is None or detection.confidence < ROUTING_MIN_CONFIDENCE:  # (b)
+        return params
+
+    mapped_voice = language_voices.get(normalize_language_key(detection.language))  # (c)
+    if not mapped_voice:
+        return params
+
+    try:
+        registered = build_voice_registry().lookup(mapped_voice) is not None  # (d)
+    except Exception:
+        # Registry discovery reads voice artifacts from disk and can raise on
+        # unreadable/malformed files; routing must never fail the request.
+        _LOGGER.warning(
+            "Language routing registry lookup failed; keeping pinned voice.",
+            exc_info=True,
+        )
+        return params
+    if not registered:
+        _LOGGER.warning(
+            "Language routing mapped language '%s' to voice '%s', which is not in "
+            "the voice registry; keeping the pinned voice.",
+            detection.language,
+            mapped_voice,
+        )
+        return params
+
+    return replace(
+        params,
+        voice=mapped_voice,
+        language=detection.language,
+        request_model="auto",
+    )
 
 
 def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudio:

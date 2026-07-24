@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -138,6 +139,26 @@ def validate_positive_int(name: str, value: int) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer.")
     return value
+
+
+def validate_language_routing_dependencies(enabled: bool) -> None:
+    """Fail fast at startup when routing is enabled without the ``routing`` extra.
+
+    Automatic language routing needs ``lingua-language-detector``, shipped by the
+    optional ``routing`` extra. Enabling ``VOXHELM_TTS_LANGUAGE_ROUTING`` without
+    it installed is a deployment misconfiguration, so it is surfaced here at
+    settings-import time (service startup) rather than letting every request
+    silently skip routing. This startup check is the one place routing may raise;
+    at request time routing never raises for routing-related reasons.
+    """
+    if not enabled:
+        return
+    if importlib.util.find_spec("lingua") is None:
+        raise ValueError(
+            "VOXHELM_TTS_LANGUAGE_ROUTING is enabled but the 'routing' extra is not "
+            "installed. Install it with `uv sync --extra routing` "
+            "(lingua-language-detector) or disable language routing."
+        )
 
 
 REMOTE_PULL_SHARED_ARTIFACT_BACKENDS = {"s3"}
@@ -414,6 +435,19 @@ VOXHELM_KOKORO_DEFAULT_VOICE = os.getenv("VOXHELM_KOKORO_DEFAULT_VOICE", "").str
 # Optional override for the libespeak-ng shared library (else espeakng-loader's
 # bundled library is used).
 VOXHELM_ESPEAK_LIBRARY = os.getenv("VOXHELM_ESPEAK_LIBRARY", "").strip()
+# Automatic language routing (optional; requires the `routing` extra:
+# lingua-language-detector). When enabled, outgoing TTS text is language-detected
+# in synthesize_text (so Wyoming, HTTP, and batch all benefit) and, when the
+# detection clears the routing floor, the pinned voice is replaced by the detected
+# language's mapped voice and the detected language becomes effective end-to-end.
+# Default off, in which case synthesis behavior is byte-for-byte unchanged.
+# VOXHELM_TTS_LANGUAGE_VOICES maps a language code to a registry voice key across
+# all backends (env_map style), e.g.:
+#   VOXHELM_TTS_LANGUAGE_VOICES="de=kokoro-martin,en=kokoro-af_heart"
+# (The Piper-only VOXHELM_PIPER_LANGUAGE_VOICES is separate and unchanged.)
+VOXHELM_TTS_LANGUAGE_ROUTING = env_bool("VOXHELM_TTS_LANGUAGE_ROUTING", default=False)
+VOXHELM_TTS_LANGUAGE_VOICES = env_map("VOXHELM_TTS_LANGUAGE_VOICES")
+validate_language_routing_dependencies(VOXHELM_TTS_LANGUAGE_ROUTING)
 VOXHELM_TTS_MAX_INPUT_CHARS = int(os.getenv("VOXHELM_TTS_MAX_INPUT_CHARS", "5000"))
 # Accepted `model` field values for /v1/audio/speech. "auto"/"piper"/"tts-1"/
 # "tts-1-hd" resolve to the default backend (see AUTO_BACKEND_MODEL_NAMES);

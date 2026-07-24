@@ -29,6 +29,9 @@ kokoro = [
     "espeakng-loader>=0.2.4",
     "numpy>=2.0",
 ]
+routing = [
+    "lingua-language-detector>=2.1.1",
+]
 
 [dependency-groups]
 dev = [
@@ -79,6 +82,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["onnxruntime", "phonemizer", "phonemizer.*", "espeakng_loader"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["lingua", "lingua.*"]
 ignore_missing_imports = true
 
 [build-system]
