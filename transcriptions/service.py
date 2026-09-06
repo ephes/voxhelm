@@ -7,7 +7,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 from django.conf import settings
 
-from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
 from transcriptions import formats as transcript_formats
 from transcriptions.sanitizer import sanitize_result
 
@@ -47,6 +48,10 @@ class TranscribeParams:
     prompt: str | None
     language: str | None
     scheduler_lane: str = LANE_NON_INTERACTIVE
+    # Cooperative cancellation: set by the caller (the sync HTTP view on client
+    # disconnect). Excluded from equality/repr so parameter comparisons and log
+    # lines stay unchanged.
+    cancel_event: threading.Event | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -136,17 +141,21 @@ class MlxWhisperBackend:
                 "mlx-whisper is not installed. Install the project dependencies first."
             ) from exc
 
-        payload = mlx_whisper.transcribe(
-            str(audio_path),
-            path_or_hf_repo=self.model_name,
-            word_timestamps=False,
-            initial_prompt=params.prompt,
-            language=params.language,
-            # Off by default: conditioning on prior text is Whisper's main long-form
-            # repetition-loop trigger (see settings). compression_ratio_threshold and
-            # temperature fallback stay at mlx-whisper defaults.
-            condition_on_previous_text=self.condition_on_previous_text,
-        )
+        # mlx-whisper keeps model state in this process, so overlapping calls are
+        # not safe here. Other processes (Wyoming sidecar) have their own lock.
+        with _MLX_LOCK:
+            _raise_if_cancelled(params)
+            payload = mlx_whisper.transcribe(
+                str(audio_path),
+                path_or_hf_repo=self.model_name,
+                word_timestamps=False,
+                initial_prompt=params.prompt,
+                language=params.language,
+                # Off by default: conditioning on prior text is Whisper's main long-form
+                # repetition-loop trigger (see settings). compression_ratio_threshold and
+                # temperature fallback stay at mlx-whisper defaults.
+                condition_on_previous_text=self.condition_on_previous_text,
+            )
         return normalize_transcription_payload(
             payload,
             backend_name="mlx-whisper",
@@ -209,14 +218,8 @@ class WhisperCppBackend:
             if params.prompt:
                 args.extend(["--prompt", params.prompt])
 
-            completed = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
+            _raise_if_cancelled(params)
+            completed = run_cancellable_process(args, cancel_event=params.cancel_event)
             if completed.returncode != 0:
                 detail = "\n".join(
                     part.strip()
@@ -315,7 +318,74 @@ class WhisperKitBackend:
         )
 
 
-_TRANSCRIPTION_LOCK = Lock()
+_MLX_LOCK = Lock()
+
+
+def _raise_if_cancelled(params: TranscribeParams) -> None:
+    cancel_event = params.cancel_event
+    if cancel_event is not None and cancel_event.is_set():
+        raise InferenceCancelled("Local inference was cancelled by the caller.")
+
+
+def run_cancellable_process(
+    args: list[str],
+    *,
+    cancel_event: threading.Event | None,
+    poll_seconds: float = 0.25,
+    terminate_grace_seconds: float = 5.0,
+) -> subprocess.CompletedProcess[str]:
+    """Run a child process, terminating it when ``cancel_event`` is set.
+
+    Without a cancel event this behaves like ``subprocess.run(capture_output=True)``.
+    On cancellation the child gets SIGTERM, then SIGKILL after
+    ``terminate_grace_seconds``, and is always reaped with its pipes drained
+    before ``InferenceCancelled`` propagates.
+    """
+    # The context manager closes both pipes and waits on every exit path, so a
+    # failure anywhere below can leave neither an open descriptor nor a zombie.
+    with subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ) as process:
+        try:
+            while True:
+                if cancel_event is None:
+                    stdout, stderr = process.communicate()
+                    break
+                try:
+                    stdout, stderr = process.communicate(timeout=poll_seconds)
+                except subprocess.TimeoutExpired:
+                    if not cancel_event.is_set():
+                        continue
+                    _terminate_process(process, grace_seconds=terminate_grace_seconds)
+                    raise InferenceCancelled(
+                        "Local inference was cancelled while the child process was running."
+                    ) from None
+                break
+        except BaseException:
+            # The child must never outlive this call, whatever went wrong.
+            process.kill()
+            raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _terminate_process(
+    process: subprocess.Popen[str],
+    *,
+    grace_seconds: float,
+) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    # Drain and close the pipes so no file descriptor or zombie survives.
+    process.communicate()
 
 
 def normalize_transcription_payload(
@@ -646,24 +716,32 @@ def resolve_whispercpp_model_path(model_name: str) -> Path:
 
 
 def transcribe_audio(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
-    with admit_local_inference(params.scheduler_lane):
-        # Local STT backends are not safe to run concurrently inside this long-lived process.
-        with _TRANSCRIPTION_LOCK:
-            unavailable_errors: list[str] = []
-            for invocation in get_backend_services_for_model(params.request_model):
-                try:
-                    result = invocation.service.transcribe(audio_path, params)
-                except BackendUnavailableError as exc:
-                    unavailable_errors.append(f"{invocation.name}: {exc}")
-                    continue
-                return sanitize_result(
-                    result,
-                    enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
-                    repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
-                )
+    # Concurrency model: subprocess backends (whisper.cpp) and sidecar backends
+    # (WhisperKit) are bounded by the cross-process lane scheduler alone, so two
+    # of them may overlap on the GPU. Backends that keep model state in this
+    # process take their own per-backend lock (see ``_MLX_LOCK``); that lock is
+    # process-local, so the Wyoming sidecar serializes independently.
+    with admit_local_inference(params.scheduler_lane, cancel_event=params.cancel_event):
+        _raise_if_cancelled(params)
+        unavailable_errors: list[str] = []
+        for invocation in get_backend_services_for_model(params.request_model):
+            _raise_if_cancelled(params)
+            try:
+                result = invocation.service.transcribe(audio_path, params)
+            except BackendUnavailableError as exc:
+                unavailable_errors.append(f"{invocation.name}: {exc}")
+                continue
+            return sanitize_result(
+                result,
+                enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
+                repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
+            )
 
-            joined = "; ".join(unavailable_errors)
-            raise RuntimeError(f"No configured STT backend is available. {joined}")
+        # A cancellation that arrived while the last backend ran must surface as
+        # InferenceCancelled, never as a backend-availability failure.
+        _raise_if_cancelled(params)
+        joined = "; ".join(unavailable_errors)
+        raise RuntimeError(f"No configured STT backend is available. {joined}")
 
 
 def serialize_health() -> str:

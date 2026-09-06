@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,12 +21,15 @@ from .errors import ApiError
 from .input_media import detect_suffix, download_allowed_url_to_tempfile, write_upload_to_tempfile
 from .observability import emit_transcription_debug_log, summarize_audio_file
 from .service import (
+    InferenceCancelled,
     TranscribeParams,
     TranscriptionResult,
     render_verbose_json,
     render_vtt,
     transcribe_audio,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 RESPONSE_FORMATS: Final[set[str]] = {"json", "text", "verbose_json", "vtt"}
 
@@ -45,12 +51,59 @@ def health(request: HttpRequest) -> JsonResponse:
 
 @csrf_exempt
 @require_POST
-def audio_transcriptions(request: HttpRequest) -> HttpResponse:
-    temp_path: Path | None = None
+async def audio_transcriptions(request: HttpRequest) -> HttpResponse:
+    """Transcribe one upload, cancelling local inference when the client disconnects.
+
+    Django's ASGI handler cancels this coroutine on ``http.disconnect``. The two
+    phases below both run in worker threads behind ``asyncio.shield`` so a
+    disconnect never leaves the request body being read after the handler closed
+    it, and never abandons a running child process or a temp file.
+    """
+    parse_task = asyncio.ensure_future(asyncio.to_thread(_parse_request, request))
     try:
-        require_bearer_token(request)
-        parsed_request = parse_transcription_request(request)
-        temp_path = parsed_request.input_path
+        parsed_request = await asyncio.shield(parse_task)
+    except asyncio.CancelledError:
+        # Nothing was admitted yet; let the shielded parse finish reading the body
+        # before the ASGI handler closes it, then drop whatever it produced.
+        await asyncio.wait([parse_task])
+        if not parse_task.cancelled() and parse_task.exception() is None:
+            parse_task.result().input_path.unlink(missing_ok=True)
+        raise
+    except ApiError as exc:
+        return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
+    except RuntimeError as exc:
+        return openai_error_response(str(exc), status=500, error_type="server_error")
+
+    cancel_event = threading.Event()
+    inference_task = asyncio.ensure_future(
+        asyncio.to_thread(_run_transcription, parsed_request, cancel_event)
+    )
+    try:
+        result = await asyncio.shield(inference_task)
+    except asyncio.CancelledError:
+        # The shielded task keeps running: it terminates the child process (or
+        # raises at its first checkpoint if the worker thread has not started
+        # yet), releases the scheduler slot and deletes the temp file.
+        cancel_event.set()
+        inference_task.add_done_callback(_consume_detached_result)
+        raise
+    except ApiError as exc:
+        return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
+    except RuntimeError as exc:
+        return openai_error_response(str(exc), status=500, error_type="server_error")
+    return render_response(result=result, response_format=parsed_request.response_format)
+
+
+def _parse_request(request: HttpRequest) -> ParsedRequest:
+    require_bearer_token(request)
+    return parse_transcription_request(request)
+
+
+def _run_transcription(
+    parsed_request: ParsedRequest,
+    cancel_event: threading.Event,
+) -> TranscriptionResult:
+    try:
         started_at = time.monotonic()
         result = transcribe_audio(
             parsed_request.input_path,
@@ -58,6 +111,7 @@ def audio_transcriptions(request: HttpRequest) -> HttpResponse:
                 request_model=parsed_request.request_model,
                 prompt=parsed_request.prompt,
                 language=parsed_request.language,
+                cancel_event=cancel_event,
             ),
         )
         emit_transcription_debug_log(
@@ -69,14 +123,26 @@ def audio_transcriptions(request: HttpRequest) -> HttpResponse:
             result=result,
             duration_ms=int((time.monotonic() - started_at) * 1000),
         )
-        return render_response(result=result, response_format=parsed_request.response_format)
-    except ApiError as exc:
-        return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
-    except RuntimeError as exc:
-        return openai_error_response(str(exc), status=500, error_type="server_error")
+        return result
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        parsed_request.input_path.unlink(missing_ok=True)
+
+
+def _consume_detached_result(task: asyncio.Future[TranscriptionResult]) -> None:
+    """Retrieve the outcome of a transcription abandoned by a client disconnect."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is None:
+        task.result()
+        return
+    if isinstance(error, InferenceCancelled):
+        return
+    # Only the exception type is logged: transcripts and audio never reach the log.
+    _LOGGER.warning(
+        "Transcription abandoned after client disconnect failed with %s.",
+        type(error).__name__,
+    )
 
 
 def require_bearer_token(request: HttpRequest) -> str:
@@ -148,13 +214,20 @@ def parse_json_request(request: HttpRequest) -> ParsedRequest:
     if not isinstance(source_url, str) or not source_url.strip():
         raise ApiError("JSON requests must include a non-empty 'url' field.")
 
+    # Validate every field before downloading: a rejection after the download
+    # would leak the temp file, which no caller owns until parsing succeeds.
+    request_model = validate_model(payload.get("model"))
+    prompt = optional_string(payload.get("prompt"))
+    language = optional_string(payload.get("language"))
+    response_format = validate_response_format(payload.get("response_format"))
+
     temp_path = download_allowed_url_to_tempfile(source_url=source_url.strip())
     return ParsedRequest(
         input_path=temp_path,
-        request_model=validate_model(payload.get("model")),
-        prompt=optional_string(payload.get("prompt")),
-        language=optional_string(payload.get("language")),
-        response_format=validate_response_format(payload.get("response_format")),
+        request_model=request_model,
+        prompt=prompt,
+        language=language,
+        response_format=response_format,
     )
 
 
