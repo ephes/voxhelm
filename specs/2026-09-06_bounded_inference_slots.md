@@ -158,15 +158,20 @@ verification), not blocked.
      re-raises. Nothing was admitted yet, so there is nothing to terminate.
   2. Inference phase runs `transcribe_audio` in a worker thread with the
      cancel event, as a retained task awaited through `asyncio.shield`. On
-     `asyncio.CancelledError` the view sets the event, attaches a done-callback
-     that consumes the task's result or exception (logging anything other than
-     `InferenceCancelled`), and re-raises at once. Because the inner task is
-     shielded it is never cancelled itself: if its thread has not started yet
-     (executor saturated) it still runs later, hits the first checkpoint, and
-     raises `InferenceCancelled`; if it is running, it terminates the child and
-     releases the slot. In both cases the thread function's own `finally`
-     deletes the temp file (ownership of the temp file moves to the inference
-     thread for this phase).
+     `asyncio.CancelledError` the view sets the event and re-raises at once.
+     Because the inner task is shielded it is never cancelled itself: if its
+     thread has not started yet (executor saturated) it still runs later, hits
+     the first checkpoint, and stops; if it is running, it terminates the child
+     and releases the slot. The thread function normalizes an expected
+     cancellation: when `InferenceCancelled` is raised while the cancel event
+     is set it returns `None`, so the detached task finishes normally and
+     asyncio has nothing to report (Python 3.12+ would otherwise log
+     "exception in shielded future" for every disconnect). Any other failure
+     of the detached task is retrieved and logged by asyncio's shield handler
+     itself; the view keeps no done-callback. In both cases the thread
+     function's own `finally` deletes the temp file (ownership of the temp file
+     moves to the inference thread for this phase). A `None` result without a
+     preceding cancellation cannot happen in practice and maps to a 500.
   Django 5.2's ASGI handler cancels the request task on `http.disconnect`
   ([docs](https://docs.djangoproject.com/en/5.2/topics/async/#handling-disconnects)).
   Under WSGI/`runserver` and the Django test client the view runs through

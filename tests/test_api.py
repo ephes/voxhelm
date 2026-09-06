@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import tempfile
 import threading
 import time
@@ -835,8 +836,9 @@ def _wait_until_gone(path: Path, *, timeout: float = 10.0) -> bool:
     return not path.exists()
 
 
-def test_asgi_disconnect_during_inference_cancels_and_cleans_up(monkeypatch):
+def test_asgi_disconnect_during_inference_cancels_and_cleans_up(monkeypatch, caplog):
     running = threading.Event()
+    finished = threading.Event()
     observed: dict[str, Any] = {}
 
     def fake_transcribe_audio(audio_path: Path, params: TranscribeParams):
@@ -844,14 +846,28 @@ def test_asgi_disconnect_during_inference_cancels_and_cleans_up(monkeypatch):
         observed["cancel_event"] = params.cancel_event
         running.set()
         assert params.cancel_event is not None
-        params.cancel_event.wait(timeout=10)
-        raise InferenceCancelled("cancelled by the client")
+        try:
+            params.cancel_event.wait(timeout=10)
+            raise InferenceCancelled("cancelled by the client")
+        finally:
+            finished.set()
 
     monkeypatch.setattr("transcriptions.views.transcribe_audio", fake_transcribe_audio)
     body, content_type = _multipart_upload_body()
     connection = ScriptedConnection(body)
 
     async def scenario() -> None:
+        # Record every task the view creates so the detached, shielded
+        # inference task can be awaited to completion inside this loop.
+        created: list[asyncio.Task[Any]] = []
+        loop = asyncio.get_running_loop()
+
+        def record_task(loop: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any) -> Any:
+            task = asyncio.Task(coro, loop=loop, **kwargs)
+            created.append(task)
+            return task
+
+        loop.set_task_factory(record_task)
         application = get_asgi_application()
         call = asyncio.ensure_future(
             application(
@@ -863,13 +879,27 @@ def test_asgi_disconnect_during_inference_cancels_and_cleans_up(monkeypatch):
         assert await _await_flag(running)
         connection.disconnect.set()
         await asyncio.wait_for(call, timeout=10)
+        # Wait for the detached inference task itself to finish inside this
+        # loop, then let its done-callbacks run, so its outcome (and any
+        # asyncio complaint about it) is observed here rather than suppressed
+        # by asyncio.run() cancelling leftovers at shutdown.
+        assert await _await_flag(finished)
+        detached = [task for task in created if task is not asyncio.current_task()]
+        assert detached, "the shielded inference task should have been recorded"
+        done, pending = await asyncio.wait(detached, timeout=10)
+        assert pending == set()
+        await asyncio.sleep(0)
 
+    caplog.set_level(logging.ERROR, logger="asyncio")
     asyncio.run(scenario())
 
     cancel_event = cast(threading.Event, observed["cancel_event"])
     assert cancel_event.is_set()
     assert connection.sent == []
     assert _wait_until_gone(cast(Path, observed["audio_path"]))
+    # An expected cancellation must not surface as an "exception in shielded
+    # future" error from asyncio; the detached task finishes normally.
+    assert [record for record in caplog.records if record.name == "asyncio"] == []
 
 
 def test_asgi_disconnect_during_parsing_finishes_the_body_read(monkeypatch):

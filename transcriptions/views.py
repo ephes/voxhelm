@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -28,8 +27,6 @@ from .service import (
     render_vtt,
     transcribe_audio,
 )
-
-_LOGGER = logging.getLogger(__name__)
 
 RESPONSE_FORMATS: Final[set[str]] = {"json", "text", "verbose_json", "vtt"}
 
@@ -82,15 +79,21 @@ async def audio_transcriptions(request: HttpRequest) -> HttpResponse:
         result = await asyncio.shield(inference_task)
     except asyncio.CancelledError:
         # The shielded task keeps running: it terminates the child process (or
-        # raises at its first checkpoint if the worker thread has not started
-        # yet), releases the scheduler slot and deletes the temp file.
+        # stops at its first checkpoint if the worker thread has not started
+        # yet), releases the scheduler slot, deletes the temp file and then
+        # finishes normally, so asyncio has nothing to report for it. Any other
+        # failure of the detached task is logged by asyncio's shield handler.
         cancel_event.set()
-        inference_task.add_done_callback(_consume_detached_result)
         raise
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
     except RuntimeError as exc:
         return openai_error_response(str(exc), status=500, error_type="server_error")
+    if result is None:
+        # Only reachable if the cancel event fired without a client disconnect.
+        return openai_error_response(
+            "Transcription was cancelled.", status=500, error_type="server_error"
+        )
     return render_response(result=result, response_format=parsed_request.response_format)
 
 
@@ -102,7 +105,8 @@ def _parse_request(request: HttpRequest) -> ParsedRequest:
 def _run_transcription(
     parsed_request: ParsedRequest,
     cancel_event: threading.Event,
-) -> TranscriptionResult:
+) -> TranscriptionResult | None:
+    """Run the transcription; return None when it was cancelled by the caller."""
     try:
         started_at = time.monotonic()
         result = transcribe_audio(
@@ -124,25 +128,12 @@ def _run_transcription(
             duration_ms=int((time.monotonic() - started_at) * 1000),
         )
         return result
+    except InferenceCancelled:
+        if not cancel_event.is_set():
+            raise
+        return None
     finally:
         parsed_request.input_path.unlink(missing_ok=True)
-
-
-def _consume_detached_result(task: asyncio.Future[TranscriptionResult]) -> None:
-    """Retrieve the outcome of a transcription abandoned by a client disconnect."""
-    if task.cancelled():
-        return
-    error = task.exception()
-    if error is None:
-        task.result()
-        return
-    if isinstance(error, InferenceCancelled):
-        return
-    # Only the exception type is logged: transcripts and audio never reach the log.
-    _LOGGER.warning(
-        "Transcription abandoned after client disconnect failed with %s.",
-        type(error).__name__,
-    )
 
 
 def require_bearer_token(request: HttpRequest) -> str:
