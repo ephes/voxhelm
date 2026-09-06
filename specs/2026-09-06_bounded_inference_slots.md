@@ -1,7 +1,41 @@
 # Bounded Inference Slots for the C13 Lane Scheduler
 
-Status: PLANNED (design reviewed 2026-09-06, implementation in progress). Decision: D-24 in
-`decision-log.md` (reopens D-19 Option B with new evidence).
+Status: DEPLOYED — implemented, reviewed and live-verified on the studio
+2026-09-06 (commits ba5be43, 281fae1, 9bb083e, b95124d on `main`; ops-library
+aca7ffb; ops-control cb2e8a2). Decision: D-24 in `decision-log.md` (reopens
+D-19 Option B with new evidence).
+
+## Verified results (2026-09-06, studio, content-free synthetic audio)
+
+Method: a 20-minute mono MP3 (48 kbps, 7.2 MB) generated locally with `say`
+plus `ffmpeg`, sent to `POST /v1/audio/transcriptions` (`model=whisper-1`)
+directly against uvicorn on `studio:8787`; a 3-second WAV from the same
+synthetic voice sent through the Wyoming protocol to `studio:10300` with the
+`wyoming` client library. Production config: `1 + 1` slots, `whispercpp`
+(large-v3) for HTTP, `mlx` (large-v3) in the Wyoming sidecar.
+
+| Measurement | Result |
+|---|---|
+| Wyoming STT latency, idle host, warm (3 runs, before and after deploy) | 0.39 to 0.40 s |
+| Wyoming STT latency while `whisper-cli` runs the 20-minute job (10 consecutive probes) | 0.57 to 0.85 s, median 0.64 s |
+| Scheduler wait for those interactive requests (`lane_scheduler admitted ... holders=2/2`) | 0 to 2 ms, all 10 admitted as second holder |
+| Long job (three runs) | HTTP 200 in 65 s, 52 s, 52 s; 3884 words each (about 18x realtime) |
+| Peak RSS during overlap | `whisper-cli` 6.9 GB, Wyoming sidecar 3.6 GB, uvicorn 78 MB (host 128 GiB) |
+| Client disconnect through Traefik (`--max-time 20`), three runs | `whisper-cli` present at +10 s, gone and `holders/` empty at +22 s |
+| Client disconnect directly against uvicorn | same: present at +10 s, gone and slot released at +22 s |
+| Error log after disconnects on the final build | no `exception in shielded future` traceback (one per disconnect on the first build, fixed in b95124d) |
+| Remote-pull batch path | worker heartbeat/claim requests continued through both deploys; the code path is untouched |
+
+Interpretation: with one long non-interactive `whisper-cli` inference running,
+an interactive Wyoming request is admitted immediately and completes in well
+under a second; the roughly 1.6x slowdown versus an idle host is the expected
+Metal GPU share, not queueing. Cold-start note: the first Wyoming request after
+a sidecar restart takes 2 to 21 s while `mlx` loads the model; that is
+unchanged by this slice.
+
+Deployment note: the ops-control canonical checkout was found on a stale
+workspace branch and was switched to current `main` before deploying, because
+the stale branch lacked the Voice Memo inbox and OpenClaw token wiring.
 
 ## Problem
 

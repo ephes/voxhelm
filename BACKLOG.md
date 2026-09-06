@@ -84,8 +84,12 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [x] Scheduler slots, per-holder recovery, legacy `holder.json` accounting, per-backend locks, `whisper-cli`
   termination on client disconnect, config knobs, tests.
 - [x] ops-library `voxhelm_deploy` vars and ops-control pins (`1 + 1`).
-- [ ] Deploy to `studio` and record the live measurement (interactive latency with and without a concurrent
-  long job, peak memory, long job completion, disconnect check) in the spec.
+- [x] Deploy to `studio` and record the live measurement (interactive latency with and without a concurrent
+  long job, peak memory, long job completion, disconnect check) in the spec (2026-09-06).
+- [ ] Follow-up (out of this slice): the `voxhelm-remote-worker` process that runs on `studio` itself calls the
+  STT backend directly (`transcribe_claim_audio`) and does not take a scheduler slot, so a studio-claimed
+  podcast job shares the GPU with Wyoming without being counted. Decide whether that worker should acquire a
+  non-interactive slot (see the "Preserve the C13 lane scheduler" item above).
 
 ## Speaker diarization deployment and consumer follow-through
 
