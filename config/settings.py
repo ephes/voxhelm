@@ -141,6 +141,12 @@ def validate_positive_int(name: str, value: int) -> int:
     return value
 
 
+def validate_non_negative_int(name: str, value: int) -> int:
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    return value
+
+
 def validate_language_routing_dependencies(enabled: bool) -> None:
     """Fail fast at startup when routing is enabled without the ``routing`` extra.
 
@@ -389,6 +395,14 @@ VOXHELM_LANE_SCHEDULER_DIR = Path(
 )
 VOXHELM_LANE_SCHEDULER_STALE_SECONDS = int(
     os.getenv("VOXHELM_LANE_SCHEDULER_STALE_SECONDS", "1800")
+)
+VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS = validate_non_negative_int(
+    "VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS",
+    int(os.getenv("VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS", "1")),
+)
+VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS = validate_positive_int(
+    "VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS",
+    int(os.getenv("VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS", "1")),
 )
 VOXHELM_MAX_UPLOAD_BYTES = int(os.getenv("VOXHELM_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 VOXHELM_MAX_UPLOAD_MIB = VOXHELM_MAX_UPLOAD_BYTES // (1024 * 1024)

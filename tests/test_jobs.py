@@ -1309,7 +1309,8 @@ def test_transcription_job_uses_non_interactive_scheduler_lane(
     media_path.write_bytes(b"mp3-bytes")
 
     @contextmanager
-    def fake_admit(lane: str):
+    def fake_admit(lane: str, *, cancel_event=None):
+        del cancel_event
         lanes.append(lane)
         yield object()
 
