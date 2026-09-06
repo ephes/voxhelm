@@ -1083,13 +1083,15 @@ def test_asgi_disconnect_with_saturated_executor_cancels_before_the_backend(monk
     assert not cast(Path, produced["path"]).exists()
 
 
-def test_json_request_rejects_invalid_model_before_downloading(client, monkeypatch, settings):
+def test_json_request_rejects_invalid_model_before_downloading(
+    client, monkeypatch, settings, tmp_path
+):
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
     downloads: list[str] = []
 
     def fake_download(*, source_url: str):
         downloads.append(source_url)
-        path = Path(settings.BASE_DIR) / "tmp-test-invalid-model.mp3"
+        path = tmp_path / "invalid-model.mp3"
         path.write_bytes(b"mp3-bytes")
         return path
 
