@@ -316,9 +316,9 @@ Remote worker leases are controlled by `studio` server time. Claiming must be SQ
 | `interactive` | Wyoming STT and Wyoming TTS only | Internal runtime classification; not exposed through `POST /v1/jobs` |
 | `non-interactive` | `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, batch `transcribe`, batch `synthesize` | Internal scheduler lane. This intentionally includes sync HTTP inference even though the producer-facing job model still only exposes `lane=batch` |
 
-**Reviewed C13 mechanism:** Host-wide admission control plus cooperative serialization. All local inference on `studio` shares one scheduler gate and one admission slot for both STT and TTS. A waiting Wyoming request jumps ahead of queued non-interactive work, but Voxhelm does not interrupt work that already holds the gate.
+**Reviewed C13 mechanism (updated by D-24, 2026-09-06):** Host-wide admission control with a small bounded slot set. All local inference on `studio` shares one scheduler gate; the gate has one slot reserved for the interactive lane plus one non-interactive slot (both configurable, pinned `1 + 1` in production). A waiting Wyoming request jumps ahead of queued non-interactive work, but Voxhelm does not interrupt work that already holds a slot. Only separate-process backends (`whisper-cli`, WhisperKit sidecar) overlap; in-process backends keep a per-backend lock inside their process.
 
-**Feasible guarantee on one host:** Voxhelm can prevent new HTTP/batch inference from starting ahead of a waiting Wyoming request and can avoid simultaneous heavy inference across processes. It cannot guarantee sub-second latency if an earlier HTTP/batch inference is already running when the Wyoming request arrives.
+**Feasible guarantee on one host:** A Wyoming request is admitted immediately whenever total capacity is not exhausted, which with `1 + 1` slots means at most one non-interactive inference is running and no other interactive request holds the reserved slot. Its latency is then bounded by GPU sharing with the running non-interactive job, not by that job's remaining runtime.
 
 **Consumers:**
 - Home Assistant Assist pipeline.

@@ -553,7 +553,7 @@ First-slice details:
 
 ## D-24: Should the C13 lane scheduler admit more than one local inference at a time?
 
-**Status:** Proposed 2026-09-06, under planning review; becomes Accepted when the slice is implemented and live-verified. Slice description: `specs/2026-09-06_bounded_inference_slots.md`. Reopens the Option B branch of D-19 with new evidence; D-19 itself stays the record of the first slice.
+**Status:** Accepted 2026-09-06 after three planning review rounds; implementation under code review, live verification on `studio` pending (this line is updated when the verification is recorded in the slice description). Slice description: `specs/2026-09-06_bounded_inference_slots.md`. Reopens the Option B branch of D-19 with new evidence; D-19 itself stays the record of the first slice.
 
 **Context:** D-19 accepted single-slot cooperative serialization and explicitly deferred "reserved parallel slots per lane" as risky for memory pressure and not clearly needed on `studio`. Since then two things changed. First, the interactive path proved to be starved in practice: the scheduler cannot preempt a running inference, so a 40-minute voice memo through the sync endpoint (15 to 20 minutes of `whisper-cli`) blocks the Home Assistant voice pipeline for that long, and the Daybook Voice Memo importer is about to add a long-memo lane while podcast-length batch jobs already exist. Second, measurements on 2026-09-05 removed the memory concern: `studio` (M4 Max, 128 GiB) runs two or three concurrent `whisper-cli` processes with the 2.9 GiB `ggml-large-v3.bin` without memory pressure; the shared resource is Metal GPU time, and concurrent runs slow each other roughly proportionally. Production STT is `whispercpp` (one subprocess per request) with `mlx` as fallback, and the Wyoming sidecar runs `mlx` in its own process.
 
@@ -580,7 +580,7 @@ First-slice details:
 
 **Not decided here:** slot counts above `1 + 1`, a status API, importer-side scheduling, preemption, and any local `studio` pull worker (which must keep using this scheduler, see BACKLOG).
 
-**Blocks implementation:** Yes for the slice; no for the architecture.
+**Blocks implementation:** No; the design review is complete and implementation follows `specs/2026-09-06_bounded_inference_slots.md`.
 
 ---
 

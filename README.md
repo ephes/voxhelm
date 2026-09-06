@@ -112,6 +112,12 @@ export VOXHELM_WYOMING_STT_MODEL=""
 export VOXHELM_WYOMING_STT_LANGUAGE=""
 export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
+# Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
+export VOXHELM_LANE_SCHEDULER_ENABLED="false"
+export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"
+export VOXHELM_LANE_SCHEDULER_STALE_SECONDS="1800"
+export VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS="1"
+export VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS="1"
 # Text-to-speech. Piper is the default backend. The optional Kokoro ONNX backend
 # (English "af_heart" + the German "Martin" fine-tune) needs the `kokoro` extra
 # (`uv sync --extra kokoro`) plus espeak-ng (`brew install espeak-ng`). Each
@@ -455,6 +461,53 @@ one structured `stt_debug` log line per transcription with the input audio
 shape, requested and resolved backend/model/language, transcript preview, and
 latency.
 
+## Lane Scheduler
+
+All local STT and TTS inference on one host (sync `POST /v1/audio/transcriptions`,
+`POST /v1/audio/speech`, local batch jobs, and the Wyoming sidecar) passes through
+one cross-process lane scheduler (`lane_scheduler.py`, state under
+`VOXHELM_LANE_SCHEDULER_DIR`). Wyoming requests are the `interactive` lane;
+everything else is `non-interactive`; callers cannot choose a lane.
+
+Capacity is a small, bounded set of slots (decision D-24):
+
+- `VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS` (default `1`) are reserved for the
+  interactive lane. Non-interactive work never occupies them.
+- `VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS` (default `1`) cap how many
+  non-interactive inferences run at once. Interactive requests may also use an
+  idle non-interactive slot.
+- Waiters are admitted by lane priority (interactive first), then FIFO. Running
+  work is never preempted. With the defaults, one Wyoming request is admitted
+  immediately while one long HTTP transcription is inside `whisper-cli`; both
+  then share the GPU, so the interactive request is slower than on an idle host
+  but not blocked.
+- Each holder is recorded as its own file; a crashed holder is reclaimed when its
+  process is gone, and a holder older than `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
+  (default `1800`) is reclaimed even if the process is alive.
+- `VOXHELM_LANE_SCHEDULER_ENABLED=false` disables all gating. Setting
+  `0` interactive and `1` non-interactive slots restores the original
+  single-slot behaviour without a code change.
+
+Only backends that run outside the calling process may overlap: `whisper-cli`
+subprocesses and the WhisperKit sidecar. In-process backends keep a lock per
+backend inside their own process (`mlx-whisper` for STT; Piper and Kokoro for
+TTS), so two requests that reach the same in-process backend in the same process
+still serialize. The Wyoming sidecar is its own process, so its `mlx` backend
+overlaps a `whisper-cli` run from the HTTP process without sharing state.
+
+The sync transcription endpoint terminates its `whisper-cli` child when the HTTP
+client disconnects (Django's ASGI handler cancels the request), so an abandoned
+upload no longer burns a slot and GPU time to completion. In-process backends
+cannot be interrupted mid-inference; a disconnect only prevents a backend that
+has not started yet from running.
+
+Deploy note: the holder layout changed from one `holder.json` to a `holders/`
+directory. New code counts a leftover `holder.json` as a non-interactive holder
+until it is released or reclaimed; old code does not see `holders/`, so during
+the seconds in which the three launchd services restart one after another the
+bound can be exceeded by one holder. Restart all three services in one deploy
+run (the ops-library role does).
+
 ## Experimental WhisperKit Backend
 
 WhisperKit is now available as an experimental STT backend, but it is still
@@ -483,8 +536,7 @@ benchmark follow-on kept it competitive, but the tuned long-form run still
 logged a Metal GPU recovery error, so the deployed default remains
 `whispercpp`.
 
-Current limitation: the first C13 lane scheduler slice is cross-process and
-does gate Voxhelm's HTTP, batch, and Wyoming entry points, but it does not
-reach inside the WhisperKit sidecar itself. Once Voxhelm has admitted a
-WhisperKit request, the sidecar's internal inference concurrency remains
-outside that scheduler's direct control.
+Current limitation: the lane scheduler gates Voxhelm's HTTP, batch, and Wyoming
+entry points, but it does not reach inside the WhisperKit sidecar itself. Once
+Voxhelm has admitted a WhisperKit request, the sidecar's internal inference
+concurrency remains outside that scheduler's direct control.

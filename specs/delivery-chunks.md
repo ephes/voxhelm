@@ -865,6 +865,8 @@ Current completion state:
 
 **Implementation note (2026-03-13):** Delivered as the reviewed first slice. Voxhelm now uses one host-local cooperative scheduler across the HTTP API, Django Tasks worker, and Wyoming sidecar on `studio`, with Wyoming STT/TTS treated as `interactive` and all other local inference treated as internal `non-interactive` work.
 
+**Follow-on (2026-09-06, D-24):** The single admission slot became a bounded slot set (one reserved interactive slot plus one non-interactive slot on `studio`), the process-wide transcription lock was replaced by per-backend in-process locks, and the sync endpoint terminates `whisper-cli` on client disconnect. See `specs/2026-09-06_bounded_inference_slots.md`. The "slot reservation" exclusion below is therefore lifted for that slice; the other exclusions still hold.
+
 **Purpose:** Ensure that interactive voice requests (from Wyoming/HA) are not blocked by long-running batch transcription jobs.
 
 **Included scope:**

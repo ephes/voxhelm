@@ -59,7 +59,8 @@ protection, and the production proof remain open.
 - [x] Keep claim eligibility bounded by advertised capabilities: `job_type=transcribe`, batch only, and
   known-speaker jobs only when the worker/hybrid path advertises the required pyannote/wespeaker/reference support.
 - [ ] Preserve the C13 lane scheduler for any future local `studio` pull worker; `atlas.local` is outside that
-  host-local gate.
+  host-local gate. Since D-24 the scheduler has bounded slots (one reserved interactive slot plus one
+  non-interactive slot on `studio`); a local pull worker would take non-interactive slots like the sync endpoint.
 - [ ] Prove the goal with a real production python-podcast Generate Transcript run that is claimed by `atlas.local`,
   populates the django-cast `Transcript.speakers` sidecar, clears the known-speaker quality bar, and leaves artifacts
   retrievable through normal Voxhelm job artifact URLs.
@@ -74,6 +75,17 @@ Summary of RW-2 in `specs/remote-transcription-workers.md`:
 - [ ] Verify pyannote/wespeaker or the chosen hybrid postprocessor path for known-speaker jobs.
 - [ ] Record a short and long transcription smoke-test baseline on `atlas.local` before implementing the worker API.
 - [ ] Decide manual worker start/stop command and log location for the future remote worker process.
+
+## C13 follow-up: bounded inference slots (D-24)
+
+Spec: `specs/2026-09-06_bounded_inference_slots.md`.
+
+- [x] Design note and D-24 reviewed (three Codex GPT-6 Astra planning rounds).
+- [x] Scheduler slots, per-holder recovery, legacy `holder.json` accounting, per-backend locks, `whisper-cli`
+  termination on client disconnect, config knobs, tests.
+- [x] ops-library `voxhelm_deploy` vars and ops-control pins (`1 + 1`).
+- [ ] Deploy to `studio` and record the live measurement (interactive latency with and without a concurrent
+  long job, peak memory, long job completion, disconnect check) in the spec.
 
 ## Speaker diarization deployment and consumer follow-through
 

@@ -296,6 +296,7 @@ Before declaring M1 complete:
    - Treat all HTTP and Django Tasks inference as the internal non-interactive lane
    - Wrap local STT/TTS entry points with the same scheduler helper so admissions are coordinated across processes
    - Use cooperative single-slot serialization with interactive-biased admission, not reserved parallel slots
+     (superseded 2026-09-06 by D-24: bounded slots with one reserved interactive slot, see `specs/2026-09-06_bounded_inference_slots.md`)
    - Use that same single slot for both STT and TTS inference
    - Do not preempt already-running work; the first slice only controls what starts next
    - Start with a conservative stale-lock default of 1800 seconds unless the implementation also refreshes the lease while work is active
