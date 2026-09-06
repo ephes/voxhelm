@@ -551,6 +551,39 @@ First-slice details:
 
 ---
 
+## D-24: Should the C13 lane scheduler admit more than one local inference at a time?
+
+**Status:** Proposed 2026-09-06, under planning review; becomes Accepted when the slice is implemented and live-verified. Slice description: `specs/2026-09-06_bounded_inference_slots.md`. Reopens the Option B branch of D-19 with new evidence; D-19 itself stays the record of the first slice.
+
+**Context:** D-19 accepted single-slot cooperative serialization and explicitly deferred "reserved parallel slots per lane" as risky for memory pressure and not clearly needed on `studio`. Since then two things changed. First, the interactive path proved to be starved in practice: the scheduler cannot preempt a running inference, so a 40-minute voice memo through the sync endpoint (15 to 20 minutes of `whisper-cli`) blocks the Home Assistant voice pipeline for that long, and the Daybook Voice Memo importer is about to add a long-memo lane while podcast-length batch jobs already exist. Second, measurements on 2026-09-05 removed the memory concern: `studio` (M4 Max, 128 GiB) runs two or three concurrent `whisper-cli` processes with the 2.9 GiB `ggml-large-v3.bin` without memory pressure; the shared resource is Metal GPU time, and concurrent runs slow each other roughly proportionally. Production STT is `whispercpp` (one subprocess per request) with `mlx` as fallback, and the Wyoming sidecar runs `mlx` in its own process.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Keep single slot; schedule long jobs on the importer side | No Voxhelm change, but every producer must learn Voxhelm's load, and the voice assistant still stalls whenever any producer gets it wrong |
+| B. Bounded slots in the existing scheduler: one reserved interactive slot plus one non-interactive slot (D-19 Option B, now justified) | Interactive requests are admitted immediately while a long job runs, at the cost of a proportional GPU slowdown of the long job; no new queue or process topology |
+| C. Preempt or chunk long inferences | Hard latency bound, but requires interrupting or re-architecting backends and adds far more machinery than the problem needs |
+| D. Separate interactive runtime (D-19 Option A) | Strong isolation, but new process topology and deployment complexity for a problem that two slots already solve |
+
+**Accepted decision:** Option B.
+
+- Capacity is `VOXHELM_LANE_SCHEDULER_INTERACTIVE_SLOTS` (default `1`) plus `VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS` (default `1`); production pins `1 + 1` through ops-control. Non-interactive work can never hold more than its own slot count; interactive work may use any free slot, so the interactive slots are reserved.
+- Priority semantics from D-19 stay: interactive waiters win the next free slot, running work is never preempted, callers still cannot pick a lane.
+- Only backends that run outside the calling process may overlap: `whisper-cli` subprocesses and the WhisperKit sidecar. In-process backends keep a per-backend lock in their own process (`mlx-whisper` for STT; Piper and Kokoro already have one for TTS). The process-wide `_TRANSCRIPTION_LOCK` goes away because its safety concern was in-process state, not separate processes.
+- The deployed Wyoming backend (`mlx`, in the Wyoming sidecar process) already overlaps a `whisper-cli` subprocess from the HTTP process without sharing in-process state, so no Wyoming configuration change is required.
+- Stale-holder recovery is kept and applied per holder file (`holders/<token>.json` replaces `holder.json`), same 1800 s window.
+- The sync endpoint terminates its `whisper-cli` child when the HTTP client disconnects (Django 5 ASGI request cancellation), so an abandoned upload no longer burns a slot and GPU time to completion.
+- `VOXHELM_LANE_SCHEDULER_ENABLED=false` still means no gating; `0` interactive plus `1` non-interactive slot is the config-only rollback to D-19 behaviour. A legacy `holder.json` is counted as a non-interactive holder until it is released or reclaimed, so new-code admissions respect a legacy holder that is still running. The reverse does not hold: during the mixed-version window of a deploy or rollback an old-code process can exceed the bound by one holder. That window is seconds (sequential launchd restarts, all three services in one playbook run) or at worst one in-flight legacy inference, and only separate-process backends can overlap, so it is accepted rather than bridged.
+
+**Feasible guarantee on one host:** with `1 + 1` slots an interactive request is admitted immediately whenever total capacity is not exhausted, which on `studio` means: at most one non-interactive inference is running and no other interactive request holds the reserved slot. Admission is not execution: an in-process backend still waits for its own per-process lock (relevant only when two interactive requests overlap inside the Wyoming sidecar). Interactive latency is then bounded by GPU contention (roughly proportional slowdown), not by the remaining runtime of the long job. Stale reclamation bounds the number of *recorded* holders; a reclaimed holder whose process is still running keeps using the GPU until it finishes, exactly as under D-19.
+
+**Not decided here:** slot counts above `1 + 1`, a status API, importer-side scheduling, preemption, and any local `studio` pull worker (which must keep using this scheduler, see BACKLOG).
+
+**Blocks implementation:** Yes for the slice; no for the architecture.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:
