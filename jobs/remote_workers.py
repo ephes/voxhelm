@@ -19,7 +19,12 @@ from django.utils import timezone
 
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store_for_identity
 from jobs.media import validate_allowed_media_url
-from jobs.models import Job, JobArtifact, StagedMedia, Worker
+from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia, Worker
+from jobs.retention import (
+    PRUNABLE_ARTIFACT_KINDS,
+    drain_pending_artifact_deletions,
+    queue_replaced_intermediate_objects,
+)
 from jobs.services import (
     DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS,
     isoformat_or_none,
@@ -350,6 +355,7 @@ def complete_remote_work(
         validate_remote_artifacts(job=current_job, artifacts=raw_artifacts)
 
     staged_upload_id: str | None = None
+    pending_deletions: list[PendingArtifactDeletion] = []
     response: dict[str, Any]
     with transaction.atomic():
         lock_job_for_settlement(job_id=job_id, now=timezone.now())
@@ -369,7 +375,9 @@ def complete_remote_work(
             if (
                 job.result_text == result_text
                 and job.result_metadata == metadata
-                and stored_artifact_manifest(job) == artifacts
+                and stored_manifest_matches_completion(
+                    stored=stored_artifact_manifest(job), submitted=artifacts
+                )
             ):
                 staged_upload_id = remote_staged_upload_id(job)
                 response = serialize_job(job)
@@ -391,7 +399,14 @@ def complete_remote_work(
                 worker_id=worker_id,
                 result_metadata=result_metadata_payload,
             )
+            replaced_artifacts = list(JobArtifact.objects.filter(job=job))
             JobArtifact.objects.filter(job=job).delete()
+            # D-09: replaced intermediates are queued in this transaction so a
+            # failed deletion below is retried by prune_job_artifacts.
+            pending_deletions = queue_replaced_intermediate_objects(
+                replaced=replaced_artifacts,
+                kept=artifacts,
+            )
             JobArtifact.objects.bulk_create(
                 [
                     JobArtifact(
@@ -429,6 +444,7 @@ def complete_remote_work(
             job.refresh_from_db()
             response = serialize_job(job)
     delete_completed_remote_staged_upload(job_id=job_id, upload_id=staged_upload_id)
+    drain_pending_artifact_deletions(pending_deletions)
     return response
 
 
@@ -1150,6 +1166,27 @@ def stored_remote_source_metadata(job: Job) -> dict[str, Any]:
 
 def remote_source_url(job: Job) -> str:
     return str(job.input_data.get("url") or "")
+
+
+def stored_manifest_matches_completion(
+    *,
+    stored: list[dict[str, Any]],
+    submitted: list[dict[str, Any]],
+) -> bool:
+    """Compare a completion retry with the committed manifest.
+
+    `prune_job_artifacts` may already have removed intermediate artifacts
+    (D-09) of the committed completion, so submitted SOURCE/EXTRACTED_AUDIO
+    entries that are no longer stored are ignored. Everything still stored must
+    match exactly.
+    """
+    stored_names = {artifact["name"] for artifact in stored}
+    expected = [
+        artifact
+        for artifact in submitted
+        if artifact["name"] in stored_names or artifact["kind"] not in PRUNABLE_ARTIFACT_KINDS
+    ]
+    return stored == expected
 
 
 def stored_artifact_manifest(job: Job) -> list[dict[str, Any]]:

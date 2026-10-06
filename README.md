@@ -149,6 +149,7 @@ export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 export VOXHELM_PRIVATE_URL_HOSTS="s3.internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
 export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
+export VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS="86400"
 export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"
 export VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
 export VOXHELM_REMOTE_WORKER_LEASE_SECONDS="1800"
@@ -226,6 +227,45 @@ later staging/submission requests.
 If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.
+
+### Job artifact retention (D-09)
+
+Every batch transcription job keeps a job-owned copy of its input (`source`
+artifact, non-exposed) and, for video, the extracted WAV (`extracted_audio`).
+Remote workers upload the same two kinds. These are intermediates, so they are
+pruned by a periodic management command:
+
+```bash
+uv run python manage.py prune_job_artifacts --dry-run   # list only
+uv run python manage.py prune_job_artifacts
+```
+
+- `extracted_audio` is deleted once the job is terminal (succeeded, failed,
+  canceled or expired);
+- `source` is deleted when the job finished more than
+  `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` ago (default `86400`, 24 h;
+  `0` deletes it on the next run after the job finished);
+- transcript, speaker-sidecar and speech artifacts, and anything marked exposed,
+  are never touched; queued and running jobs are never touched.
+
+The command deletes the stored object (filesystem or S3/MinIO) first and then
+the row; an already-missing object counts as deleted. If an object cannot be
+deleted the row is kept for the next run and the command exits non-zero. An
+object that another artifact row or staged upload still references (compared
+by resolved store location and normalized path, so legacy rows without a store
+identity, equivalent filesystem paths such as `a/./b`, case or symlink
+aliases of the same file, and equivalent S3 endpoint spellings count too)
+is left in place. When a remote completion replaces a job's artifact rows, the
+replaced non-exposed `source` / `extracted_audio` objects that no kept or final
+artifact shares are queued (`PendingArtifactDeletion`, in the same
+transaction) and deleted right after the commit; a failed deletion stays queued
+and the next `prune_job_artifacts` run retries it. A completion retry from the
+same worker and lease still matches after pruning removed those intermediates. Each
+deletion re-checks its candidate and the references under the database write
+lock, so overlapping runs are safe.
+
+Nothing schedules the command yet: run it from cron or a systemd timer (hourly
+is enough) on the control plane, with the same environment as the service.
 
 Current scope note: batch staged uploads are audio-only in this slice. URL
 audio and URL video keep working on the existing path. Uploaded video and true

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 
-from jobs.artifacts import StoredArtifact, get_artifact_store
-from jobs.models import Job, JobArtifact, StagedMedia, Worker
+from jobs.artifacts import StoredArtifact, current_artifact_store_identity, get_artifact_store
+from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia, Worker
+from jobs.retention import prune_job_artifacts
 from jobs.services import reconcile_remote_job_state
 
 
@@ -2116,3 +2118,103 @@ def test_fairness_no_peers_never_defers(settings):
     _make_worker("atlas")
     _make_load_job("atlas")
     assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+
+
+@pytest.mark.django_db
+def test_remote_completion_deletes_replaced_intermediate_objects(client, settings):
+    job = submit_remote_job(client, settings)
+    claim = claim_one(client).json()["job"]
+    stale_key = f"voxhelm/jobs/{job.id}/attempt-0/stale-source.mp3"
+    stale_transcript_key = f"voxhelm/jobs/{job.id}/attempt-0/stale-transcript.txt"
+    store_remote_artifact(settings, key=stale_key, content=b"stale")
+    exposed_source_key = f"voxhelm/jobs/{job.id}/attempt-0/exposed-source.mp3"
+    store_remote_artifact(settings, key=stale_transcript_key, content=b"old text")
+    store_remote_artifact(settings, key=exposed_source_key, content=b"exposed")
+    for name, kind, key, exposed in (
+        ("stale-source.mp3", JobArtifact.Kind.SOURCE, stale_key, False),
+        ("stale-transcript.txt", JobArtifact.Kind.TRANSCRIPT_TEXT, stale_transcript_key, True),
+        # Shares the transcript's object: must survive with it.
+        ("shared-source.mp3", JobArtifact.Kind.SOURCE, stale_transcript_key, False),
+        ("exposed-source.mp3", JobArtifact.Kind.SOURCE, exposed_source_key, True),
+    ):
+        JobArtifact.objects.create(
+            job=job,
+            name=name,
+            kind=kind,
+            format="source",
+            storage_backend="filesystem",
+            storage_key=key,
+            storage_identity=current_artifact_store_identity(),
+            content_type="audio/mpeg",
+            size_bytes=5,
+            exposed=exposed,
+        )
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+
+    response = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        data=json.dumps(
+            {
+                "worker_id": "atlas",
+                "lease_token": claim["lease_token"],
+                "result_text": "remote transcript",
+                "artifacts": manifest,
+            }
+        ),
+        content_type="application/json",
+        **worker_headers(),
+    )
+
+    assert response.status_code == 200
+    root = Path(settings.VOXHELM_ARTIFACT_ROOT)
+    assert not (root / stale_key).exists()
+    # Only non-exposed D-09 intermediates that nothing else references are deleted.
+    assert (root / stale_transcript_key).exists()
+    assert (root / exposed_source_key).exists()
+    assert not PendingArtifactDeletion.objects.exists()
+    for artifact in manifest:
+        assert (root / str(artifact["storage_key"])).exists()
+
+
+@pytest.mark.django_db
+def test_remote_completion_retry_still_matches_after_source_was_pruned(client, settings):
+    job = submit_remote_job(client, settings)
+    claim = claim_one(client).json()["job"]
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+    body = {
+        "worker_id": "atlas",
+        "lease_token": claim["lease_token"],
+        "result_text": "remote transcript",
+        "artifacts": manifest,
+    }
+    first = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        data=json.dumps(body),
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert first.status_code == 200
+
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 0
+    pruned = prune_job_artifacts(now=timezone.now() + timedelta(seconds=1))
+    assert [artifact.name for artifact in pruned.deleted] == ["source.mp3"]
+
+    retry = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        data=json.dumps(body),
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert retry.status_code == 200
+
+    changed = json.loads(json.dumps(body))
+    changed["artifacts"][1]["size_bytes"] = 18
+    conflict = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        data=json.dumps(changed),
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert conflict.status_code == 409

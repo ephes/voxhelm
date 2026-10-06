@@ -111,6 +111,8 @@ clean contributor reference material are the preferred follow-up direction.
 - [ ] Keep `pyannote.audio` behind the optional `diarization` extra and verify fresh install with:
   - `uv sync --extra diarization`
 - [ ] Decide whether the current pyannote/torchcodec warning is acceptable in production logs. Voxhelm avoids torchcodec decoding by passing ffmpeg-decoded waveform data to pyannote, but pyannote still emits the import-time warning.
+- [x] Apply the D-09 retention policy to job intermediates. Closed 2026-10-06: `manage.py prune_job_artifacts [--dry-run]` deletes non-exposed `source` artifacts of terminal jobs older than `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` (default 24 h) and `extracted_audio` of terminal jobs (object first, then row; missing objects tolerated; failures keep the row and exit non-zero). Remote completions queue replaced `source`/`extracted_audio` objects (`PendingArtifactDeletion`, migration `jobs.0009`) and delete them instead of orphaning them; failed deletions are retried by the command. Transcript, speaker and speech artifacts are never pruned.
+- [ ] Deploy follow-up for D-09 retention: add an hourly systemd timer (or cron) for `manage.py prune_job_artifacts` to the ops-library `voxhelm_deploy` role, and optionally `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` to the env template. Job metadata retention (90 days) from D-09 is still not implemented.
 - [ ] Add diarization quality metadata and warnings for pathological label distributions, including tiny clusters and
   distributions that contradict the requested speaker count.
 - [ ] Prefer `exclusive_speaker_diarization` for transcript alignment when pyannote returns it.

@@ -420,6 +420,13 @@ VOXHELM_BATCH_MAX_STAGED_UPLOAD_MIB = VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES // (
 VOXHELM_STAGED_INPUT_RETENTION_SECONDS = int(
     os.getenv("VOXHELM_STAGED_INPUT_RETENTION_SECONDS", str(24 * 60 * 60))
 )
+# D-09: non-exposed job source media is kept this long after the job finished and
+# then removed by `manage.py prune_job_artifacts`; extracted audio goes once the job
+# is terminal. Transcript and speech artifacts are never pruned.
+VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = validate_non_negative_int(
+    "VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS",
+    int(os.getenv("VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS", str(24 * 60 * 60))),
+)
 VOXHELM_ALLOWED_URL_HOSTS = set(env_list("VOXHELM_ALLOWED_URL_HOSTS"))
 VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
 # Allowlisted hosts that may resolve to non-public IPs (RFC 1918, loopback,
