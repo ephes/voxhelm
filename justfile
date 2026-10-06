@@ -12,11 +12,15 @@ test:
 lint:
 	uv run ruff check .
 
+format-check:
+	uv run ruff format --check .
+
 typecheck:
 	uv run mypy .
 
 check:
 	just lint
+	just format-check
 	just typecheck
 	just test
 
