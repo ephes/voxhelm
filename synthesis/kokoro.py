@@ -384,11 +384,16 @@ def _write_wav(audio: np.ndarray) -> Path:
     clipped = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
     pcm = (clipped * 32767.0).astype(np.int16)
     audio_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
-    with wave.open(str(audio_path), "wb") as writer:
-        writer.setnchannels(1)
-        writer.setsampwidth(2)
-        writer.setframerate(KOKORO_SAMPLE_RATE)
-        writer.writeframes(pcm.tobytes())
+    try:
+        with wave.open(str(audio_path), "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(KOKORO_SAMPLE_RATE)
+            writer.writeframes(pcm.tobytes())
+    except BaseException:
+        # The caller never receives the path on failure, so remove it here.
+        audio_path.unlink(missing_ok=True)
+        raise
     return audio_path
 
 

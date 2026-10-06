@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+import wave
 from pathlib import Path
 
 import pytest
@@ -75,6 +77,129 @@ def test_piper_backend_resolves_voice_by_language(tmp_path: Path) -> None:
     )
     assert resolved.model_path == model_path
     assert resolved.config_path == config_path
+
+
+def _isolated_tempdir(monkeypatch, tmp_path: Path) -> Path:
+    """Route ``tempfile.NamedTemporaryFile`` into an empty dir we can inspect."""
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
+    return temp_dir
+
+
+class _RaisingPiperVoice:
+    def synthesize_wav(self, text, wav_writer, synthesis_config) -> None:
+        # Configure the writer first so its close() on unwind does not mask our error.
+        wav_writer.setnchannels(1)
+        wav_writer.setsampwidth(2)
+        wav_writer.setframerate(22050)
+        raise RuntimeError("piper exploded")
+
+
+class _SilentPiperVoice:
+    def synthesize_wav(self, text, wav_writer, synthesis_config) -> None:
+        wav_writer.setnchannels(1)
+        wav_writer.setsampwidth(2)
+        wav_writer.setframerate(22050)
+        wav_writer.writeframes(b"\x00\x00" * 2205)
+
+
+def _piper_backend(tmp_path: Path) -> PiperBackend:
+    voice_dir = tmp_path / "voices"
+    voice_dir.mkdir()
+    write_voice_fixture(voice_dir, "en_US-lessac-medium")
+    return PiperBackend(
+        voice_dir=voice_dir,
+        configured_voices=["en_US-lessac-medium"],
+        default_voice="en_US-lessac-medium",
+        language_voices={},
+    )
+
+
+def _piper_params() -> SynthesizeParams:
+    return SynthesizeParams(request_model="auto", voice=None, language=None, speed=1.0)
+
+
+def test_piper_synthesize_failure_removes_temp_wav(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("piper")
+    temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
+    backend = _piper_backend(tmp_path)
+    monkeypatch.setattr(
+        "synthesis.service.load_piper_voice", lambda _voice: _RaisingPiperVoice()
+    )
+
+    with pytest.raises(RuntimeError, match="piper exploded"):
+        backend.synthesize("Hello.", _piper_params())
+
+    assert list(temp_dir.iterdir()) == []
+
+
+def test_piper_synthesize_readback_failure_removes_temp_wav(
+    monkeypatch, tmp_path: Path
+) -> None:
+    pytest.importorskip("piper")
+    temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
+    backend = _piper_backend(tmp_path)
+    monkeypatch.setattr(
+        "synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice()
+    )
+    real_open = wave.open
+
+    def _open(path, mode):
+        if mode == "rb":
+            raise wave.Error("unreadable wav")
+        return real_open(path, mode)
+
+    monkeypatch.setattr(wave, "open", _open)
+
+    with pytest.raises(wave.Error, match="unreadable wav"):
+        backend.synthesize("Hello.", _piper_params())
+
+    assert list(temp_dir.iterdir()) == []
+
+
+def test_piper_synthesize_success_keeps_output_for_caller(
+    monkeypatch, tmp_path: Path
+) -> None:
+    pytest.importorskip("piper")
+    temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
+    backend = _piper_backend(tmp_path)
+    monkeypatch.setattr(
+        "synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice()
+    )
+
+    result = backend.synthesize("Hello.", _piper_params())
+
+    assert result.audio_path.parent == temp_dir
+    assert result.audio_path.exists()
+    assert result.duration_seconds == 0.1
+    result.audio_path.unlink()
+
+
+def test_export_audio_missing_ffmpeg_removes_target(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
+    wav_path = tmp_path / "speech.wav"
+    wav_path.write_bytes(b"RIFF")
+    result = SynthesisResult(
+        audio_path=wav_path,
+        backend_name="piper",
+        model_name="piper",
+        voice_name="en_US-lessac-medium",
+        language="en",
+        sample_rate=22050,
+        sample_width=2,
+        channels=1,
+        duration_seconds=1.0,
+    )
+    settings.VOXHELM_FFMPEG_BIN = str(tmp_path / "no-such-ffmpeg")
+
+    with pytest.raises(FileNotFoundError):
+        export_audio(result, output_format="mp3")
+
+    assert list(temp_dir.iterdir()) == []
+    assert wav_path.exists()
 
 
 def test_build_voice_registry_lists_piper_voices(tmp_path: Path, settings) -> None:

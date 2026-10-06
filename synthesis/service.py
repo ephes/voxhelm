@@ -151,22 +151,28 @@ class PiperBackend:
             ) from exc
 
         temp_wav = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
-        with _PIPER_LOCK:
-            synthesis_config = SynthesisConfig()
-            if params.speed != 1.0:
-                synthesis_config.length_scale = max(
-                    1.0 / MAX_TTS_SPEED,
-                    min(1.0 / MIN_TTS_SPEED, 1.0 / params.speed),
-                )
+        # No SynthesisResult exists until we return, so callers cannot clean up the
+        # temp WAV if Piper or the read-back fails: remove it here before re-raising.
+        try:
+            with _PIPER_LOCK:
+                synthesis_config = SynthesisConfig()
+                if params.speed != 1.0:
+                    synthesis_config.length_scale = max(
+                        1.0 / MAX_TTS_SPEED,
+                        min(1.0 / MIN_TTS_SPEED, 1.0 / params.speed),
+                    )
 
-            with wave.open(str(temp_wav), "wb") as wav_writer:
-                voice.synthesize_wav(text, wav_writer, synthesis_config)
+                with wave.open(str(temp_wav), "wb") as wav_writer:
+                    voice.synthesize_wav(text, wav_writer, synthesis_config)
 
-        with wave.open(str(temp_wav), "rb") as wav_reader:
-            frame_rate = wav_reader.getframerate()
-            frame_width = wav_reader.getsampwidth()
-            channels = wav_reader.getnchannels()
-            frame_count = wav_reader.getnframes()
+            with wave.open(str(temp_wav), "rb") as wav_reader:
+                frame_rate = wav_reader.getframerate()
+                frame_width = wav_reader.getsampwidth()
+                channels = wav_reader.getnchannels()
+                frame_count = wav_reader.getnframes()
+        except BaseException:
+            temp_wav.unlink(missing_ok=True)
+            raise
 
         duration_seconds = round(frame_count / frame_rate, 3) if frame_rate else 0.0
         return SynthesisResult(
@@ -445,14 +451,19 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
         args.extend(["-vn", "-codec:a", "libvorbis", "-q:a", "4"])
     args.append(str(target_path))
 
-    completed = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except BaseException:
+        # e.g. a missing ffmpeg binary (FileNotFoundError) must not leak the target file.
+        target_path.unlink(missing_ok=True)
+        raise
     if completed.returncode != 0:
         target_path.unlink(missing_ok=True)
         detail = "\n".join(

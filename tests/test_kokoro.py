@@ -328,6 +328,55 @@ def test_synthesize_single_chunk_one_call(monkeypatch) -> None:
     result.audio_path.unlink()
 
 
+def test_synthesize_wav_write_failure_removes_temp_file(monkeypatch, tmp_path: Path) -> None:
+    import tempfile
+    import wave
+
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
+    backend, _session = _stub_backend(monkeypatch)
+    real_open = wave.open
+
+    class _FailingWriter:
+        def __init__(self, path: str, mode: str) -> None:
+            self._inner = real_open(path, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info) -> None:
+            self._inner.close()
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+        def writeframes(self, data: bytes) -> None:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(wave, "open", _FailingWriter)
+
+    with pytest.raises(OSError, match="disk full"):
+        backend.synthesize("Hello.", _params())
+
+    assert list(temp_dir.iterdir()) == []
+
+
+def test_synthesize_success_returns_temp_file_for_caller(monkeypatch, tmp_path: Path) -> None:
+    import tempfile
+
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
+    backend, _session = _stub_backend(monkeypatch)
+
+    result = backend.synthesize("Hello.", _params())
+
+    assert result.audio_path.parent == temp_dir
+    assert result.audio_path.exists()
+    result.audio_path.unlink()
+
+
 def test_synthesize_single_char_input_produces_nonempty_audio(monkeypatch) -> None:
     # "I" is a valid one-character utterance; it must synthesize real audio
     # rather than being dropped into a zero-frame WAV.
