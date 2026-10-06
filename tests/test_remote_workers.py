@@ -2214,3 +2214,46 @@ def test_remote_completion_retry_still_matches_after_source_was_pruned(client, s
         **worker_headers(),
     )
     assert conflict.status_code == 409
+
+
+NON_ASCII_TOKEN = "té-über"
+PRODUCER_TOKEN_ENDPOINTS = [
+    ("post", "/v1/audio/transcriptions"),
+    ("post", "/v1/audio/speech"),
+    ("post", "/v1/uploads"),
+    ("post", "/v1/jobs"),
+    ("get", "/v1/jobs/00000000-0000-0000-0000-000000000000"),
+    ("get", "/v1/jobs/00000000-0000-0000-0000-000000000000/artifacts/transcript.json"),
+]
+WORKER_TOKEN_ENDPOINTS = [
+    "/v1/internal/workers/heartbeat",
+    "/v1/internal/work/claim",
+    "/v1/internal/work/00000000-0000-0000-0000-000000000000/heartbeat",
+    "/v1/internal/work/00000000-0000-0000-0000-000000000000/complete",
+    "/v1/internal/work/00000000-0000-0000-0000-000000000000/fail",
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("method", "path"), PRODUCER_TOKEN_ENDPOINTS)
+def test_producer_endpoints_reject_non_ascii_bearer_token(client, settings, method, path):
+    enable_remote_workers(settings)
+    response = getattr(client, method)(path, HTTP_AUTHORIZATION=f"Bearer {NON_ASCII_TOKEN}")
+
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "authentication_error"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("path", WORKER_TOKEN_ENDPOINTS)
+def test_worker_endpoints_reject_non_ascii_bearer_token(client, settings, path):
+    enable_remote_workers(settings)
+    response = client.post(
+        path,
+        data=json.dumps({"worker_id": "atlas"}),
+        content_type="application/json",
+        **worker_headers(NON_ASCII_TOKEN),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "authentication_error"

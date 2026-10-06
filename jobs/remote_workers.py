@@ -138,7 +138,8 @@ def require_worker_token(request: HttpRequest, payload: dict[str, Any] | None = 
     presented = header.removeprefix("Bearer ").strip()
     matched_worker_id = ""
     for worker_id, token in settings.VOXHELM_WORKER_TOKENS.items():
-        if hmac.compare_digest(presented, token):
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+        if hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
             matched_worker_id = worker_id
             break
     if not matched_worker_id:
