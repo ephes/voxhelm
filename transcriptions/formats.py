@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -41,16 +42,33 @@ def render_text(result: TranscriptionResult) -> str:
 
 def render_vtt(result: TranscriptionResult) -> str:
     lines = ["WEBVTT", ""]
-    for segment in result.segments:
+    for segment in normalized_segments(result):
+        cue_text = escape_vtt_cue_text(segment.text)
+        if not cue_text:
+            continue
         timestamp_line = (
             f"{format_vtt_timestamp(segment.start)} --> {format_vtt_timestamp(segment.end)}"
         )
         lines.append(timestamp_line)
-        lines.append(segment.text)
+        lines.append(cue_text)
         lines.append("")
-    if len(lines) == 2 and result.text:
-        lines.extend(["00:00:00.000 --> 00:00:00.000", result.text, ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+_LINE_BREAKS = re.compile(r"\s*[\r\n]+\s*")
+
+
+def escape_vtt_cue_text(text: str) -> str:
+    """Return ``text`` as a single, safe WebVTT cue payload line.
+
+    WebVTT treats ``&`` as an entity start and ``<`` as a tag start, a payload
+    line must not contain ``-->``, and a blank line ends the cue. Line breaks are
+    collapsed to one space, ``-->`` becomes ``->``, and ``&``, ``<`` and ``>``
+    are written as character references.
+    """
+    single_line = _LINE_BREAKS.sub(" ", text).strip()
+    single_line = single_line.replace("-->", "->")
+    return single_line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render_dote(result: TranscriptionResult) -> dict[str, Any]:

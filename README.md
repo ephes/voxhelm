@@ -49,6 +49,18 @@ removing genuine speech, only ever removes or collapses artifact segments, and
 returns clean transcripts unchanged. Disable it with
 `VOXHELM_SANITIZE_TRANSCRIPT=false` only to inspect raw decoder output.
 
+## WebVTT Output
+
+The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)
+writes one cue per segment, each with a single payload line. Like `dote` and
+`podlove`, it skips segments with empty text and clamps an end time that lies
+before the start time to the start time. Cue text is escaped for WebVTT: `&`,
+`<`, and `>` become `&amp;`, `&lt;`, and `&gt;`, `-->` becomes `->`, and line
+breaks inside a segment collapse to one space, so transcript text can neither
+inject markup nor end or split a cue. Players decode the character references;
+consumers that parse the raw file must decode them too. Speaker labels stay out
+of WebVTT. Artifacts stored before this change are not rewritten.
+
 ## Local Development
 
 ```bash
