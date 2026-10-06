@@ -172,7 +172,9 @@
 
 **Blocks implementation:** No -- defaults can be set at deployment time. But the cleanup mechanism should be designed into the job model from the start (e.g., `created_at` timestamps on all records).
 
-**Implementation note (2026-10-06):** Source media and extracted intermediate audio are now pruned by `manage.py prune_job_artifacts` (non-exposed `source` artifacts of terminal jobs after `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS`, default 24 h; `extracted_audio` once the job is terminal). Transcript and speech artifacts stay indefinite. Scheduling the command (systemd timer) and the 90-day job metadata retention are still open.
+**Implementation note (2026-10-06):** Source media and extracted intermediate audio are now pruned by `manage.py prune_job_artifacts` (non-exposed `source` artifacts of terminal jobs after `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS`, default 24 h; `extracted_audio` once the job is terminal). Transcript and speech artifacts stay indefinite. Scheduling the command (systemd timer) is still open.
+
+**Implementation note (2026-10-06, job metadata):** `manage.py prune_job_artifacts` now also deletes the `Job` row of terminal jobs that finished more than `VOXHELM_JOB_METADATA_RETENTION_SECONDS` ago (default 90 days, `0` disables), after the artifact pass and only once the job owns no artifact row, queued object deletion or claimed staged upload. Delete, not archive. Jobs that still own indefinite transcript or speech artifacts keep their row, because those artifacts are served through the job; an archive/sweep policy for them remains open.
 
 ---
 

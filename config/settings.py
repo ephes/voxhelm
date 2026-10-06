@@ -427,6 +427,14 @@ VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = validate_non_negative_int(
     "VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS",
     int(os.getenv("VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS", str(24 * 60 * 60))),
 )
+# D-09: terminal job rows are deleted by `manage.py prune_job_artifacts` this long after the
+# job finished (default 90 days), but only once the job owns no artifact row (transcript and
+# speech artifacts keep their job indefinitely), queued deletion or claimed staged upload.
+# 0 disables job metadata pruning.
+VOXHELM_JOB_METADATA_RETENTION_SECONDS = validate_non_negative_int(
+    "VOXHELM_JOB_METADATA_RETENTION_SECONDS",
+    int(os.getenv("VOXHELM_JOB_METADATA_RETENTION_SECONDS", str(90 * 24 * 60 * 60))),
+)
 VOXHELM_ALLOWED_URL_HOSTS = set(env_list("VOXHELM_ALLOWED_URL_HOSTS"))
 VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
 # Allowlisted hosts that may resolve to non-public IPs (RFC 1918, loopback,
