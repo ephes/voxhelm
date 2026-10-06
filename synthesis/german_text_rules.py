@@ -11,6 +11,18 @@
 # BEFORE espeak phonemization, for German synthesis only. Only the tables and
 # functions the TTS normalization path uses are vendored; the upstream
 # wyoming-separator helper patterns are intentionally omitted.
+#
+# Local deviations from upstream:
+# - Sentence-final numbers: upstream reads every "N." followed by a word or the
+#   end of text as an ordinal and drops the full stop, merging sentences
+#   ("im Jahr 2024. Danach" -> "...vierundzwanzigster Danach"). Here, a bare
+#   "N." (no article/preposition prefix) is an ordinal only when a lowercase
+#   word follows; otherwise (end of text, a capitalised word, a digit) it is
+#   read as a cardinal (or as a year after "Jahr") and the full stop is kept.
+#   A prefixed ordinal ("am 3.", "der 1.") stays an ordinal but keeps its full
+#   stop at the end of the text or before a capitalised sentence starter
+#   (pronoun, article, conjunction or adverb, see SENTENCE_STARTERS).
+# - year_to_words reads 1100-1999 as spoken years ("neunzehnhundertneunzig").
 from __future__ import annotations
 
 import re
@@ -132,6 +144,18 @@ ORDINAL_TO_WORD = {
     30: "dreißigster",
 }
 
+# Capitalised words that start a new sentence rather than follow an ordinal as
+# a noun ("am 3. Danach ..." vs. "der 1. Platz"). Local addition, see header.
+SENTENCE_STARTERS = frozenset(
+    (
+        "aber als auch auf aus bei da dabei dadurch dafür damals damit danach dann "
+        "darauf das dass davor dazu dem den denn der deshalb die dies diese dieser "
+        "dieses doch dort du ein eine einen einer er es heute hier ich ihr im in jetzt "
+        "man mit nach nun oder seit sie so später trotzdem um und vor während wann was "
+        "weil wenn wer wie wir wo zum zur"
+    ).split()
+)
+
 MONTHS = r"(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)"
 CARDINAL_LABEL_DOT_PLACEHOLDER = "__GODE_CARDINAL_DOT__"
 
@@ -201,6 +225,10 @@ def ordinal_weak(number: int) -> str:
 
 def year_to_words(year: str | int) -> str:
     year_int = int(year)
+    if 1100 <= year_int < 2000:
+        century, rest = divmod(year_int, 100)
+        prefix = f"{number_to_words(century)}hundert"
+        return prefix if rest == 0 else f"{prefix}{number_to_words(rest)}"
     if 2000 <= year_int < 2100:
         rest = year_int - 2000
         return "zweitausend" if rest == 0 else f"zweitausend{number_to_words(rest)}"
@@ -374,7 +402,31 @@ def normalize_german_text(text: str) -> str:
     def replace_ordinal(match: re.Match[str]) -> str:
         prefix_full = match.group(1) or ""
         prefix = prefix_full.strip().lower()
-        number = int(match.group(2))
+        raw_number = match.group(2)
+        number = int(raw_number)
+
+        following = match.string[match.end() :].lstrip()
+        next_word = re.match(r"\w+", following)
+        before_capital = next_word is not None and next_word.group(0)[0].isupper()
+        before_lowercase = next_word is not None and next_word.group(0)[0].islower()
+
+        if not prefix_full:
+            if before_lowercase:
+                return ordinal_to_words(number)
+            preceding = match.string[: match.start()]
+            if (
+                len(raw_number) == 4
+                and 1000 <= number < 2100
+                and re.search(r"(?i)\bJahre?s?\s+$", preceding)
+            ):
+                return f"{year_to_words(number)}."
+            return f"{number_to_words(number)}."
+
+        keep_stop = not following or (
+            next_word is not None
+            and before_capital
+            and next_word.group(0).lower() in SENTENCE_STARTERS
+        )
 
         if prefix.startswith("nach ") or prefix in {
             "am",
@@ -394,7 +446,7 @@ def normalize_german_text(text: str) -> str:
         else:
             word = ordinal_to_words(number)
 
-        return f"{prefix_full}{word}"
+        return f"{prefix_full}{word}{'.' if keep_stop else ''}"
 
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°\s*[Cc]\b", replace_temperature, text)
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
