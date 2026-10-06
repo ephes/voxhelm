@@ -260,6 +260,15 @@ def queue_replaced_intermediate_objects(
         for artifact in replaced
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS
     )
+    # Filesystem aliases (case variants, symlinked directories) of a protected
+    # file are the same object; compare them by device and inode as well.
+    protected_stats = [
+        stat
+        for stat in (
+            filesystem_stat(location) for location in protected if location[0] == "filesystem"
+        )
+        if stat is not None
+    ]
     queued: list[PendingArtifactDeletion] = []
     for artifact in replaced:
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS:
@@ -267,6 +276,12 @@ def queue_replaced_intermediate_objects(
         location = object_location(identity=artifact.storage_identity, key=artifact.storage_key)
         if location in protected:
             continue
+        if location[0] == "filesystem":
+            stat = filesystem_stat(location)
+            if stat is not None and any(
+                os.path.samestat(stat, protected_stat) for protected_stat in protected_stats
+            ):
+                continue
         queued.append(
             PendingArtifactDeletion.objects.create(
                 job_id=artifact.job_id,

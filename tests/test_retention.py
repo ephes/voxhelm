@@ -399,3 +399,30 @@ def test_case_variant_key_of_final_output_is_kept_on_case_insensitive_fs(setting
 
     assert not JobArtifact.objects.filter(pk=source.pk).exists()
     assert object_path(settings, transcript).exists()
+
+
+@pytest.mark.django_db
+def test_replaced_source_aliasing_replaced_transcript_is_not_queued(settings):
+    job = make_job(state=Job.State.RUNNING, finished_ago=None)
+    transcript = make_artifact(
+        job, name="transcript.txt", kind=JobArtifact.Kind.TRANSCRIPT_TEXT, exposed=True
+    )
+    root = Path(settings.VOXHELM_ARTIFACT_ROOT)
+    (root / "voxhelm" / "alias").symlink_to(
+        object_path(settings, transcript).parent, target_is_directory=True
+    )
+    source = JobArtifact.objects.create(
+        job=job,
+        name="input.mp3",
+        kind=JobArtifact.Kind.SOURCE,
+        format="source",
+        storage_backend="filesystem",
+        storage_key="voxhelm/alias/transcript.txt",
+        storage_identity=current_artifact_store_identity(),
+        content_type="audio/mpeg",
+        size_bytes=transcript.size_bytes,
+        exposed=False,
+    )
+
+    assert queue_replaced_intermediate_objects(replaced=[transcript, source], kept=[]) == []
+    assert object_path(settings, transcript).exists()
