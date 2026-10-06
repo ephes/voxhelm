@@ -3,6 +3,8 @@ name: CI
 # Same checks as `just check` (lint, typecheck, test), run through uv directly.
 # Tests use SQLite and fake backends; model-dependent tests (requires_models)
 # skip when the models are absent, so no secrets or services are needed.
+# Runs on macOS arm64 like production (macmini): mlx-whisper and piper-tts are
+# Darwin/arm64-only dependencies that mypy and the tests expect to be present.
 
 on:
   push:
@@ -24,8 +26,8 @@ env:
 
 jobs:
   check:
-    name: Lint, typecheck and tests (Python 3.14)
-    runs-on: ubuntu-latest
+    name: Lint, typecheck and tests (Python 3.14, macOS arm64)
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - name: Check out repository
