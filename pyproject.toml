@@ -43,7 +43,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "config.settings"
+DJANGO_SETTINGS_MODULE = "tests.settings"
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
@@ -70,7 +70,7 @@ check_untyped_defs = true
 plugins = ["mypy_django_plugin.main"]
 
 [tool.django-stubs]
-django_settings_module = "config.settings"
+django_settings_module = "tests.settings"
 
 [[tool.mypy.overrides]]
 module = ["mlx_whisper"]

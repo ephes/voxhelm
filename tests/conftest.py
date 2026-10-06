@@ -2,6 +2,7 @@ from typing import Any, cast
 
 import pytest
 from asgiref.local import Local
+from django.core.cache import cache
 from django_tasks import task_backends
 
 from jobs.artifacts import get_artifact_store
@@ -20,6 +21,8 @@ def configure_settings(settings, tmp_path):
     settings.VOXHELM_ARTIFACT_ROOT = tmp_path / "artifacts"
     get_artifact_store.cache_clear()
     reset_task_backend_cache()
+    cache.clear()
     yield
     get_artifact_store.cache_clear()
     reset_task_backend_cache()
+    cache.clear()

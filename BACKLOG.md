@@ -103,6 +103,17 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [ ] A single oversized Wyoming event payload is still read fully by the `wyoming` library before the handler sees
   it; bounding per-event size would need a custom reader.
 
+## Operator UI hardening
+
+- [x] Closed 2026-10-06: send `X-Frame-Options: DENY` (`XFrameOptionsMiddleware`); mark session and CSRF cookies
+  `Secure` unless `DJANGO_DEBUG` (override `VOXHELM_SECURE_COOKIES`); throttle failed operator logins per client
+  address and per username (`VOXHELM_LOGIN_MAX_FAILURES`, `VOXHELM_LOGIN_LOCKOUT_SECONDS`, HTTP 429); fail startup
+  with `ImproperlyConfigured` when `DJANGO_SECRET_KEY` is missing outside `DJANGO_DEBUG`. Tests and mypy use
+  `tests/settings.py` with a test-only key; the remote worker defaults the key to a fixed local value.
+- [ ] Deploy follow-up: redeploy voxhelm on studio. `voxhelm.env` already sets `DJANGO_SECRET_KEY`. Operator login
+  now needs the HTTPS ingress; plain `http://studio:8787` logins stop working unless `VOXHELM_SECURE_COOKIES=false`
+  is set. Optionally expose the new settings in the ops-library `voxhelm_deploy` role.
+
 ## Speaker diarization deployment and consumer follow-through
 
 Status as of 2026-05-27: first Voxhelm diarization output slice is implemented and locally smoke-tested. A

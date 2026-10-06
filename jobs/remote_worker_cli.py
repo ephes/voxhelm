@@ -914,6 +914,10 @@ def load_env_file(path: Path) -> None:
 
 def setup_django_for_worker() -> None:
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    # The worker loads Django settings to reuse the local STT backends; it serves no
+    # HTTP sessions and signs nothing, so a fixed local key satisfies the settings
+    # check when the worker env file does not set one.
+    os.environ.setdefault("DJANGO_SECRET_KEY", "voxhelm-remote-worker-local-settings")
     # This process is a worker client, not the Voxhelm control plane. Force the
     # server-only remote-pull startup checks out of the worker runtime.
     os.environ["VOXHELM_TRANSCRIPTION_EXECUTION_MODE"] = "django_tasks"
