@@ -57,6 +57,7 @@ class PruneResult:
     failed: list[JobArtifact] = field(default_factory=list)
     refused: list[JobArtifact] = field(default_factory=list)
     pending_deleted: int = 0
+    pending_refused: int = 0
     pending_failed: int = 0
 
 
@@ -113,9 +114,10 @@ def job_key_is_deletable(
 ) -> bool:
     """Allowlist: only objects voxhelm itself generated for this job may be deleted.
 
-    The key must be exactly ``<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/<file>`` (local
-    execution) or ``.../jobs/<job_id>/attempt-<n>/<file>`` (remote workers), with
-    no empty, ``.`` or ``..`` segments; ``<file>`` must match the artifact name
+    The key must end in exactly ``jobs/<job_id>/<file>`` (local execution) or
+    ``jobs/<job_id>/attempt-<n>/<file>`` (remote workers) below the artifact
+    prefix that was configured when it was written, with no empty, ``.`` or
+    ``..`` segments anywhere; ``<file>`` must match the artifact name
     when known. On the filesystem the resolved real path must equal the literal
     path under the resolved root (no symlinks anywhere) and the file must not be
     hard-linked. Anything else is refused and left in place.
@@ -125,12 +127,12 @@ def job_key_is_deletable(
     parts = key.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         return False
-    base = [part for part in settings.VOXHELM_ARTIFACT_PREFIX.strip("/").split("/") if part]
-    if parts[: len(base)] != base:
-        return False
-    rest = parts[len(base) :]
-    if len(rest) == 4 and re.fullmatch(r"attempt-[0-9]+", rest[2]):
-        rest = [rest[0], rest[1], rest[3]]
+    # The configured prefix may have changed since the object was written, so
+    # any leading prefix is accepted; the job-specific tail is what is checked.
+    if len(parts) >= 4 and re.fullmatch(r"attempt-[0-9]+", parts[-2]):
+        rest = [parts[-4], parts[-3], parts[-1]]
+    else:
+        rest = parts[-3:]
     if len(rest) != 3 or rest[0] != "jobs" or rest[1] != str(job_id):
         return False
     if name is not None and rest[2] != name.replace("/", "-"):
@@ -268,8 +270,23 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
     result = PruneResult()
     candidates = list(expired_intermediate_artifacts(now=now))
     if dry_run:
-        result.deleted = candidates
-        result.pending_deleted = PendingArtifactDeletion.objects.count()
+        for candidate in candidates:
+            if job_key_is_deletable(
+                identity=candidate.storage_identity,
+                key=candidate.storage_key,
+                job_id=candidate.job_id,
+                name=candidate.name,
+            ):
+                result.deleted.append(candidate)
+            else:
+                result.refused.append(candidate)
+        for pending in PendingArtifactDeletion.objects.all():
+            if job_key_is_deletable(
+                identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
+            ):
+                result.pending_deleted += 1
+            else:
+                result.pending_refused += 1
         return result
     for candidate in candidates:
         try:
@@ -294,7 +311,10 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
             continue
         if pruned is not None:
             result.deleted.append(pruned)
-    result.pending_deleted, result.pending_failed = drain_pending_artifact_deletions()
+    counts = drain_pending_artifact_deletions()
+    result.pending_deleted = counts["resolved"]
+    result.pending_refused = counts["refused"]
+    result.pending_failed = counts["failed"]
     return result
 
 
@@ -365,8 +385,12 @@ def queue_replaced_intermediate_objects(
     return queued
 
 
-def process_pending_artifact_deletion(pending_pk: int) -> bool:
-    """Delete a queued object unless it is referenced again; True when resolved."""
+def process_pending_artifact_deletion(pending_pk: int) -> str:
+    """Handle one queued deletion; returns "resolved", "refused" or "failed".
+
+    A refused entry (not an allowlisted job key) is kept in the queue and the
+    object is left in place.
+    """
     try:
         with transaction.atomic():
             acquire_sqlite_write_lock()
@@ -374,39 +398,33 @@ def process_pending_artifact_deletion(pending_pk: int) -> bool:
                 PendingArtifactDeletion.objects.select_for_update().filter(pk=pending_pk).first()
             )
             if pending is None:
-                return True
-            deletable = job_key_is_deletable(
+                return "resolved"
+            if not job_key_is_deletable(
                 identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
-            )
-            if not deletable:
+            ):
                 logger.warning(
-                    "Dropping queued deletion of %s: not a voxhelm-generated job key.",
+                    "Refusing queued deletion of %s: not a voxhelm-generated job key.",
                     pending.storage_key,
                 )
-            elif not object_is_referenced(
-                identity=pending.storage_identity, key=pending.storage_key
-            ):
+                return "refused"
+            if not object_is_referenced(identity=pending.storage_identity, key=pending.storage_key):
                 delete_stored_object(identity=pending.storage_identity, key=pending.storage_key)
             pending.delete()
     except Exception:
         logger.exception("Could not delete queued artifact object %s; will retry.", pending_pk)
-        return False
-    return True
+        return "failed"
+    return "resolved"
 
 
 def drain_pending_artifact_deletions(
     pending: Iterable[PendingArtifactDeletion] | None = None,
-) -> tuple[int, int]:
-    """Process queued deletions; returns (resolved, failed)."""
+) -> dict[str, int]:
+    """Process queued deletions; returns counts per outcome."""
     if pending is None:
         pending_pks = list(PendingArtifactDeletion.objects.values_list("pk", flat=True))
     else:
         pending_pks = [item.pk for item in pending]
-    resolved = 0
-    failed = 0
+    counts = {"resolved": 0, "refused": 0, "failed": 0}
     for pending_pk in pending_pks:
-        if process_pending_artifact_deletion(pending_pk):
-            resolved += 1
-        else:
-            failed += 1
-    return resolved, failed
+        counts[process_pending_artifact_deletion(pending_pk)] += 1
+    return counts

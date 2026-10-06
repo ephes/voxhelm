@@ -489,13 +489,17 @@ def test_job_key_allowlist_shapes(settings):
     settings.VOXHELM_ARTIFACT_PREFIX = "voxhelm"
     s3 = {"backend": "s3", "endpoint_url": "https://s3.example.com", "bucket": "b"}
     job_id = "11111111-1111-1111-1111-111111111111"
-    ok = [f"voxhelm/jobs/{job_id}/input.mp3", f"voxhelm/jobs/{job_id}/attempt-2/source.mp3"]
+    ok = [
+        f"voxhelm/jobs/{job_id}/input.mp3",
+        f"voxhelm/jobs/{job_id}/attempt-2/source.mp3",
+        # Written under an earlier VOXHELM_ARTIFACT_PREFIX.
+        f"old-prefix/jobs/{job_id}/input.mp3",
+    ]
     bad = [
         f"voxhelm/jobs/{job_id}/./input.mp3",
         f"voxhelm/jobs/{job_id}/../x/input.mp3",
         f"voxhelm/jobs/{job_id}//input.mp3",
         f"/voxhelm/jobs/{job_id}/input.mp3",
-        f"other/jobs/{job_id}/input.mp3",
         "voxhelm/jobs/22222222-2222-2222-2222-222222222222/input.mp3",
         f"voxhelm/jobs/{job_id}/sub/dir/input.mp3",
         f"voxhelm/staged-inputs/{job_id}/input.mp3",
@@ -505,3 +509,53 @@ def test_job_key_allowlist_shapes(settings):
     for key in bad:
         assert not job_key_is_deletable(identity=s3, key=key, job_id=job_id), key
     assert not job_key_is_deletable(identity=s3, key=ok[0], job_id=job_id, name="other.mp3")
+
+
+@pytest.mark.django_db
+def test_prefix_change_does_not_block_retention(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    settings.VOXHELM_ARTIFACT_PREFIX = "renamed"
+
+    result = prune_job_artifacts()
+
+    assert [artifact.pk for artifact in result.deleted] == [source.pk]
+    assert not object_path(settings, source).exists()
+
+
+@pytest.mark.django_db
+def test_refused_queue_entry_is_kept_and_reported(settings):
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(minutes=1))
+    key = f"voxhelm/jobs/{job.id}/attempt-0/old-source.mp3"
+    get_artifact_store().put_bytes(key=key, data=b"old", content_type="audio/mpeg")
+    os.link(Path(settings.VOXHELM_ARTIFACT_ROOT) / key, Path(settings.VOXHELM_ARTIFACT_ROOT) / "x")
+    pending = PendingArtifactDeletion.objects.create(
+        job_id=job.id,
+        kind=JobArtifact.Kind.SOURCE,
+        storage_backend="filesystem",
+        storage_key=key,
+        storage_identity=current_artifact_store_identity(),
+    )
+    out = StringIO()
+
+    call_command("prune_job_artifacts", stdout=out)
+
+    assert "Refused 1 queued object(s)" in out.getvalue()
+    assert PendingArtifactDeletion.objects.filter(pk=pending.pk).exists()
+    assert (Path(settings.VOXHELM_ARTIFACT_ROOT) / key).exists()
+
+
+@pytest.mark.django_db
+def test_dry_run_reports_refusals_like_a_real_run(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    good = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    foreign = make_artifact(job, name="input.mp4", kind=JobArtifact.Kind.SOURCE)
+    JobArtifact.objects.filter(pk=foreign.pk).update(storage_key="voxhelm/elsewhere.mp4")
+
+    result = prune_job_artifacts(dry_run=True)
+
+    assert [artifact.pk for artifact in result.deleted] == [good.pk]
+    assert [artifact.pk for artifact in result.refused] == [foreign.pk]
+    assert object_path(settings, good).exists()

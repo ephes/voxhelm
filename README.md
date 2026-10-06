@@ -249,13 +249,14 @@ uv run python manage.py prune_job_artifacts
   are never touched; queued and running jobs are never touched.
 
 Deletion is allowlist-based: only an object voxhelm generated for that job is
-ever deleted, i.e. a key of exactly
-`<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/<artifact name>` or
-`<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/attempt-<n>/<artifact name>` with no
-empty, `.` or `..` segments. On the filesystem backend the resolved real path
+ever deleted, i.e. a key ending in exactly `jobs/<job_id>/<artifact name>` or
+`jobs/<job_id>/attempt-<n>/<artifact name>` below the artifact prefix it was
+written under (so a later `VOXHELM_ARTIFACT_PREFIX` change does not block
+retention), with no empty, `.` or `..` segments. On the filesystem backend the resolved real path
 must also equal the literal path under the root (no symlinks) and the file must
 not be hard-linked. Anything else is refused: the row and object stay, and the
-command lists it as refused. An allowed object that another artifact row or
+command (and `--dry-run`) lists it as refused; refused queued deletions stay
+queued. An allowed object that another artifact row or
 staged upload still references after resolution (store identity, real path
 and inode, canonical S3 endpoint and exact key) is also kept; only its row
 goes.

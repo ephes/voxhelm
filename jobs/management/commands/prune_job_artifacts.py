@@ -40,6 +40,11 @@ class Command(BaseCommand):
                 f"Refused {artifact.kind} artifact {artifact.storage_key} of job "
                 f"{artifact.job_id}: not a voxhelm-generated job key; left in place."
             )
+        if result.pending_refused:
+            self.stdout.write(
+                f"Refused {result.pending_refused} queued object(s): not voxhelm-generated "
+                "job keys; left in place and kept queued."
+            )
         if result.pending_deleted or result.pending_failed:
             self.stdout.write(
                 f"{verb} {result.pending_deleted} queued replaced object(s)"
