@@ -172,6 +172,8 @@
 
 **Blocks implementation:** No -- defaults can be set at deployment time. But the cleanup mechanism should be designed into the job model from the start (e.g., `created_at` timestamps on all records).
 
+**Implementation note (2026-10-06):** Source media and extracted intermediate audio are now pruned by `manage.py prune_job_artifacts` (non-exposed `source` artifacts of terminal jobs after `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS`, default 24 h; `extracted_audio` once the job is terminal). Transcript and speech artifacts stay indefinite. Scheduling the command (systemd timer) and the 90-day job metadata retention are still open.
+
 ---
 
 ## D-10: What is the service process topology?

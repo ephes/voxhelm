@@ -188,3 +188,21 @@ class StagedMedia(models.Model):
             models.Index(fields=["producer", "created_at"]),
             models.Index(fields=["expires_at"]),
         ]
+
+
+class PendingArtifactDeletion(models.Model):
+    """A stored object that lost its artifact row and still has to be deleted (D-09).
+
+    Written in the same transaction that drops the row, so a failed or skipped
+    object deletion is retried by ``manage.py prune_job_artifacts``.
+    """
+
+    job_id = models.UUIDField(null=True, blank=True)
+    kind = models.CharField(max_length=64, choices=JobArtifact.Kind.choices)
+    storage_backend = models.CharField(max_length=32)
+    storage_key = models.CharField(max_length=512)
+    storage_identity = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
