@@ -117,6 +117,7 @@ export VOXHELM_WYOMING_STT_MODEL=""
 export VOXHELM_WYOMING_STT_LANGUAGE=""
 export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
+export VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS="120"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"
@@ -547,6 +548,21 @@ The sidecar reuses Voxhelm's existing STT backend layer. If
 the configured Wyoming backend. The recommended interactive default is
 `VOXHELM_WYOMING_STT_BACKEND=mlx`, which avoids the short-command silence
 hallucinations seen with the current `whisper.cpp` setup on `studio`.
+
+The Wyoming protocol has no authentication, and the sidecar binds
+`0.0.0.0:10300` by default. Expose the port only to the LAN or to Home
+Assistant, never to the internet. To bound memory use on the inference host,
+the sidecar enforces two input limits per connection:
+
+- `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default `120`, must be positive) caps
+  the audio buffered for one transcription, measured after conversion to
+  16 kHz, 16-bit, mono PCM. A chunk that would push the buffer past the cap is
+  answered with a Wyoming `error` event (`code="audio_too_long"`), the buffer is
+  discarded, and the connection is closed without transcribing.
+- `Synthesize` requests use the same `VOXHELM_TTS_MAX_INPUT_CHARS` cap (default
+  `5000`, counted after trimming surrounding whitespace) as
+  `POST /v1/audio/speech`. Longer text is answered with an `error` event
+  (`code="text_too_long"`) and the connection is closed without synthesizing.
 
 Set `VOXHELM_STT_DEBUG_LOGGING=true` when tuning the HA path. Voxhelm will emit
 one structured `stt_debug` log line per transcription with the input audio

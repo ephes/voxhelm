@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioChunkConverter, AudioStart, AudioStop
 from wyoming.error import Error
@@ -47,6 +48,13 @@ from .service import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Audio is buffered after conversion to 16 kHz, 16-bit, mono PCM.
+_CONVERTED_RATE = 16000
+_CONVERTED_WIDTH = 2
+_CONVERTED_CHANNELS = 1
+_CONVERTED_BYTES_PER_SECOND = _CONVERTED_RATE * _CONVERTED_WIDTH * _CONVERTED_CHANNELS
+DEFAULT_MAX_AUDIO_SECONDS = 120
+
 _PIPER_ATTRIBUTION = Attribution(
     name="Piper",
     url="https://github.com/OHF-Voice/piper1-gpl",
@@ -78,6 +86,11 @@ class WyomingSttConfig:
     language: str | None
     languages: tuple[str, ...]
     prompt: str | None
+    max_audio_seconds: int = DEFAULT_MAX_AUDIO_SECONDS
+
+    @property
+    def max_audio_bytes(self) -> int:
+        return self.max_audio_seconds * _CONVERTED_BYTES_PER_SECOND
 
     @property
     def uri(self) -> str:
@@ -151,6 +164,11 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
     languages = tuple(dict.fromkeys(settings.VOXHELM_WYOMING_STT_LANGUAGES))
     if not languages:
         languages = (language,) if language else ("en",)
+    max_audio_seconds = settings.VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS
+    if max_audio_seconds <= 0:
+        raise ImproperlyConfigured(
+            "VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS must be a positive integer."
+        )
     return WyomingSttConfig(
         host=settings.VOXHELM_WYOMING_STT_HOST,
         port=settings.VOXHELM_WYOMING_STT_PORT,
@@ -159,6 +177,7 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         language=language,
         languages=languages,
         prompt=settings.VOXHELM_WYOMING_STT_PROMPT or None,
+        max_audio_seconds=max_audio_seconds,
     )
 
 
@@ -230,7 +249,11 @@ class WyomingSttEventHandler(AsyncEventHandler):
         self.config = config
         self.info_event = info.event()
         self.audio_buffer = io.BytesIO()
-        self.audio_converter = AudioChunkConverter(rate=16000, width=2, channels=1)
+        self.audio_converter = AudioChunkConverter(
+            rate=_CONVERTED_RATE,
+            width=_CONVERTED_WIDTH,
+            channels=_CONVERTED_CHANNELS,
+        )
         self.request_model = config.model
         self.request_language = config.language
         self.audio_shape = WyomingAudioShape()
@@ -242,6 +265,22 @@ class WyomingSttEventHandler(AsyncEventHandler):
 
         if Synthesize.is_type(event.type):
             synthesize = Synthesize.from_event(event)
+            # Strip once and synthesize the validated text, as the HTTP endpoint does.
+            text = synthesize.text.strip()
+            max_chars = settings.VOXHELM_TTS_MAX_INPUT_CHARS
+            if len(text) > max_chars:
+                _LOGGER.warning(
+                    "Wyoming TTS text rejected: %s characters exceeds limit of %s",
+                    len(text),
+                    max_chars,
+                )
+                await self.write_event(
+                    Error(
+                        text=f"Input text exceeded the configured {max_chars} character limit.",
+                        code="text_too_long",
+                    ).event()
+                )
+                return False
             requested_voice = None
             requested_language = None
             speech_result = None
@@ -251,7 +290,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
             try:
                 speech_result = await asyncio.to_thread(
                     synthesize_text,
-                    synthesize.text,
+                    text,
                     SynthesizeParams(
                         request_model="auto",
                         voice=requested_voice,
@@ -291,6 +330,24 @@ class WyomingSttEventHandler(AsyncEventHandler):
             raw_chunk = AudioChunk.from_event(event)
             self.audio_shape.input_bytes += len(raw_chunk.audio)
             chunk = self.audio_converter.convert(raw_chunk)
+            max_audio_bytes = self.config.max_audio_bytes
+            if self.audio_buffer.tell() + len(chunk.audio) > max_audio_bytes:
+                _LOGGER.warning(
+                    "Wyoming STT audio rejected: buffered audio exceeds limit of %s seconds",
+                    self.config.max_audio_seconds,
+                )
+                self.audio_buffer = io.BytesIO()
+                self.audio_shape = WyomingAudioShape()
+                await self.write_event(
+                    Error(
+                        text=(
+                            "Audio exceeded the configured "
+                            f"{self.config.max_audio_seconds} second limit."
+                        ),
+                        code="audio_too_long",
+                    ).event()
+                )
+                return False
             self.audio_shape.converted_bytes += len(chunk.audio)
             self.audio_buffer.write(chunk.audio)
             return True
@@ -353,9 +410,9 @@ class WyomingSttEventHandler(AsyncEventHandler):
             temp_path = Path(handle.name)
         try:
             with wave.open(str(temp_path), "wb") as wav_file:
-                wav_file.setframerate(16000)
-                wav_file.setsampwidth(2)
-                wav_file.setnchannels(1)
+                wav_file.setframerate(_CONVERTED_RATE)
+                wav_file.setsampwidth(_CONVERTED_WIDTH)
+                wav_file.setnchannels(_CONVERTED_CHANNELS)
                 wav_file.writeframes(audio_bytes)
 
             return transcribe_audio(
