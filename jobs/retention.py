@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import logging
 import os
-import posixpath
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -54,8 +55,13 @@ ObjectLocation = tuple[Any, ...]
 class PruneResult:
     deleted: list[JobArtifact] = field(default_factory=list)
     failed: list[JobArtifact] = field(default_factory=list)
+    refused: list[JobArtifact] = field(default_factory=list)
     pending_deleted: int = 0
     pending_failed: int = 0
+
+
+class RefusedDeletion(Exception):
+    """The object is not one voxhelm generated for the job; it is left in place."""
 
 
 @lru_cache(maxsize=64)
@@ -98,19 +104,56 @@ def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocat
     return (str(backend), repr(sorted(resolved.items())), key)
 
 
-def possibly_equivalent_key_filter(key: str) -> Q:
-    """Narrow DB filter that matches every key that may resolve to the same object.
+def job_key_is_deletable(
+    *,
+    identity: dict[str, Any] | None,
+    key: str,
+    job_id: object,
+    name: str | None = None,
+) -> bool:
+    """Allowlist: only objects voxhelm itself generated for this job may be deleted.
 
-    Any key normalizing to the same path ends with the same final component, or
-    ends in ``.``/``/`` (``a/b/.``, ``a/c/..``, ``a/b/``). Exact matching is done
-    afterwards with ``object_location``.
+    The key must be exactly ``<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/<file>`` (local
+    execution) or ``.../jobs/<job_id>/attempt-<n>/<file>`` (remote workers), with
+    no empty, ``.`` or ``..`` segments; ``<file>`` must match the artifact name
+    when known. On the filesystem the resolved real path must equal the literal
+    path under the resolved root (no symlinks anywhere) and the file must not be
+    hard-linked. Anything else is refused and left in place.
     """
-    basename = posixpath.basename(posixpath.normpath(key)) or key
-    return (
-        Q(storage_key__endswith=basename)
-        | Q(storage_key__endswith=".")
-        | Q(storage_key__endswith="/")
-    )
+    if not key or not job_id:
+        return False
+    parts = key.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    base = [part for part in settings.VOXHELM_ARTIFACT_PREFIX.strip("/").split("/") if part]
+    if parts[: len(base)] != base:
+        return False
+    rest = parts[len(base) :]
+    if len(rest) == 4 and re.fullmatch(r"attempt-[0-9]+", rest[2]):
+        rest = [rest[0], rest[1], rest[3]]
+    if len(rest) != 3 or rest[0] != "jobs" or rest[1] != str(job_id):
+        return False
+    if name is not None and rest[2] != name.replace("/", "-"):
+        return False
+    resolved = identity or current_artifact_store_identity()
+    backend = resolved.get("backend")
+    if backend == "s3":
+        return True
+    if backend != "filesystem":
+        return False
+    root = resolved_filesystem_root(str(resolved.get("root") or ""))
+    if not root:
+        return False
+    literal = os.path.join(root, *parts)
+    if os.path.realpath(literal) != literal:
+        return False
+    try:
+        stat = os.lstat(literal)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return S_ISREG(stat.st_mode) and stat.st_nlink == 1
 
 
 def object_is_referenced(
@@ -121,15 +164,15 @@ def object_is_referenced(
 ) -> bool:
     """True when any artifact row or staged upload still points at this object.
 
-    S3 keys are matched through a narrow key filter. Filesystem objects are
-    compared against every row by normalized path and, when both files exist,
-    by device and inode, so case-insensitive spellings and symlinked aliases of
-    the same file count as references (the filesystem backend is small-scale).
+    Every row is resolved before comparing: S3 rows by canonical endpoint,
+    bucket and exact key; filesystem rows by real path and, when both files
+    exist, by device and inode (the filesystem backend is small-scale, so all
+    rows are checked).
     """
     location = object_location(identity=identity, key=key)
     on_filesystem = location[0] == "filesystem"
     target_stat = filesystem_stat(location) if on_filesystem else None
-    key_filter = Q() if on_filesystem else possibly_equivalent_key_filter(key)
+    key_filter = Q() if on_filesystem else Q(storage_key=key)
     artifacts: QuerySet[JobArtifact] = JobArtifact.objects.filter(key_filter)
     if exclude_artifact_pk is not None:
         artifacts = artifacts.exclude(pk=exclude_artifact_pk)
@@ -199,6 +242,13 @@ def prune_artifact(*, artifact_pk: UUID, now: datetime | None) -> JobArtifact | 
         )
         if artifact is None:
             return None
+        if not job_key_is_deletable(
+            identity=artifact.storage_identity,
+            key=artifact.storage_key,
+            job_id=artifact.job_id,
+            name=artifact.name,
+        ):
+            raise RefusedDeletion(artifact.storage_key)
         if not object_is_referenced(
             identity=artifact.storage_identity,
             key=artifact.storage_key,
@@ -224,6 +274,15 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
     for candidate in candidates:
         try:
             pruned = prune_artifact(artifact_pk=candidate.pk, now=now)
+        except RefusedDeletion:
+            logger.warning(
+                "Refusing to delete %s artifact %s of job %s: not a voxhelm-generated job key.",
+                candidate.kind,
+                candidate.storage_key,
+                candidate.job_id,
+            )
+            result.refused.append(candidate)
+            continue
         except Exception:
             logger.exception(
                 "Could not delete %s artifact %s of job %s; keeping the row for the next run.",
@@ -249,7 +308,9 @@ def queue_replaced_intermediate_objects(
     Called inside the transaction that swaps a job's artifact rows, so the queue
     entry is durable together with the row removal. Only non-exposed
     ``SOURCE``/``EXTRACTED_AUDIO`` objects are queued, and never one that a
-    replaced exposed/final artifact or a new artifact also points at.
+    replaced exposed/final artifact or a new artifact also points at. Keys
+    outside the job's generated layout (``job_key_is_deletable``) are never
+    queued.
     """
     replaced = list(replaced)
     protected: set[ObjectLocation] = {
@@ -273,6 +334,13 @@ def queue_replaced_intermediate_objects(
     queued: list[PendingArtifactDeletion] = []
     for artifact in replaced:
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS:
+            continue
+        if not job_key_is_deletable(
+            identity=artifact.storage_identity,
+            key=artifact.storage_key,
+            job_id=artifact.job_id,
+            name=artifact.name,
+        ):
             continue
         location = object_location(identity=artifact.storage_identity, key=artifact.storage_key)
         if location in protected:
@@ -307,7 +375,17 @@ def process_pending_artifact_deletion(pending_pk: int) -> bool:
             )
             if pending is None:
                 return True
-            if not object_is_referenced(identity=pending.storage_identity, key=pending.storage_key):
+            deletable = job_key_is_deletable(
+                identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
+            )
+            if not deletable:
+                logger.warning(
+                    "Dropping queued deletion of %s: not a voxhelm-generated job key.",
+                    pending.storage_key,
+                )
+            elif not object_is_referenced(
+                identity=pending.storage_identity, key=pending.storage_key
+            ):
                 delete_stored_object(identity=pending.storage_identity, key=pending.storage_key)
             pending.delete()
     except Exception:

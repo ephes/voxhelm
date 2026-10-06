@@ -248,21 +248,29 @@ uv run python manage.py prune_job_artifacts
 - transcript, speaker-sidecar and speech artifacts, and anything marked exposed,
   are never touched; queued and running jobs are never touched.
 
+Deletion is allowlist-based: only an object voxhelm generated for that job is
+ever deleted, i.e. a key of exactly
+`<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/<artifact name>` or
+`<VOXHELM_ARTIFACT_PREFIX>/jobs/<job_id>/attempt-<n>/<artifact name>` with no
+empty, `.` or `..` segments. On the filesystem backend the resolved real path
+must also equal the literal path under the root (no symlinks) and the file must
+not be hard-linked. Anything else is refused: the row and object stay, and the
+command lists it as refused. An allowed object that another artifact row or
+staged upload still references after resolution (store identity, real path
+and inode, canonical S3 endpoint and exact key) is also kept; only its row
+goes.
+
 The command deletes the stored object (filesystem or S3/MinIO) first and then
 the row; an already-missing object counts as deleted. If an object cannot be
-deleted the row is kept for the next run and the command exits non-zero. An
-object that another artifact row or staged upload still references (compared
-by resolved store location and normalized path, so legacy rows without a store
-identity, equivalent filesystem paths such as `a/./b`, case or symlink
-aliases of the same file, and equivalent S3 endpoint spellings count too)
-is left in place. When a remote completion replaces a job's artifact rows, the
-replaced non-exposed `source` / `extracted_audio` objects that no kept or final
-artifact shares are queued (`PendingArtifactDeletion`, in the same
+deleted the row is kept for the next run and the command exits non-zero. When a
+remote completion replaces a job's artifact rows, the replaced non-exposed
+`source` / `extracted_audio` objects that pass the allowlist and that no kept
+or final artifact shares are queued (`PendingArtifactDeletion`, in the same
 transaction) and deleted right after the commit; a failed deletion stays queued
 and the next `prune_job_artifacts` run retries it. A completion retry from the
-same worker and lease still matches after pruning removed those intermediates. Each
-deletion re-checks its candidate and the references under the database write
-lock, so overlapping runs are safe.
+same worker and lease still matches after pruning removed those intermediates.
+Each deletion re-checks its candidate, the allowlist and the references under
+the database write lock, so overlapping runs are safe.
 
 Nothing schedules the command yet: run it from cron or a systemd timer (hourly
 is enough) on the control plane, with the same environment as the service.

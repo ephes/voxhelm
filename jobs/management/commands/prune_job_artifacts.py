@@ -35,6 +35,11 @@ class Command(BaseCommand):
             f"{verb} {len(result.deleted)} artifact(s), {total_bytes} bytes "
             f"(source retention {settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS}s)."
         )
+        for artifact in result.refused:
+            self.stdout.write(
+                f"Refused {artifact.kind} artifact {artifact.storage_key} of job "
+                f"{artifact.job_id}: not a voxhelm-generated job key; left in place."
+            )
         if result.pending_deleted or result.pending_failed:
             self.stdout.write(
                 f"{verb} {result.pending_deleted} queued replaced object(s)"

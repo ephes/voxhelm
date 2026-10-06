@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -11,6 +12,7 @@ from django.utils import timezone
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion
 from jobs.retention import (
+    job_key_is_deletable,
     object_location,
     prune_artifact,
     prune_job_artifacts,
@@ -263,7 +265,7 @@ def test_queued_deletion_failure_is_retried_by_prune(settings, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_equivalent_storage_keys_are_recognized_as_shared(settings):
+def test_non_canonical_key_aliasing_final_output_is_refused(settings):
     settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
     transcript = make_artifact(
@@ -282,9 +284,11 @@ def test_equivalent_storage_keys_are_recognized_as_shared(settings):
         exposed=False,
     )
 
-    prune_job_artifacts()
+    result = prune_job_artifacts()
 
-    assert not JobArtifact.objects.filter(pk=source.pk).exists()
+    # Not a voxhelm-generated job key: refused, row and object stay.
+    assert [artifact.pk for artifact in result.refused] == [source.pk]
+    assert JobArtifact.objects.filter(pk=source.pk).exists()
     assert object_path(settings, transcript).exists()
 
 
@@ -317,32 +321,20 @@ def test_object_location_canonicalizes_s3_endpoint_but_keeps_exact_keys():
 def test_overlapping_prune_skips_candidate_already_pruned(settings):
     settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
-    transcript = make_artifact(
-        job, name="transcript.txt", kind=JobArtifact.Kind.TRANSCRIPT_TEXT, exposed=True
-    )
-    source = JobArtifact.objects.create(
-        job=job,
-        name="input.mp3",
-        kind=JobArtifact.Kind.SOURCE,
-        format="source",
-        storage_backend="filesystem",
-        storage_key=transcript.storage_key,
-        storage_identity=current_artifact_store_identity(),
-        content_type="audio/mpeg",
-        size_bytes=transcript.size_bytes,
-        exposed=False,
-    )
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
     # Run A selected the candidate; run B prunes it first.
     stale_candidate_pk = source.pk
     prune_job_artifacts()
     assert not JobArtifact.objects.filter(pk=source.pk).exists()
+    # A file reappearing at that key (e.g. a new row) must not be touched by A.
+    get_artifact_store().put_bytes(key=source.storage_key, data=b"new", content_type="audio/mpeg")
 
     assert prune_artifact(artifact_pk=stale_candidate_pk, now=None) is None
-    assert object_path(settings, transcript).exists()
+    assert object_path(settings, source).exists()
 
 
 @pytest.mark.django_db
-def test_symlinked_alias_of_final_output_is_recognized_as_shared(settings):
+def test_symlinked_alias_of_final_output_is_refused(settings):
     settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
     transcript = make_artifact(
@@ -364,9 +356,11 @@ def test_symlinked_alias_of_final_output_is_recognized_as_shared(settings):
         exposed=False,
     )
 
-    prune_job_artifacts()
+    result = prune_job_artifacts()
 
-    assert not JobArtifact.objects.filter(pk=source.pk).exists()
+    # Not a voxhelm-generated job key: refused, row and object stay.
+    assert [artifact.pk for artifact in result.refused] == [source.pk]
+    assert JobArtifact.objects.filter(pk=source.pk).exists()
     assert object_path(settings, transcript).exists()
 
 
@@ -382,7 +376,7 @@ def test_case_variant_key_of_final_output_is_kept_on_case_insensitive_fs(setting
         pytest.skip("filesystem is case-sensitive")
     source = JobArtifact.objects.create(
         job=job,
-        name="input.mp3",
+        name="TRANSCRIPT.txt",
         kind=JobArtifact.Kind.SOURCE,
         format="source",
         storage_backend="filesystem",
@@ -427,7 +421,7 @@ def test_replaced_source_aliasing_replaced_transcript_is_not_queued(settings):
 
 
 @pytest.mark.django_db
-def test_symlink_followed_by_parent_reference_is_recognized_as_shared(settings):
+def test_symlink_followed_by_parent_reference_is_refused(settings):
     settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
     transcript = make_artifact(
@@ -452,9 +446,11 @@ def test_symlink_followed_by_parent_reference_is_recognized_as_shared(settings):
         exposed=False,
     )
 
-    prune_job_artifacts()
+    result = prune_job_artifacts()
 
-    assert not JobArtifact.objects.filter(pk=source.pk).exists()
+    # Not a voxhelm-generated job key: refused, row and object stay.
+    assert [artifact.pk for artifact in result.refused] == [source.pk]
+    assert JobArtifact.objects.filter(pk=source.pk).exists()
     assert object_path(settings, transcript).exists()
 
     replaced_source = JobArtifact(
@@ -469,3 +465,43 @@ def test_symlink_followed_by_parent_reference_is_recognized_as_shared(settings):
     assert (
         queue_replaced_intermediate_objects(replaced=[transcript, replaced_source], kept=[]) == []
     )
+
+
+@pytest.mark.django_db
+def test_hard_linked_or_foreign_job_keys_are_refused(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    other = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    linked = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    keep_path = Path(settings.VOXHELM_ARTIFACT_ROOT) / "elsewhere.mp3"
+    os.link(object_path(settings, linked), keep_path)
+    foreign = make_artifact(other, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    JobArtifact.objects.filter(pk=foreign.pk).update(storage_key=linked.storage_key)
+
+    result = prune_job_artifacts()
+
+    assert {artifact.pk for artifact in result.refused} == {linked.pk, foreign.pk}
+    assert keep_path.exists()
+    assert object_path(settings, linked).exists()
+
+
+def test_job_key_allowlist_shapes(settings):
+    settings.VOXHELM_ARTIFACT_PREFIX = "voxhelm"
+    s3 = {"backend": "s3", "endpoint_url": "https://s3.example.com", "bucket": "b"}
+    job_id = "11111111-1111-1111-1111-111111111111"
+    ok = [f"voxhelm/jobs/{job_id}/input.mp3", f"voxhelm/jobs/{job_id}/attempt-2/source.mp3"]
+    bad = [
+        f"voxhelm/jobs/{job_id}/./input.mp3",
+        f"voxhelm/jobs/{job_id}/../x/input.mp3",
+        f"voxhelm/jobs/{job_id}//input.mp3",
+        f"/voxhelm/jobs/{job_id}/input.mp3",
+        f"other/jobs/{job_id}/input.mp3",
+        "voxhelm/jobs/22222222-2222-2222-2222-222222222222/input.mp3",
+        f"voxhelm/jobs/{job_id}/sub/dir/input.mp3",
+        f"voxhelm/staged-inputs/{job_id}/input.mp3",
+    ]
+    for key in ok:
+        assert job_key_is_deletable(identity=s3, key=key, job_id=job_id)
+    for key in bad:
+        assert not job_key_is_deletable(identity=s3, key=key, job_id=job_id), key
+    assert not job_key_is_deletable(identity=s3, key=ok[0], job_id=job_id, name="other.mp3")
