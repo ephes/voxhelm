@@ -149,9 +149,7 @@ def test_dry_run_deletes_nothing(settings):
 def test_command_deletes_and_tolerates_missing_objects(settings):
     settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
-    missing = make_artifact(
-        job, name="input.mp3", kind=JobArtifact.Kind.SOURCE, write_object=False
-    )
+    missing = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE, write_object=False)
     out = StringIO()
 
     call_command("prune_job_artifacts", stdout=out)
@@ -426,3 +424,48 @@ def test_replaced_source_aliasing_replaced_transcript_is_not_queued(settings):
 
     assert queue_replaced_intermediate_objects(replaced=[transcript, source], kept=[]) == []
     assert object_path(settings, transcript).exists()
+
+
+@pytest.mark.django_db
+def test_symlink_followed_by_parent_reference_is_recognized_as_shared(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    transcript = make_artifact(
+        job, name="transcript.txt", kind=JobArtifact.Kind.TRANSCRIPT_TEXT, exposed=True
+    )
+    root = Path(settings.VOXHELM_ARTIFACT_ROOT)
+    real_dir = object_path(settings, transcript).parent
+    (real_dir / "child").mkdir()
+    (root / "alias").symlink_to(real_dir / "child", target_is_directory=True)
+    source_key = "alias/../transcript.txt"
+    assert (root / source_key).resolve() == object_path(settings, transcript).resolve()
+    source = JobArtifact.objects.create(
+        job=job,
+        name="input.mp3",
+        kind=JobArtifact.Kind.SOURCE,
+        format="source",
+        storage_backend="filesystem",
+        storage_key=source_key,
+        storage_identity=current_artifact_store_identity(),
+        content_type="audio/mpeg",
+        size_bytes=transcript.size_bytes,
+        exposed=False,
+    )
+
+    prune_job_artifacts()
+
+    assert not JobArtifact.objects.filter(pk=source.pk).exists()
+    assert object_path(settings, transcript).exists()
+
+    replaced_source = JobArtifact(
+        job=job,
+        name="input2.mp3",
+        kind=JobArtifact.Kind.SOURCE,
+        storage_backend="filesystem",
+        storage_key=source_key,
+        storage_identity=current_artifact_store_identity(),
+        exposed=False,
+    )
+    assert (
+        queue_replaced_intermediate_objects(replaced=[transcript, replaced_source], kept=[]) == []
+    )

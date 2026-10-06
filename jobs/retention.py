@@ -83,7 +83,8 @@ def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocat
 
     An empty identity means "the current store" (see
     ``get_artifact_store_for_identity``), so it is resolved the same way here.
-    Filesystem keys resolve to a normalized path under the root (``a/./b`` and
+    Filesystem keys resolve like the OS does (``realpath``: symlinks are followed
+    before ``..`` is applied, so ``alias/../x`` is the real target; ``a/./b`` and
     ``a/b`` are the same file); S3 keys are literal, the endpoint URL is
     canonicalized.
     """
@@ -91,7 +92,7 @@ def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocat
     backend = resolved.get("backend")
     if backend == "filesystem":
         root = resolved_filesystem_root(str(resolved.get("root") or ""))
-        return ("filesystem", os.path.normpath(str(Path(root) / key)))
+        return ("filesystem", os.path.realpath(Path(root) / key))
     if backend == "s3":
         return ("s3", canonical_endpoint(resolved.get("endpoint_url")), resolved.get("bucket"), key)
     return (str(backend), repr(sorted(resolved.items())), key)
