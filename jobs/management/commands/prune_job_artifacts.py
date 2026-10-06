@@ -10,7 +10,10 @@ class Command(BaseCommand):
     help = (
         "Delete expired intermediate job artifacts (D-09): non-exposed source media of "
         "finished jobs older than VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS and extracted "
-        "audio of finished jobs. Transcript and speech artifacts are never touched."
+        "audio of finished jobs. Transcript and speech artifacts are never touched. Then "
+        "delete job rows of terminal jobs finished more than "
+        "VOXHELM_JOB_METADATA_RETENTION_SECONDS ago that no longer own any artifact, "
+        "queued deletion or claimed staged upload."
     )
 
     def add_arguments(self, parser) -> None:
@@ -51,6 +54,17 @@ class Command(BaseCommand):
                 + (f", {result.pending_failed} still pending" if result.pending_failed else "")
                 + "."
             )
+        for job in result.jobs_deleted:
+            self.stdout.write(
+                f"{verb} {job.state} {job.job_type} job {job.id} of producer {job.producer} "
+                f"(finished {(job.finished_at or job.updated_at).isoformat()})"
+            )
+        retention = settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS
+        self.stdout.write(
+            f"{verb} {len(result.jobs_deleted)} job row(s) (job metadata retention "
+            + (f"{retention}s" if retention else "disabled")
+            + ")."
+        )
         if result.failed or result.pending_failed:
             raise CommandError(
                 f"Could not delete {len(result.failed) + result.pending_failed} object(s); "

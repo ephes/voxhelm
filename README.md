@@ -150,6 +150,7 @@ export VOXHELM_PRIVATE_URL_HOSTS="s3.internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
 export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
 export VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS="86400"
+export VOXHELM_JOB_METADATA_RETENTION_SECONDS="7776000"
 export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"
 export VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
 export VOXHELM_REMOTE_WORKER_LEASE_SECONDS="1800"
@@ -272,6 +273,22 @@ and the next `prune_job_artifacts` run retries it. A completion retry from the
 same worker and lease still matches after pruning removed those intermediates.
 Each deletion re-checks its candidate, the allowlist and the references under
 the database write lock, so overlapping runs are safe.
+
+After the artifacts (and the queued deletions), the same command deletes old
+job metadata: the `Job` row of a terminal job that finished more than
+`VOXHELM_JOB_METADATA_RETENTION_SECONDS` ago (default `7776000`, 90 days; the
+job's `finished_at`, else its last update; `0` disables job metadata pruning).
+A job is only deleted once it owns nothing anymore: no artifact row of any kind
+(so intermediates must have been pruned first, and a job whose intermediate was
+refused, failed to delete or is not yet past source retention keeps its row),
+no queued `PendingArtifactDeletion` and no staged upload still claimed by it.
+Transcript, speaker-sidecar and speech artifacts are kept indefinitely and are
+served through their job, so a job that still has them keeps its row. Queued
+and running jobs are never deleted. Each batch re-checks these conditions under
+the database write lock. Deleting a job also frees its `task_ref`, so a later
+submission with the same `task_ref` creates a new job. `--dry-run` lists the
+job rows a real run would delete, counting the artifacts and queued deletions
+that run would remove first as already gone.
 
 Nothing schedules the command yet: run it from cron or a systemd timer (hourly
 is enough) on the control plane, with the same environment as the service.

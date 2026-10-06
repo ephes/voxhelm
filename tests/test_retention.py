@@ -10,12 +10,14 @@ from django.core.management import CommandError, call_command
 from django.utils import timezone
 
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store
-from jobs.models import Job, JobArtifact, PendingArtifactDeletion
+from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia
 from jobs.retention import (
+    expired_job_metadata,
     job_key_is_deletable,
     object_location,
     prune_artifact,
     prune_job_artifacts,
+    prune_job_metadata,
     queue_replaced_intermediate_objects,
 )
 
@@ -559,3 +561,174 @@ def test_dry_run_reports_refusals_like_a_real_run(settings):
     assert [artifact.pk for artifact in result.deleted] == [good.pk]
     assert [artifact.pk for artifact in result.refused] == [foreign.pk]
     assert object_path(settings, good).exists()
+
+
+METADATA_RETENTION = timedelta(days=90)
+
+
+@pytest.mark.django_db
+def test_job_metadata_deleted_only_for_old_terminal_jobs(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    old = {
+        state: make_job(state=state, finished_ago=METADATA_RETENTION + timedelta(hours=1))
+        for state in (
+            Job.State.SUCCEEDED,
+            Job.State.FAILED,
+            Job.State.CANCELED,
+            Job.State.EXPIRED,
+        )
+    }
+    recent = make_job(state=Job.State.FAILED, finished_ago=METADATA_RETENTION - timedelta(hours=1))
+    queued = make_job(state=Job.State.QUEUED, finished_ago=None)
+    running = make_job(state=Job.State.RUNNING, finished_ago=None)
+    Job.objects.filter(pk__in=[queued.pk, running.pk]).update(
+        updated_at=timezone.now() - timedelta(days=365)
+    )
+
+    result = prune_job_artifacts()
+
+    assert {job.pk for job in result.jobs_deleted} == {job.pk for job in old.values()}
+    assert not Job.objects.filter(pk__in=[job.pk for job in old.values()]).exists()
+    assert set(Job.objects.values_list("pk", flat=True)) == {recent.pk, queued.pk, running.pk}
+
+
+@pytest.mark.django_db
+def test_job_metadata_falls_back_to_updated_at(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    legacy = make_job(state=Job.State.CANCELED, finished_ago=None)
+    fresh = make_job(state=Job.State.CANCELED, finished_ago=None)
+    Job.objects.filter(pk=legacy.pk).update(updated_at=timezone.now() - timedelta(days=91))
+
+    assert [job.pk for job in prune_job_metadata()] == [legacy.pk]
+    assert Job.objects.filter(pk=fresh.pk).exists()
+
+
+@pytest.mark.django_db
+def test_job_with_final_artifacts_keeps_its_metadata(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=200))
+    transcript = make_artifact(
+        job, name="transcript.txt", kind=JobArtifact.Kind.TRANSCRIPT_TEXT, exposed=True
+    )
+
+    assert prune_job_artifacts().jobs_deleted == []
+    assert Job.objects.filter(pk=job.pk).exists()
+    assert JobArtifact.objects.filter(pk=transcript.pk).exists()
+    assert object_path(settings, transcript).exists()
+
+
+@pytest.mark.django_db
+def test_intermediates_are_pruned_before_job_metadata_in_one_run(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 3600
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    job = make_job(state=Job.State.FAILED, finished_ago=timedelta(days=100))
+    source = make_artifact(job, name="input.mp4", kind=JobArtifact.Kind.SOURCE)
+    audio = make_artifact(job, name="extracted-audio.wav", kind=JobArtifact.Kind.EXTRACTED_AUDIO)
+    out = StringIO()
+
+    call_command("prune_job_artifacts", "--dry-run", stdout=out)
+
+    assert f"Would delete failed transcribe job {job.id}" in out.getvalue()
+    assert "Would delete 1 job row(s)" in out.getvalue()
+    assert Job.objects.filter(pk=job.pk).exists()
+    assert object_path(settings, source).exists()
+
+    out = StringIO()
+    call_command("prune_job_artifacts", stdout=out)
+
+    assert "Deleted 1 job row(s)" in out.getvalue()
+    assert not Job.objects.filter(pk=job.pk).exists()
+    assert not object_path(settings, source).exists()
+    assert not object_path(settings, audio).exists()
+
+
+@pytest.mark.django_db
+def test_job_whose_intermediates_cannot_be_deleted_keeps_its_metadata(settings, monkeypatch):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 3600
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+
+    class BrokenStore:
+        def delete(self, *, key: str) -> None:
+            raise RuntimeError("S3 unavailable")
+
+    monkeypatch.setattr(
+        "jobs.retention.get_artifact_store_for_identity", lambda identity: BrokenStore()
+    )
+
+    with pytest.raises(CommandError):
+        call_command("prune_job_artifacts", stdout=StringIO())
+
+    assert Job.objects.filter(pk=job.pk).exists()
+    assert JobArtifact.objects.filter(pk=source.pk).exists()
+
+
+@pytest.mark.django_db
+def test_refused_intermediate_keeps_job_metadata(settings):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 3600
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    JobArtifact.objects.filter(pk=source.pk).update(storage_key="shared/input.mp3")
+
+    result = prune_job_artifacts()
+
+    assert [artifact.pk for artifact in result.refused] == [source.pk]
+    assert result.jobs_deleted == []
+    assert Job.objects.filter(pk=job.pk).exists()
+
+
+@pytest.mark.django_db
+def test_queued_deletion_or_staged_claim_keeps_job_metadata(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    queued_job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
+    PendingArtifactDeletion.objects.create(
+        job_id=queued_job.id,
+        kind=JobArtifact.Kind.SOURCE,
+        storage_backend="filesystem",
+        storage_key="elsewhere/input.mp3",
+        storage_identity=current_artifact_store_identity(),
+    )
+    staged_job = make_job(state=Job.State.FAILED, finished_ago=timedelta(days=100))
+    StagedMedia.objects.create(
+        producer="archive",
+        original_filename="input.mp3",
+        content_type="audio/mpeg",
+        storage_backend="filesystem",
+        storage_key="staged/input.mp3",
+        storage_identity=current_artifact_store_identity(),
+        claimed_by_job=staged_job,
+        claimed_at=timezone.now(),
+        expires_at=timezone.now() + timedelta(days=1),
+    )
+
+    result = prune_job_artifacts()
+
+    assert result.pending_refused == 1
+    assert result.jobs_deleted == []
+    assert Job.objects.filter(pk__in=[queued_job.pk, staged_job.pk]).count() == 2
+
+
+@pytest.mark.django_db
+def test_job_metadata_retention_zero_disables_pruning(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = 0
+    job = make_job(state=Job.State.FAILED, finished_ago=timedelta(days=1000))
+    out = StringIO()
+
+    call_command("prune_job_artifacts", stdout=out)
+
+    assert "Deleted 0 job row(s) (job metadata retention disabled)" in out.getvalue()
+    assert Job.objects.filter(pk=job.pk).exists()
+    assert not expired_job_metadata().exists()
+
+
+@pytest.mark.django_db
+def test_job_metadata_pruning_runs_in_batches(settings):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    jobs = [make_job(state=Job.State.FAILED, finished_ago=timedelta(days=100)) for _ in range(5)]
+
+    deleted = prune_job_metadata(batch_size=2)
+
+    assert {job.pk for job in deleted} == {job.pk for job in jobs}
+    assert not Job.objects.exists()

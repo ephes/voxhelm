@@ -11,6 +11,13 @@ Each deletion runs in its own short transaction that first takes the database
 write lock, re-checks that the candidate still exists and that nothing else
 references its object, deletes the object and only then drops the row. Overlapping
 prune runs and post-completion drains therefore serialize per object.
+
+Job metadata (the ``Job`` row) is deleted after
+``VOXHELM_JOB_METADATA_RETENTION_SECONDS`` (default 90 days), but only for terminal
+jobs that no longer own anything: no artifact row of any kind (intermediates are
+pruned first; transcript and speech artifacts are kept indefinitely, so a job that
+still has them keeps its row), no queued object deletion and no claimed staged
+upload. See ``expired_job_metadata``.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -59,6 +66,7 @@ class PruneResult:
     pending_deleted: int = 0
     pending_refused: int = 0
     pending_failed: int = 0
+    jobs_deleted: list[Job] = field(default_factory=list)
 
 
 class RefusedDeletion(Exception):
@@ -280,13 +288,22 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
                 result.deleted.append(candidate)
             else:
                 result.refused.append(candidate)
+        deletable_pending_pks: list[int] = []
         for pending in PendingArtifactDeletion.objects.all():
             if job_key_is_deletable(
                 identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
             ):
                 result.pending_deleted += 1
+                deletable_pending_pks.append(pending.pk)
             else:
                 result.pending_refused += 1
+        result.jobs_deleted = list(
+            expired_job_metadata(
+                now=now,
+                ignore_artifact_pks=[artifact.pk for artifact in result.deleted],
+                ignore_pending_pks=deletable_pending_pks,
+            )
+        )
         return result
     for candidate in candidates:
         try:
@@ -315,6 +332,9 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
     result.pending_deleted = counts["resolved"]
     result.pending_refused = counts["refused"]
     result.pending_failed = counts["failed"]
+    # Job rows go last, so a job whose intermediates were just pruned is eligible
+    # in the same run.
+    result.jobs_deleted = prune_job_metadata(now=now)
     return result
 
 
@@ -428,3 +448,62 @@ def drain_pending_artifact_deletions(
     for pending_pk in pending_pks:
         counts[process_pending_artifact_deletion(pending_pk)] += 1
     return counts
+
+
+def expired_job_metadata(
+    *,
+    now: datetime | None = None,
+    ignore_artifact_pks: Iterable[UUID] = (),
+    ignore_pending_pks: Iterable[int] = (),
+) -> QuerySet[Job]:
+    """Terminal jobs past metadata retention that own nothing anymore, oldest first.
+
+    A job is only eligible when it finished (``finished_at``, else ``updated_at``)
+    more than ``VOXHELM_JOB_METADATA_RETENTION_SECONDS`` ago, is in a terminal
+    state and has no remaining ``JobArtifact`` row (intermediates are pruned first;
+    transcript, speech and exposed artifacts are kept indefinitely and keep their
+    job), no queued ``PendingArtifactDeletion`` and no ``StagedMedia`` still
+    claimed by it. A retention of ``0`` disables job metadata pruning.
+
+    ``ignore_*_pks`` let ``--dry-run`` treat artifacts and queued deletions it
+    would remove in the same run as already gone.
+    """
+    retention = settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS
+    if retention <= 0:
+        return Job.objects.none()
+    now = now or timezone.now()
+    cutoff = now - timedelta(seconds=retention)
+    artifacts = JobArtifact.objects.filter(job=OuterRef("pk")).exclude(
+        pk__in=list(ignore_artifact_pks)
+    )
+    pending = PendingArtifactDeletion.objects.filter(job_id=OuterRef("pk")).exclude(
+        pk__in=list(ignore_pending_pks)
+    )
+    staged = StagedMedia.objects.filter(claimed_by_job=OuterRef("pk"))
+    return (
+        Job.objects.filter(state__in=TERMINAL_JOB_STATES)
+        .annotate(job_finished_at=Coalesce("finished_at", "updated_at"))
+        .filter(job_finished_at__lte=cutoff)
+        .filter(~Exists(artifacts), ~Exists(pending), ~Exists(staged))
+        .order_by("job_finished_at", "id")
+    )
+
+
+def prune_job_metadata(*, now: datetime | None = None, batch_size: int = 500) -> list[Job]:
+    """Delete expired job rows (D-09); returns the deleted jobs.
+
+    Each batch re-evaluates eligibility under the database write lock inside its
+    own transaction, so a job that gained an artifact, a queued deletion or a
+    staged-upload claim meanwhile, or left its terminal state, is kept.
+    """
+    deleted: list[Job] = []
+    while True:
+        with transaction.atomic():
+            acquire_sqlite_write_lock()
+            batch = list(expired_job_metadata(now=now).select_for_update()[:batch_size])
+            if not batch:
+                return deleted
+            Job.objects.filter(pk__in=[job.pk for job in batch]).delete()
+        deleted.extend(batch)
+        if len(batch) < batch_size:
+            return deleted
