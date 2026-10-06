@@ -91,6 +91,18 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
   podcast job shares the GPU with Wyoming without being counted. Decide whether that worker should acquire a
   non-interactive slot (see the "Preserve the C13 lane scheduler" item above).
 
+## Wyoming input limits
+
+- [x] Cap buffered Wyoming STT audio with `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default 120 s, checked on the
+  converted 16 kHz mono buffer) and answer `audio_too_long`, then close the connection.
+- [x] Apply `VOXHELM_TTS_MAX_INPUT_CHARS` to Wyoming `Synthesize` and answer `text_too_long`, then close the
+  connection.
+- [x] Document that the unauthenticated Wyoming port is for the LAN / Home Assistant only.
+- [ ] Optionally make the ops-library `voxhelm_deploy` Wyoming bind host configurable (still `0.0.0.0`), and expose
+  `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` there if a non-default cap is needed.
+- [ ] A single oversized Wyoming event payload is still read fully by the `wyoming` library before the handler sees
+  it; bounding per-event size would need a custom reader.
+
 ## Speaker diarization deployment and consumer follow-through
 
 Status as of 2026-05-27: first Voxhelm diarization output slice is implemented and locally smoke-tested. A
