@@ -422,6 +422,10 @@ VOXHELM_STAGED_INPUT_RETENTION_SECONDS = int(
 )
 VOXHELM_ALLOWED_URL_HOSTS = set(env_list("VOXHELM_ALLOWED_URL_HOSTS"))
 VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
+# Allowlisted hosts that may resolve to non-public IPs (RFC 1918, loopback,
+# CGNAT/Tailscale, IPv6 ULA). Trusted HTTP hosts are implicitly included.
+# Link-local/metadata, multicast and reserved addresses are always refused.
+VOXHELM_PRIVATE_URL_HOSTS = set(env_list("VOXHELM_PRIVATE_URL_HOSTS"))
 VOXHELM_ACCEPTED_MODELS = get_accepted_stt_models()
 VOXHELM_BATCH_ACCEPTED_MODELS = get_batch_accepted_stt_models()
 VOXHELM_TTS_BACKEND = os.getenv("VOXHELM_TTS_BACKEND", "piper").strip()

@@ -146,6 +146,7 @@ export VOXHELM_TTS_LANGUAGE_ROUTING="false"
 export VOXHELM_TTS_LANGUAGE_VOICES="de=kokoro-martin,en=kokoro-af_heart"
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
+export VOXHELM_PRIVATE_URL_HOSTS="s3.internal.example.lan"
 export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
 export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
 export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"
@@ -339,6 +340,26 @@ only. `VOXHELM_TRANSCRIPTION_EXECUTION_MODE` must be either `django_tasks` or
 `remote_pull`. The remote lease, poll, and max-attempt settings must be positive
 integers. URL inputs are validated against `VOXHELM_ALLOWED_URL_HOSTS` when the
 job is submitted, before a remote job can remain queued.
+
+URL fetches (sync transcription, batch jobs, the operator UI and remote
+workers) share one SSRF-guarded fetcher:
+
+- every redirect hop is re-checked against `VOXHELM_ALLOWED_URL_HOSTS` and the
+  https-only / `VOXHELM_TRUSTED_HTTP_HOSTS` scheme rule, so an open redirect on
+  an allowlisted host cannot reach another host or downgrade to plain HTTP;
+  at most 5 redirects are followed;
+- every resolved IP is checked before connecting, and the socket connects to
+  exactly the checked address (no second DNS lookup, so DNS rebinding cannot
+  swap it). Link-local (including cloud metadata `169.254.169.254`), the
+  other known metadata endpoints (`fd00:ec2::254`, `100.100.100.200`,
+  `192.0.0.192`), multicast, reserved, unspecified and `0.0.0.0/8` addresses are always
+  refused. Other non-public addresses (RFC 1918, loopback, CGNAT/Tailscale
+  `100.64.0.0/10`, IPv6 ULA) are only accepted for hosts listed in
+  `VOXHELM_PRIVATE_URL_HOSTS` or `VOXHELM_TRUSTED_HTTP_HOSTS`. Allowlisted
+  hosts that resolve to tailnet or LAN addresses must therefore be added to
+  `VOXHELM_PRIVATE_URL_HOSTS` (on the control plane and on remote workers);
+- `http_proxy`/`https_proxy` environment variables are ignored for media
+  fetches.
 
 When more than one remote worker is active, the control plane balances claims
 fairly instead of letting the lowest-latency poller win every race: at claim

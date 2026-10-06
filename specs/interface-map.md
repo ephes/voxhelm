@@ -127,7 +127,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 - `response_format=json` returns `Content-Type: application/json` with `{"text": "..."}`.
 - `response_format=verbose_json` returns Whisper-style segments with `id`, `seek`, `start`, `end`, and `text`.
 - Clients may provide either an uploaded file or a source URL; the producer-facing contract stays the same regardless of how Voxhelm fetches media.
-- URL fetch policy for v1: allow `https://` by default; allow `http://` only for explicitly configured trusted internal hosts; reject URLs outside the configured host allowlist.
+- URL fetch policy for v1: allow `https://` by default; allow `http://` only for explicitly configured trusted internal hosts; reject URLs outside the configured host allowlist. The same policy applies to every redirect hop (at most 5), and resolved IPs must be public unless the host is listed in `VOXHELM_PRIVATE_URL_HOSTS` or `VOXHELM_TRUSTED_HTTP_HOSTS`; link-local/metadata, multicast and reserved addresses are always refused.
 - This is a synchronous HTTP transcription contract for blocking clients; it is not the Wyoming interactive voice path.
 
 **Workload lane:** Synchronous (bounded-size, blocking request/response). This is not the interactive voice lane — it serves Archive and similar consumers that make blocking HTTP calls.

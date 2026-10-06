@@ -423,11 +423,11 @@ def test_url_download_cleanup_on_size_limit(monkeypatch, settings, tmp_path):
         return handle
 
     monkeypatch.setattr(
-        "transcriptions.input_media.urlopen",
+        "jobs.media.open_allowed_url",
         lambda request, timeout: DummyResponse(),
     )
     monkeypatch.setattr(
-        "transcriptions.input_media.tempfile.NamedTemporaryFile",
+        "jobs.media.tempfile.NamedTemporaryFile",
         fake_named_temporary_file,
     )
     from transcriptions.input_media import download_allowed_url_to_tempfile
