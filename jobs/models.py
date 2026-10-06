@@ -45,6 +45,9 @@ class Job(models.Model):
         related_name="voxhelm_jobs",
     )
     task_ref = models.CharField(max_length=255, blank=True)
+    # SHA-256 of the normalized, result-affecting request fields (see jobs.fingerprints). Empty
+    # for jobs without a task_ref and for legacy duplicates left behind by the pre-constraint race.
+    request_fingerprint = models.CharField(max_length=64, blank=True, default="")
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     lane = models.CharField(max_length=32, choices=Lane.choices, default=Lane.BATCH)
     dispatch_mode = models.CharField(
@@ -96,6 +99,17 @@ class Job(models.Model):
             models.Index(fields=["execution_mode", "state", "priority", "created_at"]),
             models.Index(fields=["assigned_worker_id", "state"]),
             models.Index(fields=["lease_expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["producer", "task_ref", "request_fingerprint"],
+                condition=(
+                    ~models.Q(task_ref="")
+                    & ~models.Q(request_fingerprint="")
+                    & ~models.Q(state="failed")
+                ),
+                name="jobs_job_active_task_ref_fingerprint_unique",
+            )
         ]
 
 

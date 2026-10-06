@@ -103,9 +103,9 @@ clean contributor reference material are the preferred follow-up direction.
 ### Voxhelm repo
 
 - [ ] Clean up and commit the diarization implementation, including pyannote 4 `DiarizeOutput` unwrapping.
-- [ ] Resolve the pending `jobs` migration check:
-  - `uv run python manage.py makemigrations --check --dry-run` currently reports an index-rename migration for `StagedMedia`.
-- [ ] Close the pre-existing batch job idempotency race: concurrent submissions with the same `task_ref` and normalized payload can both miss the dedup query and create duplicate jobs. Consider a uniqueness strategy such as a normalized payload hash or locking the dedup path inside the create transaction.
+- [x] Resolve the pending `jobs` migration check:
+  - `uv run python manage.py makemigrations --check --dry-run` reports "No changes detected" (verified 2026-10-06).
+- [x] Close the pre-existing batch job idempotency race: concurrent submissions with the same `task_ref` and normalized payload can both miss the dedup query and create duplicate jobs. Closed 2026-10-06 with a `Job.request_fingerprint` (SHA-256 of the normalized result-affecting request fields) and a partial unique constraint on `(producer, task_ref, request_fingerprint)` for non-failed jobs; a losing concurrent insert rolls back and returns the winning job. Migration `jobs.0008` backfills fingerprints and leaves any legacy duplicates unfingerprinted.
 - [ ] Keep `pyannote.audio` behind the optional `diarization` extra and verify fresh install with:
   - `uv sync --extra diarization`
 - [ ] Decide whether the current pyannote/torchcodec warning is acceptable in production logs. Voxhelm avoids torchcodec decoding by passing ffmpeg-decoded waveform data to pyannote, but pyannote still emits the import-time warning.

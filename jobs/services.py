@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import F
 from django.utils import timezone
 from django_tasks import default_task_backend
@@ -18,6 +18,7 @@ from django_tasks.exceptions import TaskResultDoesNotExist
 
 from config.settings import get_batch_accepted_stt_models
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store
+from jobs.fingerprints import job_request_fingerprint_from_fields
 from jobs.media import (
     DownloadedMedia,
     download_allowed_media,
@@ -27,6 +28,7 @@ from jobs.media import (
 )
 from jobs.models import Job, JobArtifact, StagedMedia
 from jobs.staging import (
+    StagedMediaAlreadyClaimed,
     claim_staged_media_for_job,
     cleanup_expired_staged_media,
     delete_staged_media,
@@ -84,6 +86,9 @@ TRANSCRIPTION_OUTPUT_FORMATS = {"json", "text", "vtt", "webvtt", "dote", "podlov
 DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS = ("text", "json")
 OPERATOR_TRANSCRIPTION_OUTPUT_FORMATS = ("text", "json", "vtt", "dote", "podlove")
 DEFAULT_SPEECH_OUTPUT_FORMATS = ("wav",)
+# Attempts to insert a task_ref job when a concurrent identical submission races us. One retry
+# covers the case where the winning job failed between our insert and the follow-up lookup.
+TASK_REF_CREATE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -112,32 +117,86 @@ def create_job_from_payload_for_actor(
     operator,
 ) -> tuple[Job, bool]:
     request = parse_job_request(payload)
-    from jobs.tasks import run_synthesis_job, run_transcription_job
-
     execution_mode = execution_mode_for_request(request)
-    if request.task_ref:
-        existing_jobs = (
-            Job.objects.filter(producer=producer, task_ref=request.task_ref)
-            .exclude(state=Job.State.FAILED)
-            .order_by("-created_at")
-        )
-        for existing in existing_jobs.iterator():
-            if existing_job_matches_request(existing, request):
-                reconciled = reconcile_job_state(existing)
-                if reconciled.state == Job.State.FAILED:
-                    continue
-                return reconciled, False
-
+    existing = find_reusable_job(producer=producer, request=request)
+    if existing is not None:
+        return existing, False
     validate_job_request_media_urls(request)
+
+    if request.job_type == Job.JobType.TRANSCRIBE and request.input_data.get("kind") == "upload":
+        cleanup_expired_staged_media(exclude_upload_id=str(request.input_data["upload_id"]))
+
+    request_fingerprint = job_request_fingerprint(request) if request.task_ref else ""
+    for attempt in range(1, TASK_REF_CREATE_ATTEMPTS + 1):
+        try:
+            job = insert_batch_job(
+                producer=producer,
+                operator=operator,
+                request=request,
+                request_fingerprint=request_fingerprint,
+                execution_mode=execution_mode,
+            )
+        except StagedMediaAlreadyClaimed:
+            # A concurrent identical submission may have claimed the staged upload first.
+            existing = find_reusable_job(producer=producer, request=request)
+            if existing is not None:
+                return existing, False
+            raise
+        except IntegrityError:
+            # A concurrent submission with the same producer, task_ref and request fingerprint
+            # won the race: the partial unique constraint rejected this insert and rolled the
+            # whole transaction back, so nothing was enqueued for this attempt. Return the
+            # winner instead. If the winner already failed in the meantime, the constraint no
+            # longer applies and the next attempt can create a fresh job.
+            if not request.task_ref:
+                raise
+            existing = find_reusable_job(producer=producer, request=request)
+            if existing is not None:
+                return existing, False
+            if attempt == TASK_REF_CREATE_ATTEMPTS:
+                raise
+            continue
+        break
+
+    job.refresh_from_db()
+    reconcile_job_state(job)
+    return job, True
+
+
+def find_reusable_job(*, producer: str, request: JobRequest) -> Job | None:
+    """Return the newest non-failed job that satisfies ``request`` for this ``task_ref``."""
+    if not request.task_ref:
+        return None
+    existing_jobs = (
+        Job.objects.filter(producer=producer, task_ref=request.task_ref)
+        .exclude(state=Job.State.FAILED)
+        .order_by("-created_at")
+    )
+    for existing in existing_jobs.iterator():
+        if existing_job_matches_request(existing, request):
+            reconciled = reconcile_job_state(existing)
+            if reconciled.state == Job.State.FAILED:
+                continue
+            return reconciled
+    return None
+
+
+def insert_batch_job(
+    *,
+    producer: str,
+    operator,
+    request: JobRequest,
+    request_fingerprint: str,
+    execution_mode: str,
+) -> Job:
+    from jobs.tasks import run_synthesis_job, run_transcription_job
 
     task_callable = (
         run_synthesis_job if request.job_type == Job.JobType.SYNTHESIZE else run_transcription_job
     )
     enqueue_django_task = execution_mode == Job.ExecutionMode.DJANGO_TASKS
-    if request.job_type == Job.JobType.TRANSCRIBE and request.input_data.get("kind") == "upload":
-        cleanup_expired_staged_media(exclude_upload_id=str(request.input_data["upload_id"]))
-
     with transaction.atomic():
+        acquire_sqlite_write_lock()
         staged_media: StagedMedia | None = None
         input_data = request.input_data
         if request.job_type == Job.JobType.TRANSCRIBE and input_data.get("kind") == "upload":
@@ -168,6 +227,7 @@ def create_job_from_payload_for_actor(
             producer=producer,
             operator=operator,
             task_ref=request.task_ref,
+            request_fingerprint=request_fingerprint,
             job_type=request.job_type,
             lane=request.lane,
             dispatch_mode=Job.DispatchMode.BATCH,
@@ -191,10 +251,22 @@ def create_job_from_payload_for_actor(
             ).enqueue(str(job.id))
             job.django_task_id = str(task_result.id)
             job.save(update_fields=["django_task_id", "updated_at"])
+    return job
 
-    job.refresh_from_db()
-    reconcile_job_state(job)
-    return job, True
+
+def acquire_sqlite_write_lock() -> None:
+    """Take SQLite's write lock at the start of the current transaction.
+
+    Django opens deferred SQLite transactions. A transaction that reads first and writes later
+    must upgrade its lock, and when a concurrent writer committed in between SQLite fails the
+    upgrade immediately with "database is locked" instead of waiting on the busy timeout. A
+    zero-row write acquires the write lock up front, so concurrent submissions queue on the busy
+    timeout and the loser then observes the winner (claimed upload or unique constraint).
+    """
+    if connection.vendor != "sqlite":
+        return
+    with connection.cursor() as cursor:
+        cursor.execute(f'UPDATE "{Job._meta.db_table}" SET "id" = "id" WHERE 0 = 1')
 
 
 def reconcile_remote_staged_upload_claim_for_submission(*, producer: str, upload_id: str) -> None:
@@ -391,6 +463,18 @@ def existing_transcription_input_matches_request(
             request_input.get("upload_id") or ""
         )
     return existing_input == request_input
+
+
+def job_request_fingerprint(request: JobRequest) -> str:
+    return job_request_fingerprint_from_fields(
+        job_type=request.job_type,
+        backend=request.backend,
+        model=request.model,
+        language=request.language,
+        input_data=request.input_data,
+        output_formats=request.output_formats,
+        diarization=request.diarization,
+    )
 
 
 def parse_synthesis_job_request(payload: dict[str, Any]) -> JobRequest:

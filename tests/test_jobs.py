@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import threading
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -9,10 +13,14 @@ from typing import Any, cast
 import pytest
 from asgiref.local import Local
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, connection, connections, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 from django_tasks import task_backends
 
+from jobs import services
 from jobs.artifacts import get_artifact_store
+from jobs.fingerprints import stored_job_request_fingerprint
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
 from transcriptions.diarization import DiarizationParams, SpeakerTurn
@@ -1590,3 +1598,391 @@ def test_synthesize_job_rejects_out_of_range_speed(client):
 
     assert response.status_code == 400
     assert "between 0.25 and 4.0" in response.json()["error"]["message"]
+
+
+# --- task_ref idempotency race (request fingerprint + partial unique constraint) ---
+
+
+def submit_job(client, payload: dict[str, object]):
+    return client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+
+def stored_fingerprint(job: Job) -> str:
+    return stored_job_request_fingerprint(
+        job_type=job.job_type,
+        backend=job.backend,
+        model=job.model,
+        language=job.language,
+        input_data=job.input_data,
+        output_data=job.output_data,
+    )
+
+
+def miss_first_lookups(monkeypatch, count: int) -> None:
+    """Make the optimistic pre-insert dedup lookup miss, as it does when two submissions race."""
+    real_lookup = services.find_reusable_job
+    remaining = {"misses": count}
+
+    def lookup(*, producer: str, request: services.JobRequest) -> Job | None:
+        if remaining["misses"] > 0:
+            remaining["misses"] -= 1
+            return None
+        return real_lookup(producer=producer, request=request)
+
+    monkeypatch.setattr(services, "find_reusable_job", lookup)
+
+
+@pytest.mark.django_db
+def test_task_ref_job_stores_fingerprint_matching_persisted_request(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+
+    response = submit_job(client, build_job_payload(task_ref="fingerprint-parity"))
+
+    assert response.status_code == 201
+    job = Job.objects.get(id=response.json()["id"])
+    assert len(job.request_fingerprint) == 64
+    assert job.request_fingerprint == stored_fingerprint(job)
+
+
+@pytest.mark.django_db
+def test_job_without_task_ref_has_no_fingerprint(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload()
+    payload.pop("task_ref")
+
+    first = submit_job(client, payload)
+    second = submit_job(client, payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert set(Job.objects.values_list("request_fingerprint", flat=True)) == {""}
+    assert Job.objects.count() == 2
+
+
+@pytest.mark.django_db
+def test_racing_submission_that_missed_dedup_returns_existing_job(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="race-missed-lookup")
+
+    first = submit_job(client, payload)
+    miss_first_lookups(monkeypatch, 1)
+    second = submit_job(client, payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_racing_synthesis_submission_that_missed_dedup_returns_existing_job(
+    client, settings, monkeypatch
+):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    first_payload = build_synthesis_payload("first text")
+    second_payload = build_synthesis_payload("different text keeps loose synthesis reuse")
+
+    first = submit_job(client, first_payload)
+    miss_first_lookups(monkeypatch, 1)
+    second = submit_job(client, second_payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_racing_staged_upload_submission_returns_existing_job(client, settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    staged = stage_upload(client, name="race.mp3", content=b"audio", content_type="audio/mpeg")
+    payload = build_job_payload(
+        input_data={"kind": "upload", "upload_id": staged.json()["id"]},
+        task_ref="race-staged-upload",
+    )
+
+    first = submit_job(client, payload)
+    miss_first_lookups(monkeypatch, 1)
+    second = submit_job(client, payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert Job.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_failed_task_ref_job_allows_resubmission(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="failed-then-retry")
+
+    first = submit_job(client, payload)
+    Job.objects.filter(id=first.json()["id"]).update(state=Job.State.FAILED)
+    second = submit_job(client, payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] != first.json()["id"]
+    jobs = list(Job.objects.order_by("created_at"))
+    assert len(jobs) == 2
+    assert jobs[0].request_fingerprint == jobs[1].request_fingerprint
+
+
+@pytest.mark.django_db
+def test_different_payload_with_same_task_ref_gets_distinct_fingerprint(client, settings):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    first_payload = build_job_payload(task_ref="same-ref-different-payload")
+    second_payload = build_job_payload(task_ref="same-ref-different-payload")
+    second_payload["output"] = {"formats": ["vtt"]}
+
+    first = submit_job(client, first_payload)
+    second = submit_job(client, second_payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    fingerprints = set(Job.objects.values_list("request_fingerprint", flat=True))
+    assert len(fingerprints) == 2
+
+
+@pytest.mark.django_db
+def test_constraint_rejects_second_active_job_with_same_fingerprint():
+    common: dict[str, Any] = {
+        "producer": "archive",
+        "task_ref": "constraint-ref",
+        "request_fingerprint": "a" * 64,
+        "job_type": Job.JobType.TRANSCRIBE,
+        "input_data": {"kind": "url", "url": "https://media.example.com/a.mp3"},
+    }
+    Job.objects.create(**common, state=Job.State.FAILED)
+    Job.objects.create(**common, state=Job.State.SUCCEEDED)
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Job.objects.create(**common, state=Job.State.QUEUED)
+
+    Job.objects.create(**{**common, "request_fingerprint": ""}, state=Job.State.QUEUED)
+    Job.objects.create(**{**common, "producer": "other"}, state=Job.State.QUEUED)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_identical_submissions_create_one_job(settings, monkeypatch):
+    configure_task_backend(settings, "django_tasks.backends.dummy.DummyBackend")
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    payload = build_job_payload(task_ref="concurrent-submit")
+    submitters = 4
+
+    # Every submitter must finish its optimistic dedup lookup (and miss) before any of them
+    # inserts, reproducing the race window that used to create duplicate jobs. After the barrier
+    # the rest of each submission runs one at a time only because the in-memory shared-cache
+    # SQLite test database raises "table is locked" instead of queueing concurrent writers; the
+    # production file database serializes writers via its write lock and busy timeout.
+    real_lookup = services.find_reusable_job
+    barrier = threading.Barrier(submitters, timeout=10)
+    write_lock = threading.Lock()
+    state = threading.local()
+
+    def lookup(*, producer: str, request: services.JobRequest) -> Job | None:
+        result = real_lookup(producer=producer, request=request)
+        if not getattr(state, "holds_lock", False):
+            barrier.wait()
+            write_lock.acquire()
+            state.holds_lock = True
+        return result
+
+    monkeypatch.setattr(services, "find_reusable_job", lookup)
+
+    results: list[tuple[str, bool]] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            job, created = services.create_job_from_payload(producer="archive", payload=payload)
+            results.append((str(job.id), created))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            connections.close_all()
+            if getattr(state, "holds_lock", False):
+                write_lock.release()
+
+    threads = [threading.Thread(target=worker) for _ in range(submitters)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert errors == []
+    assert len(results) == submitters
+    assert len({job_id for job_id, _ in results}) == 1
+    assert sum(1 for _, created in results if created) == 1
+    assert Job.objects.count() == 1
+
+
+FILE_SQLITE_RACE_DRIVER = """
+import json
+import sys
+import threading
+from pathlib import Path
+
+import django
+
+root = Path(sys.argv[1])
+django.setup()
+
+from django.conf import settings
+from django.db import connections
+
+# Point the default connection at a file database before anything opens a connection.
+settings.DATABASES["default"]["NAME"] = root / "race.db"
+connections.__dict__.pop("settings", None)
+settings.TASKS = {"default": {"BACKEND": "django_tasks.backends.dummy.DummyBackend"}}
+settings.VOXHELM_ARTIFACT_BACKEND = "filesystem"
+settings.VOXHELM_ARTIFACT_ROOT = root / "artifacts"
+settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE = "django_tasks"
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
+
+from jobs import services
+from jobs.models import Job
+from jobs.staging import stage_uploaded_audio
+
+assert connections["default"].settings_dict["NAME"] == root / "race.db"
+call_command("migrate", verbosity=0)
+submitters = 4
+staged = stage_uploaded_audio(
+    producer="archive",
+    upload=SimpleUploadedFile("race.mp3", b"audio", content_type="audio/mpeg"),
+)
+payloads = {
+    "url": {"kind": "url", "url": "https://media.example.com/race.mp3"},
+    "upload": {"kind": "upload", "upload_id": str(staged.id)},
+}
+report = {}
+real_lookup = services.find_reusable_job
+for kind, input_data in payloads.items():
+    payload = {
+        "job_type": "transcribe",
+        "model": "auto",
+        "language": "en",
+        "input": input_data,
+        "output": {"formats": ["text", "json"]},
+        "task_ref": "file-race-" + kind,
+    }
+    barrier = threading.Barrier(submitters, timeout=20)
+    local = threading.local()
+
+    def lookup(*, producer, request):
+        result = real_lookup(producer=producer, request=request)
+        if not getattr(local, "waited", False):
+            local.waited = True
+            barrier.wait()
+        return result
+
+    services.find_reusable_job = lookup
+    results, errors = [], []
+
+    def worker():
+        try:
+            job, created = services.create_job_from_payload(producer="archive", payload=payload)
+            results.append([str(job.id), created])
+        except BaseException as exc:
+            errors.append(repr(exc))
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker) for _ in range(submitters)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    services.find_reusable_job = real_lookup
+    report[kind] = {
+        "results": results,
+        "errors": errors,
+        "jobs": Job.objects.filter(task_ref="file-race-" + kind).count(),
+    }
+json.dump(report, sys.stdout)
+"""
+
+
+def test_concurrent_identical_submissions_on_file_sqlite_create_one_job(tmp_path):
+    """Unserialized race on a real file-backed SQLite database, like production uses.
+
+    The pytest database is in-memory shared-cache SQLite, which fails concurrent writers with
+    "table is locked" instead of queueing them, so this runs in a subprocess against a file.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    driver = tmp_path / "race_driver.py"
+    driver.write_text(FILE_SQLITE_RACE_DRIVER)
+    env = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": "config.settings",
+        "PYTHONPATH": str(repo_root),
+    }
+    completed = subprocess.run(
+        [sys.executable, str(driver), str(tmp_path)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+
+    for kind in ("url", "upload"):
+        outcome = report[kind]
+        assert outcome["errors"] == [], (kind, outcome["errors"])
+        assert len(outcome["results"]) == 4, kind
+        assert len({job_id for job_id, _ in outcome["results"]}) == 1, kind
+        assert sum(1 for _, created in outcome["results"] if created) == 1, kind
+        assert outcome["jobs"] == 1, kind
+
+
+@pytest.mark.django_db(transaction=True)
+def test_fingerprint_migration_backfills_and_tolerates_legacy_duplicates():
+    executor = MigrationExecutor(connection)
+    executor.migrate([("jobs", "0007_remote_workers")])
+    old_apps = executor.loader.project_state([("jobs", "0007_remote_workers")]).apps
+    OldJob = old_apps.get_model("jobs", "Job")
+    common: dict[str, Any] = {
+        "producer": "archive",
+        "task_ref": "legacy-ref",
+        "job_type": "transcribe",
+        "backend": "auto",
+        "model": "auto",
+        "language": "en",
+        "input_data": {"kind": "url", "url": "https://media.example.com/legacy.mp3"},
+        "output_data": {"formats": ["text", "json"], "diarization": {"enabled": False}},
+    }
+    older_duplicate = OldJob.objects.create(**common, state="queued")
+    newer_duplicate = OldJob.objects.create(**common, state="succeeded")
+    failed = OldJob.objects.create(**common, state="failed")
+    no_ref = OldJob.objects.create(**{**common, "task_ref": ""}, state="queued")
+
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    executor.migrate([("jobs", "0008_job_request_fingerprint")])
+
+    try:
+        jobs = {job.id: job for job in Job.objects.all()}
+        expected = stored_fingerprint(jobs[newer_duplicate.id])
+        assert jobs[newer_duplicate.id].request_fingerprint == expected
+        assert jobs[older_duplicate.id].request_fingerprint == ""
+        assert jobs[failed.id].request_fingerprint == expected
+        assert jobs[no_ref.id].request_fingerprint == ""
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(executor.loader.graph.leaf_nodes())

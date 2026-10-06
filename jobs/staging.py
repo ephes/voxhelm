@@ -84,13 +84,17 @@ def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> Non
         delete_staged_media(staged=staged, missing_ok=True)
 
 
+class StagedMediaAlreadyClaimed(ApiError):
+    """The staged upload is already attached to another job."""
+
+
 def get_staged_media_for_submission(*, producer: str, upload_id: str) -> StagedMedia:
     try:
         staged = StagedMedia.objects.select_for_update().get(id=upload_id, producer=producer)
     except (StagedMedia.DoesNotExist, ValueError) as exc:
         raise ApiError("Unknown input.upload_id.") from exc
     if staged.claimed_by_job_id is not None:
-        raise ApiError("input.upload_id has already been attached to a job.")
+        raise StagedMediaAlreadyClaimed("input.upload_id has already been attached to a job.")
     if staged.expires_at <= timezone.now():
         raise ApiError("input.upload_id has expired. Stage the media again.")
     return staged

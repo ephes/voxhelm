@@ -137,7 +137,7 @@ Voxhelm already has a clean producer-facing batch API and a separated worker exe
 - The production service historically assumes the HTTP process and Django Tasks worker are on `studio`.
 - SQLite is acceptable for local low-concurrency coordination, but should not become a remotely shared worker database.
 - SQLite has no row-level `select_for_update()` semantics, so remote claiming must use short atomic updates and affected-row checks rather than long row locks.
-- There is a known open idempotency race for concurrent same-`task_ref` submissions. Remote worker claiming must not introduce an equivalent double-claim race.
+- Concurrent same-`task_ref` submissions are deduplicated at the database level (partial unique constraint on `(producer, task_ref, request_fingerprint)` for non-failed jobs). Remote worker claiming must not introduce an equivalent double-claim race.
 
 ## Worker packaging and onboarding
 
