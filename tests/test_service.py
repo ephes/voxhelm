@@ -135,9 +135,7 @@ def test_normalize_transcription_payload_drops_backend_speaker_labels() -> None:
         }
     )
 
-    assert result.segments == [
-        TranscriptionSegment(id=0, start=0.0, end=1.0, text="Hello")
-    ]
+    assert result.segments == [TranscriptionSegment(id=0, start=0.0, end=1.0, text="Hello")]
 
 
 def test_transcribe_audio_uses_fallback_backend(monkeypatch) -> None:
@@ -159,8 +157,9 @@ def test_transcribe_audio_uses_fallback_backend(monkeypatch) -> None:
 
 def test_transcribe_audio_sanitizes_repeated_loop_segments(monkeypatch) -> None:
     loop = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text="Das ist auch sehr subjektiv.")
+        TranscriptionSegment(
+            id=index, start=float(index), end=float(index + 1), text="Das ist auch sehr subjektiv."
+        )
         for index in range(18)
     ]
 
@@ -191,8 +190,9 @@ def test_transcribe_audio_sanitizes_repeated_loop_segments(monkeypatch) -> None:
 def test_transcribe_audio_respects_disabled_sanitizer(monkeypatch, settings) -> None:
     settings.VOXHELM_SANITIZE_TRANSCRIPT = False
     loop = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text="Das ist auch sehr subjektiv.")
+        TranscriptionSegment(
+            id=index, start=float(index), end=float(index + 1), text="Das ist auch sehr subjektiv."
+        )
         for index in range(18)
     ]
 
@@ -627,9 +627,7 @@ def test_build_backend_service_wires_anti_hallucination_settings(settings) -> No
     assert cpp.max_context == 7
     assert cpp.suppress_nst is False
 
-    mlx = build_backend_service(
-        backend_name="mlx", model_name="mlx-community/whisper-large-v3-mlx"
-    )
+    mlx = build_backend_service(backend_name="mlx", model_name="mlx-community/whisper-large-v3-mlx")
     assert isinstance(mlx, MlxWhisperBackend)
     assert mlx.condition_on_previous_text is True
 
@@ -745,9 +743,7 @@ def test_whispercpp_backend_raises_when_transcript_json_is_missing(
             TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
         )
     except RuntimeError as exc:
-        assert str(exc) == (
-            "whisper.cpp transcription failed: transcript.json was not produced."
-        )
+        assert str(exc) == ("whisper.cpp transcription failed: transcript.json was not produced.")
     else:  # pragma: no cover
         raise AssertionError("Expected missing transcript.json to raise RuntimeError.")
 
@@ -1207,12 +1203,12 @@ def _pid_is_gone(pid: int, *, timeout: float = 5.0) -> bool:
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             return True
         time.sleep(0.02)
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError, PermissionError:
         return True
     return False
 
@@ -1233,10 +1229,7 @@ def test_transcribe_audio_kills_real_whisper_cli_and_releases_the_slot(
     # `exec` keeps the recorded shell pid, so the pidfile names the process that
     # run_cancellable_process signals and reaps.
     fake_cli.write_text(
-        "#!/bin/sh\n"
-        f'echo $$ > "{pid_path}"\n'
-        f'touch "{started_path}"\n'
-        "exec sleep 30\n",
+        f'#!/bin/sh\necho $$ > "{pid_path}"\ntouch "{started_path}"\nexec sleep 30\n',
         encoding="utf-8",
     )
     fake_cli.chmod(0o755)

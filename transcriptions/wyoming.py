@@ -380,9 +380,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     self.request_language or "auto",
                     self.audio_shape.as_dict(),
                 )
-                await self.write_event(
-                    Error(text=str(exc), code="transcription_failed").event()
-                )
+                await self.write_event(Error(text=str(exc), code="transcription_failed").event())
                 return False
 
             emit_transcription_debug_log(

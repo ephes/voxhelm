@@ -124,9 +124,7 @@ def test_piper_synthesize_failure_removes_temp_wav(monkeypatch, tmp_path: Path) 
     pytest.importorskip("piper")
     temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
     backend = _piper_backend(tmp_path)
-    monkeypatch.setattr(
-        "synthesis.service.load_piper_voice", lambda _voice: _RaisingPiperVoice()
-    )
+    monkeypatch.setattr("synthesis.service.load_piper_voice", lambda _voice: _RaisingPiperVoice())
 
     with pytest.raises(RuntimeError, match="piper exploded"):
         backend.synthesize("Hello.", _piper_params())
@@ -134,15 +132,11 @@ def test_piper_synthesize_failure_removes_temp_wav(monkeypatch, tmp_path: Path) 
     assert list(temp_dir.iterdir()) == []
 
 
-def test_piper_synthesize_readback_failure_removes_temp_wav(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_piper_synthesize_readback_failure_removes_temp_wav(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("piper")
     temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
     backend = _piper_backend(tmp_path)
-    monkeypatch.setattr(
-        "synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice()
-    )
+    monkeypatch.setattr("synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice())
     real_open = wave.open
 
     def _open(path, mode):
@@ -158,15 +152,11 @@ def test_piper_synthesize_readback_failure_removes_temp_wav(
     assert list(temp_dir.iterdir()) == []
 
 
-def test_piper_synthesize_success_keeps_output_for_caller(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_piper_synthesize_success_keeps_output_for_caller(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("piper")
     temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
     backend = _piper_backend(tmp_path)
-    monkeypatch.setattr(
-        "synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice()
-    )
+    monkeypatch.setattr("synthesis.service.load_piper_voice", lambda _voice: _SilentPiperVoice())
 
     result = backend.synthesize("Hello.", _piper_params())
 
@@ -176,9 +166,7 @@ def test_piper_synthesize_success_keeps_output_for_caller(
     result.audio_path.unlink()
 
 
-def test_export_audio_missing_ffmpeg_removes_target(
-    monkeypatch, tmp_path: Path, settings
-) -> None:
+def test_export_audio_missing_ffmpeg_removes_target(monkeypatch, tmp_path: Path, settings) -> None:
     temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
     wav_path = tmp_path / "speech.wav"
     wav_path.write_bytes(b"RIFF")
@@ -679,9 +667,7 @@ def test_synthesize_text_explicit_kokoro_model_forces_backend_with_routing_off(
     _forbid_detector(monkeypatch)
     captured = _stub_kokoro_synthesize(monkeypatch)
 
-    params = SynthesizeParams(
-        request_model="kokoro", voice=None, language=None, speed=1.0
-    )
+    params = SynthesizeParams(request_model="kokoro", voice=None, language=None, speed=1.0)
     result = synthesize_text("Ein hinreichend langer deutscher Satz.", params)
 
     assert result.backend_name == "kokoro"

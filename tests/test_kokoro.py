@@ -245,9 +245,7 @@ def test_build_voice_registry_merges_piper_and_kokoro(tmp_path: Path, settings) 
     assert registry.resolve_backend(voice="kokoro-martin", request_model="auto") == "kokoro"
 
 
-def test_build_voice_registry_without_kokoro_models_is_piper_only(
-    tmp_path: Path, settings
-) -> None:
+def test_build_voice_registry_without_kokoro_models_is_piper_only(tmp_path: Path, settings) -> None:
     piper_dir = tmp_path / "piper"
     piper_dir.mkdir()
     (piper_dir / "de_DE-thorsten-high.onnx").write_bytes(b"model")
@@ -435,9 +433,7 @@ def test_synthesize_oversized_sentence_hard_splits(monkeypatch) -> None:
 
 
 def test_synthesize_selects_style_by_token_count_with_clamp(monkeypatch) -> None:
-    pack = np.stack(
-        [np.full((1, 256), i, dtype=np.float32) for i in range(KOKORO_MAX_TOKENS + 2)]
-    )
+    pack = np.stack([np.full((1, 256), i, dtype=np.float32) for i in range(KOKORO_MAX_TOKENS + 2)])
     backend, session = _stub_backend(monkeypatch, pack=pack)
     result = backend.synthesize("a" * 40 + ".", _params())  # 41 tokens
     style = np.asarray(session.calls[0]["style"])
@@ -563,9 +559,7 @@ def test_real_voicepack_embedding_checksums(pack_path: Path, key: str) -> None:
         (MARTIN_MODEL, MARTIN_PACK, "martin", "de", "Guten Tag"),
     ],
 )
-def test_real_inference_smoke(
-    model: Path, pack: Path, key: str, language: str, text: str
-) -> None:
+def test_real_inference_smoke(model: Path, pack: Path, key: str, language: str, text: str) -> None:
     if not (model.exists() and pack.exists() and espeak_available()):
         pytest.skip("Kokoro models or espeak-ng unavailable")
     config = KokoroModelConfig(
@@ -576,9 +570,7 @@ def test_real_inference_smoke(
         phoneme_language=language,
     )
     backend = KokoroBackend(models={f"kokoro-{key}": config})
-    params = SynthesizeParams(
-        request_model="auto", voice=f"kokoro-{key}", language=None, speed=1.0
-    )
+    params = SynthesizeParams(request_model="auto", voice=f"kokoro-{key}", language=None, speed=1.0)
     result = backend.synthesize(text, params)
     assert result.sample_rate == 24000
     assert result.duration_seconds > 0.3

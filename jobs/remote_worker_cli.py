@@ -558,9 +558,7 @@ def known_speaker_references_from_claim(diarization: dict[str, Any]) -> list[Ref
                 continue
             windows = load_reference_windows(raw_reference)
             if windows:
-                references.append(
-                    ReferenceAudio(speaker_id=speaker_id, name=name, windows=windows)
-                )
+                references.append(ReferenceAudio(speaker_id=speaker_id, name=name, windows=windows))
     return references
 
 

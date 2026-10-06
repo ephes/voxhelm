@@ -84,9 +84,7 @@ def quantile(values: list[float], q: float) -> float:
     return ordered[index]
 
 
-def weighted_error_rate(
-    gold: list[dict], predicted: list[str], weight_key: str
-) -> float:
+def weighted_error_rate(gold: list[dict], predicted: list[str], weight_key: str) -> float:
     """Time- or word-weighted single-speaker error rate (DER/WDER-style).
 
     Single-speaker segments only; no overlap handling or collar, so this is a

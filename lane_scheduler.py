@@ -288,7 +288,7 @@ class LaneScheduler:
             return None
         try:
             holder = HolderRecord.from_dict(payload)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             _LOGGER.warning("lane_scheduler removed invalid holder state path=%s", holder_path)
             holder_path.unlink(missing_ok=True)
             return None
@@ -364,7 +364,7 @@ class LaneScheduler:
             return None
         try:
             return WaiterRecord.from_dict(payload)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             _LOGGER.warning("lane_scheduler removed invalid waiter state path=%s", waiter_path)
             return None
 
@@ -373,7 +373,7 @@ class LaneScheduler:
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except OSError, UnicodeDecodeError, json.JSONDecodeError:
             return None
         if not isinstance(payload, dict):
             return None

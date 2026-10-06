@@ -507,9 +507,10 @@ def test_upload_limit_is_enforced(client, settings):
     )
 
     assert response.status_code == 400
-    assert "25 MiB" in response.json()["error"]["message"] or "exceeded" in response.json()[
-        "error"
-    ]["message"]
+    assert (
+        "25 MiB" in response.json()["error"]["message"]
+        or "exceeded" in response.json()["error"]["message"]
+    )
 
 
 @pytest.mark.django_db
@@ -1129,9 +1130,7 @@ def test_json_request_rejects_invalid_model_before_downloading(
 
     response = client.post(
         "/v1/audio/transcriptions",
-        data=json.dumps(
-            {"url": "https://media.example.com/episode.mp3", "model": "not-a-model"}
-        ),
+        data=json.dumps({"url": "https://media.example.com/episode.mp3", "model": "not-a-model"}),
         content_type="application/json",
         HTTP_AUTHORIZATION="Bearer test-token",
     )

@@ -4,20 +4,33 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('jobs', '0001_initial'),
+        ("jobs", "0001_initial"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='job',
-            name='job_type',
-            field=models.CharField(choices=[('transcribe', 'Transcribe'), ('synthesize', 'Synthesize')], max_length=32),
+            model_name="job",
+            name="job_type",
+            field=models.CharField(
+                choices=[("transcribe", "Transcribe"), ("synthesize", "Synthesize")], max_length=32
+            ),
         ),
         migrations.AlterField(
-            model_name='jobartifact',
-            name='kind',
-            field=models.CharField(choices=[('source', 'Source'), ('extracted_audio', 'Extracted audio'), ('transcript_text', 'Transcript text'), ('transcript_json', 'Transcript JSON'), ('transcript_vtt', 'Transcript VTT'), ('speech_wav', 'Speech WAV'), ('speech_mp3', 'Speech MP3'), ('speech_ogg', 'Speech OGG')], max_length=64),
+            model_name="jobartifact",
+            name="kind",
+            field=models.CharField(
+                choices=[
+                    ("source", "Source"),
+                    ("extracted_audio", "Extracted audio"),
+                    ("transcript_text", "Transcript text"),
+                    ("transcript_json", "Transcript JSON"),
+                    ("transcript_vtt", "Transcript VTT"),
+                    ("speech_wav", "Speech WAV"),
+                    ("speech_mp3", "Speech MP3"),
+                    ("speech_ogg", "Speech OGG"),
+                ],
+                max_length=64,
+            ),
         ),
     ]

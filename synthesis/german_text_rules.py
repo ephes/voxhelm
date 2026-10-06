@@ -132,9 +132,7 @@ ORDINAL_TO_WORD = {
     30: "dreißigster",
 }
 
-MONTHS = (
-    r"(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)"
-)
+MONTHS = r"(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)"
 CARDINAL_LABEL_DOT_PLACEHOLDER = "__GODE_CARDINAL_DOT__"
 
 
@@ -183,7 +181,7 @@ def ordinal_to_words(number: int) -> str:
         if not cardinal.endswith(suffix_cardinal):
             return f"{cardinal}ster"
 
-        return f"{cardinal[:-len(suffix_cardinal)]}{ordinal_to_words(suffix_number)}"
+        return f"{cardinal[: -len(suffix_cardinal)]}{ordinal_to_words(suffix_number)}"
     return f"{number}."
 
 
@@ -399,9 +397,7 @@ def normalize_german_text(text: str) -> str:
         return f"{prefix_full}{word}"
 
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°\s*[Cc]\b", replace_temperature, text)
-    text = re.sub(
-        r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text
-    )
+    text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
     text = re.sub(
         r"(?i)(?<!\w)(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
         r"(\d{1,2})\.(\d{1,2})\.(?:\s*(20\d{2}))?(?=\s|[.,!?]|$)",
@@ -414,9 +410,7 @@ def normalize_german_text(text: str) -> str:
         replace_text_date,
         text,
     )
-    text = re.sub(
-        r"(?<!\w)(\d{1,2}):(\d{2})(?:\s*[Uu]hr)?(?=\s|[.,!?]|$)", replace_time, text
-    )
+    text = re.sub(r"(?<!\w)(\d{1,2}):(\d{2})(?:\s*[Uu]hr)?(?=\s|[.,!?]|$)", replace_time, text)
     text = re.sub(
         r"(?i)(?<!\w)(am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
         r"eine\s+|einer\s+|einen\s+|einem\s+|jeden\s+|jedem\s+|jede\s+|jeder\s+|"

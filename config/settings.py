@@ -26,13 +26,8 @@ def env_map(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
         return {}
-    entries = (
-        entry.split("=", 1) for entry in raw.replace("\n", ",").split(",") if entry.strip()
-    )
-    return {
-        key.strip(): value.strip()
-        for key, value in entries
-    }
+    entries = (entry.split("=", 1) for entry in raw.replace("\n", ",").split(",") if entry.strip())
+    return {key.strip(): value.strip() for key, value in entries}
 
 
 def env_kokoro_models(name: str) -> dict[str, dict[str, str]]:
@@ -358,9 +353,7 @@ VOXHELM_WHISPERKIT_CHUNKING_STRATEGY = os.getenv(
     "VOXHELM_WHISPERKIT_CHUNKING_STRATEGY",
     "vad",
 ).strip()
-VOXHELM_WHISPERKIT_TIMEOUT_SECONDS = int(
-    os.getenv("VOXHELM_WHISPERKIT_TIMEOUT_SECONDS", "900")
-)
+VOXHELM_WHISPERKIT_TIMEOUT_SECONDS = int(os.getenv("VOXHELM_WHISPERKIT_TIMEOUT_SECONDS", "900"))
 VOXHELM_STT_DEBUG_LOGGING = env_bool("VOXHELM_STT_DEBUG_LOGGING", default=False)
 VOXHELM_DIARIZATION_BACKEND = os.getenv("VOXHELM_DIARIZATION_BACKEND", "none").strip()
 VOXHELM_PYANNOTE_MODEL = os.getenv(
@@ -389,9 +382,7 @@ VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = env_bool(
     "VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT",
     default=True,
 )
-VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(
-    os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024")
-)
+VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024"))
 VOXHELM_LANE_SCHEDULER_ENABLED = env_bool("VOXHELM_LANE_SCHEDULER_ENABLED", default=False)
 VOXHELM_LANE_SCHEDULER_DIR = Path(
     os.getenv("VOXHELM_LANE_SCHEDULER_DIR", str(BASE_DIR / "var" / "lane-scheduler"))

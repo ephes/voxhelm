@@ -29,9 +29,7 @@ LEADING_FILLER_WORDS = {
 }
 LEADING_FILLER_PATTERNS = {
     language: re.compile(
-        r"^(?:"
-        + "|".join(re.escape(word) for word in words)
-        + r")(?:[\s,.;:!?\-…]+|$)",
+        r"^(?:" + "|".join(re.escape(word) for word in words) + r")(?:[\s,.;:!?\-…]+|$)",
         re.IGNORECASE,
     )
     for language, words in LEADING_FILLER_WORDS.items()
@@ -548,11 +546,7 @@ def call_whisperkit_server(
 
 
 def render_multipart_field(*, boundary: str, name: str, value: str) -> str:
-    return (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-        f"{value}\r\n"
-    )
+    return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
 
 
 def timestamp_to_seconds(timestamp: str) -> float:
@@ -612,9 +606,8 @@ def get_backend_services_for_model(request_model: str) -> list[BackendInvocation
 
 
 def service_for_backend_name(backend_name: str, *, request_model: str) -> BackendProtocol:
-    if (
-        backend_name == settings.VOXHELM_STT_BACKEND
-        and is_auto_backend_model_request(request_model)
+    if backend_name == settings.VOXHELM_STT_BACKEND and is_auto_backend_model_request(
+        request_model
     ):
         return get_backend_service()
     return build_backend_service(
@@ -691,9 +684,7 @@ def resolve_whispercpp_binary(binary_path: str) -> str:
     if "/" in binary_path:
         candidate = Path(binary_path)
         if not candidate.exists():
-            raise BackendUnavailableError(
-                f"whisper.cpp binary was not found at '{binary_path}'."
-            )
+            raise BackendUnavailableError(f"whisper.cpp binary was not found at '{binary_path}'.")
         return str(candidate)
     resolved = shutil.which(binary_path)
     if resolved is None:

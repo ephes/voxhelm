@@ -51,21 +51,28 @@ def backfill_request_fingerprints(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('jobs', '0007_remote_workers'),
+        ("jobs", "0007_remote_workers"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='job',
-            name='request_fingerprint',
-            field=models.CharField(blank=True, default='', max_length=64),
+            model_name="job",
+            name="request_fingerprint",
+            field=models.CharField(blank=True, default="", max_length=64),
         ),
         migrations.RunPython(backfill_request_fingerprints, migrations.RunPython.noop),
         migrations.AddConstraint(
-            model_name='job',
-            constraint=models.UniqueConstraint(condition=models.Q(models.Q(('task_ref', ''), _negated=True), models.Q(('request_fingerprint', ''), _negated=True), models.Q(('state', 'failed'), _negated=True)), fields=('producer', 'task_ref', 'request_fingerprint'), name='jobs_job_active_task_ref_fingerprint_unique'),
+            model_name="job",
+            constraint=models.UniqueConstraint(
+                condition=models.Q(
+                    models.Q(("task_ref", ""), _negated=True),
+                    models.Q(("request_fingerprint", ""), _negated=True),
+                    models.Q(("state", "failed"), _negated=True),
+                ),
+                fields=("producer", "task_ref", "request_fingerprint"),
+                name="jobs_job_active_task_ref_fingerprint_unique",
+            ),
         ),
     ]

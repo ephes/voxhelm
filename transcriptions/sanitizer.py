@@ -140,9 +140,7 @@ def _collapse_loops(
         if run_length >= repeat_threshold:
             first = segments[index]
             last = segments[run_end - 1]
-            collapsed.append(
-                _with_timing(first, start=first.start, end=max(first.end, last.end))
-            )
+            collapsed.append(_with_timing(first, start=first.start, end=max(first.end, last.end)))
         else:
             collapsed.extend(segments[index:run_end])
         index = run_end
