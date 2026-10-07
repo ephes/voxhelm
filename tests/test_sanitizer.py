@@ -18,8 +18,9 @@ def _result(segments: list[TranscriptionSegment]) -> TranscriptionResult:
 def test_collapses_repeated_sentence_loop_to_single_segment() -> None:
     # "Das ist auch sehr subjektiv." repeated 18x consecutively (real production case).
     segments = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text="Das ist auch sehr subjektiv.")
+        TranscriptionSegment(
+            id=index, start=float(index), end=float(index + 1), text="Das ist auch sehr subjektiv."
+        )
         for index in range(18)
     ]
     result = sanitize_result(_result(segments))
@@ -41,8 +42,9 @@ def test_collapses_loop_with_light_normalization_differences() -> None:
         "Es ist ja auch ein bisschen von der Sprache abhängig, weil.",
     ]
     segments = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text=variants[index % len(variants)])
+        TranscriptionSegment(
+            id=index, start=float(index), end=float(index + 1), text=variants[index % len(variants)]
+        )
         for index in range(9)
     ]
     result = sanitize_result(_result(segments))
@@ -56,8 +58,12 @@ def test_preserves_speech_around_collapsed_loop_with_monotonic_timestamps() -> N
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=2.0, text="Vorher echte Rede."),
         *[
-            TranscriptionSegment(id=i, start=2.0 + i, end=3.0 + i,
-                                 text="und dann muss ich halt den Fall unterscheiden")
+            TranscriptionSegment(
+                id=i,
+                start=2.0 + i,
+                end=3.0 + i,
+                text="und dann muss ich halt den Fall unterscheiden",
+            )
             for i in range(1, 6)
         ],
         TranscriptionSegment(id=6, start=8.0, end=10.0, text="Nachher echte Rede."),
@@ -81,8 +87,9 @@ def test_drops_zdf_subtitle_credit_hallucinations() -> None:
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=3.0, text="Echte Aussage zum Thema."),
         TranscriptionSegment(id=1, start=3.0, end=33.0, text="Untertitelung des ZDF, 2020"),
-        TranscriptionSegment(id=2, start=33.0, end=63.0,
-                             text="Untertitelung des ZDF für funk, 2017"),
+        TranscriptionSegment(
+            id=2, start=33.0, end=63.0, text="Untertitelung des ZDF für funk, 2017"
+        ),
         TranscriptionSegment(id=3, start=63.0, end=66.0, text="Und weiter im Gespräch."),
     ]
     result = sanitize_result(_result(segments))
@@ -97,8 +104,7 @@ def test_drops_amara_and_untertitel_von_credits() -> None:
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=2.0, text="Inhalt."),
         TranscriptionSegment(id=1, start=2.0, end=5.0, text="Untertitel von Amara.org"),
-        TranscriptionSegment(id=2, start=5.0, end=8.0,
-                             text="Untertitel im Auftrag des ZDF, 2018"),
+        TranscriptionSegment(id=2, start=5.0, end=8.0, text="Untertitel im Auftrag des ZDF, 2018"),
     ]
     result = sanitize_result(_result(segments))
 
@@ -109,8 +115,9 @@ def test_drops_dot_run_punctuation_only_cue_and_keeps_real_continuation() -> Non
     dot_run = " ".join("." for _ in range(220))
     segments = [
         TranscriptionSegment(id=0, start=12.0, end=12.0, text=dot_run),
-        TranscriptionSegment(id=1, start=12.0, end=15.0,
-                             text="typischerweise halt ... um halt aus dem Pfad heraus"),
+        TranscriptionSegment(
+            id=1, start=12.0, end=15.0, text="typischerweise halt ... um halt aus dem Pfad heraus"
+        ),
     ]
     result = sanitize_result(_result(segments))
 
@@ -122,8 +129,7 @@ def test_drops_dot_run_punctuation_only_cue_and_keeps_real_continuation() -> Non
 def test_strips_long_dot_run_but_keeps_real_text_in_same_segment() -> None:
     dot_run = " ".join("." for _ in range(200))
     segments = [
-        TranscriptionSegment(id=0, start=10.0, end=10.0,
-                             text=f"typischerweise halt {dot_run}"),
+        TranscriptionSegment(id=0, start=10.0, end=10.0, text=f"typischerweise halt {dot_run}"),
     ]
     result = sanitize_result(_result(segments))
 
@@ -181,10 +187,12 @@ def test_preserves_signoffs_and_topic_talk_about_subtitles() -> None:
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=2.0, text="Bis zum nächsten Mal."),
         TranscriptionSegment(id=1, start=2.0, end=3.0, text="Tschüss."),
-        TranscriptionSegment(id=2, start=3.0, end=8.0,
-                             text="Das ZDF hat darüber ja auch berichtet."),
-        TranscriptionSegment(id=3, start=8.0, end=13.0,
-                             text="Untertitel sind wichtig für die Barrierefreiheit."),
+        TranscriptionSegment(
+            id=2, start=3.0, end=8.0, text="Das ZDF hat darüber ja auch berichtet."
+        ),
+        TranscriptionSegment(
+            id=3, start=8.0, end=13.0, text="Untertitel sind wichtig für die Barrierefreiheit."
+        ),
     ]
     result = sanitize_result(_result(segments))
 
@@ -195,18 +203,26 @@ def test_preserves_genuine_speech_about_subtitling() -> None:
     # Genuine topic talk that merely starts with "Untertitel"/"Untertitelung" but
     # carries no broadcaster/site credit token must survive.
     segments = [
-        TranscriptionSegment(id=0, start=0.0, end=4.0,
-                             text="Untertitel von Filmen sind oft schlecht synchronisiert."),
-        TranscriptionSegment(id=1, start=4.0, end=8.0,
-                             text="Untertitelung ist ein unterschätztes Handwerk."),
-        TranscriptionSegment(id=2, start=8.0, end=12.0,
-                             text="Untertitel der ARD waren früher Teletext."),
+        TranscriptionSegment(
+            id=0, start=0.0, end=4.0, text="Untertitel von Filmen sind oft schlecht synchronisiert."
+        ),
+        TranscriptionSegment(
+            id=1, start=4.0, end=8.0, text="Untertitelung ist ein unterschätztes Handwerk."
+        ),
+        TranscriptionSegment(
+            id=2, start=8.0, end=12.0, text="Untertitel der ARD waren früher Teletext."
+        ),
         # Sentences that continue past the credit shape into a real predicate
         # must survive: a credit cue terminates at the org name or a year.
-        TranscriptionSegment(id=3, start=12.0, end=16.0,
-                             text="Untertitelung des Films war schlecht synchronisiert."),
-        TranscriptionSegment(id=4, start=16.0, end=20.0,
-                             text="Untertitel beim ZDF funktionieren inzwischen automatisch."),
+        TranscriptionSegment(
+            id=3, start=12.0, end=16.0, text="Untertitelung des Films war schlecht synchronisiert."
+        ),
+        TranscriptionSegment(
+            id=4,
+            start=16.0,
+            end=20.0,
+            text="Untertitel beim ZDF funktionieren inzwischen automatisch.",
+        ),
     ]
     result = sanitize_result(_result(segments))
 
@@ -226,8 +242,9 @@ def test_returns_input_unchanged_when_nothing_to_sanitize() -> None:
 
 def test_disabled_sanitizer_is_a_no_op() -> None:
     segments = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text="Das ist auch sehr subjektiv.")
+        TranscriptionSegment(
+            id=index, start=float(index), end=float(index + 1), text="Das ist auch sehr subjektiv."
+        )
         for index in range(18)
     ]
     original = _result(segments)
@@ -241,8 +258,9 @@ def test_all_output_formats_reflect_sanitized_segments() -> None:
     segments = [
         TranscriptionSegment(id=0, start=0.0, end=2.0, text="Echte Aussage."),
         *[
-            TranscriptionSegment(id=i, start=2.0 + i, end=3.0 + i,
-                                 text="Das ist auch sehr subjektiv.")
+            TranscriptionSegment(
+                id=i, start=2.0 + i, end=3.0 + i, text="Das ist auch sehr subjektiv."
+            )
             for i in range(1, 19)
         ],
         TranscriptionSegment(id=19, start=21.0, end=51.0, text="Untertitelung des ZDF, 2020"),
@@ -275,8 +293,7 @@ def test_all_output_formats_reflect_sanitized_segments() -> None:
 
 def test_repeat_threshold_is_configurable() -> None:
     segments = [
-        TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                             text="Ja.")
+        TranscriptionSegment(id=index, start=float(index), end=float(index + 1), text="Ja.")
         for index in range(3)
     ]
     # With threshold 3 the run collapses; the default (4) would leave it intact.

@@ -12,7 +12,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="StagedMedia",
             fields=[
-                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
                 ("producer", models.CharField(max_length=64)),
                 ("original_filename", models.CharField(max_length=255)),
                 ("content_type", models.CharField(max_length=255)),
@@ -39,7 +44,9 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name="stagedmedia",
-            index=models.Index(fields=["producer", "created_at"], name="jobs_staged_producer_76b546_idx"),
+            index=models.Index(
+                fields=["producer", "created_at"], name="jobs_staged_producer_76b546_idx"
+            ),
         ),
         migrations.AddIndex(
             model_name="stagedmedia",

@@ -624,17 +624,14 @@ def worker_should_defer_for_fairness(*, worker_id: str, now: datetime) -> bool:
     if not settings.VOXHELM_REMOTE_WORKER_BALANCE_ENABLED:
         return False
 
-    window_start = now - timedelta(
-        seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS
-    )
+    window_start = now - timedelta(seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS)
     fresh_cutoff = now - timedelta(
         seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS
     )
     my_load = worker_recent_claim_load(worker_id=worker_id, window_start=window_start)
 
-    peers = (
-        Worker.objects.filter(enabled=True, last_seen_at__gte=fresh_cutoff)
-        .exclude(worker_id=worker_id)
+    peers = Worker.objects.filter(enabled=True, last_seen_at__gte=fresh_cutoff).exclude(
+        worker_id=worker_id
     )
     for peer in peers:
         peer_running = Job.objects.filter(
@@ -645,9 +642,7 @@ def worker_should_defer_for_fairness(*, worker_id: str, now: datetime) -> bool:
         ).count()
         if peer_running >= peer.concurrency:
             continue
-        peer_load = worker_recent_claim_load(
-            worker_id=peer.worker_id, window_start=window_start
-        )
+        peer_load = worker_recent_claim_load(worker_id=peer.worker_id, window_start=window_start)
         if peer_load < my_load:
             return True
     return False
@@ -681,8 +676,7 @@ def delete_completed_remote_staged_upload(*, job_id: UUID, upload_id: str | None
 def claimable_job_filter(now: object) -> Q:
     attempts_remain = Q(attempt_count__lt=F("max_attempts"))
     return attempts_remain & (
-        Q(state=Job.State.QUEUED)
-        | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
+        Q(state=Job.State.QUEUED) | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
     )
 
 
@@ -730,15 +724,19 @@ def validate_remote_known_speaker_reference_audio(diarization: object) -> None:
 
 def mark_remote_job_failed_before_claim(*, job: Job, message: str) -> None:
     now = timezone.now()
-    updated = Job.objects.filter(id=job.id, execution_mode=Job.ExecutionMode.REMOTE_PULL).filter(
-        Q(state=Job.State.QUEUED, assigned_worker_id="")
-        | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
-    ).update(
-        state=Job.State.FAILED,
-        error_detail=message,
-        finished_at=now,
-        worker_progress={},
-        updated_at=now,
+    updated = (
+        Job.objects.filter(id=job.id, execution_mode=Job.ExecutionMode.REMOTE_PULL)
+        .filter(
+            Q(state=Job.State.QUEUED, assigned_worker_id="")
+            | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
+        )
+        .update(
+            state=Job.State.FAILED,
+            error_detail=message,
+            finished_at=now,
+            worker_progress={},
+            updated_at=now,
+        )
     )
     if updated:
         release_staged_media_claims_for_job(job=job)
@@ -801,10 +799,7 @@ def worker_supports_requested_output_formats(job: Job, capabilities: dict[str, A
     if not advertised_formats:
         return False
     raw_formats = job.output_data.get("formats", list(DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS))
-    requested_formats = {
-        str(format_name)
-        for format_name in raw_formats
-    }
+    requested_formats = {str(format_name) for format_name in raw_formats}
     return requested_formats.issubset(advertised_formats)
 
 

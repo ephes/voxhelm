@@ -55,9 +55,7 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
             exported.path.read_bytes(),
             content_type=exported.content_type,
         )
-        response["Content-Disposition"] = (
-            f'inline; filename="speech.{exported.format_name}"'
-        )
+        response["Content-Disposition"] = f'inline; filename="speech.{exported.format_name}"'
         # Expose the effective backend/voice/language (post-routing) for debugging
         # and Slice 6's metadata assertions.
         response["X-Voxhelm-Backend"] = result.backend_name
@@ -149,8 +147,5 @@ def validate_speed(value: object) -> float:
         raise ApiError("The 'speed' field must be a number.")
     normalized = float(value)
     if not MIN_TTS_SPEED <= normalized <= MAX_TTS_SPEED:
-        raise ApiError(
-            "The 'speed' field must be between "
-            f"{MIN_TTS_SPEED} and {MAX_TTS_SPEED}."
-        )
+        raise ApiError(f"The 'speed' field must be between {MIN_TTS_SPEED} and {MAX_TTS_SPEED}.")
     return normalized

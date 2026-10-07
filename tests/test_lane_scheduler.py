@@ -686,7 +686,7 @@ def waiter_pids(state_dir: Path) -> set[int]:
     for path in (state_dir / "waiters").glob("*.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         pids.add(int(payload["pid"]))
     return pids

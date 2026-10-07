@@ -34,9 +34,7 @@ class RecordingClient(worker_cli.WorkerClient):
         lease_token: str,
         progress: dict[str, Any],
     ) -> dict[str, Any]:
-        self.heartbeats.append(
-            {"job_id": job_id, "lease_token": lease_token, "progress": progress}
-        )
+        self.heartbeats.append({"job_id": job_id, "lease_token": lease_token, "progress": progress})
         return {}
 
     def complete_job(
@@ -78,8 +76,12 @@ class LoopSttService:
     def transcribe(self, audio_path: Path, params: object) -> TranscriptionResult:
         del audio_path, params
         loop = [
-            TranscriptionSegment(id=index, start=float(index), end=float(index + 1),
-                                 text="Das ist auch sehr subjektiv.")
+            TranscriptionSegment(
+                id=index,
+                start=float(index),
+                end=float(index + 1),
+                text="Das ist auch sehr subjektiv.",
+            )
             for index in range(18)
         ]
         return TranscriptionResult(
@@ -281,14 +283,14 @@ def test_process_claim_uploads_known_speaker_sidecar(
     assert artifacts["transcript.speakers.json"]["exposed"] is True
     sidecar = json.loads(
         (
-            settings.VOXHELM_ARTIFACT_ROOT
-            / artifacts["transcript.speakers.json"]["storage_key"]
+            settings.VOXHELM_ARTIFACT_ROOT / artifacts["transcript.speakers.json"]["storage_key"]
         ).read_text()
     )
     assert sidecar["summary"]["known_speakers"] == ["Johannes"]
-    assert payload["result_metadata"]["diarization"]["known_speaker_summary"][
-        "strategy"
-    ] == "pyannote_known_speaker"
+    assert (
+        payload["result_metadata"]["diarization"]["known_speaker_summary"]["strategy"]
+        == "pyannote_known_speaker"
+    )
 
 
 def test_build_capabilities_advertises_known_speaker_when_diarization_enabled(

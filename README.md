@@ -57,7 +57,8 @@ just test
 uv run uvicorn config.asgi:application
 ```
 
-`just check` runs Ruff lint, mypy and pytest. GitHub Actions
+`just check` runs Ruff lint, a Ruff format check (`just format-check`; fix with
+`uv run ruff format .`), mypy and pytest. GitHub Actions
 (`.github/workflows/ci.yml`) runs the same steps on macOS arm64 on every push and pull
 request; tests that need the real Kokoro models are skipped there, and no
 secrets or services are needed.

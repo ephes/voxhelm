@@ -147,9 +147,7 @@ def test_select_reference_window_bounds_short_clip_is_single_window() -> None:
 
 
 def test_select_reference_window_bounds_spaces_windows() -> None:
-    bounds = select_reference_window_bounds(
-        16000 * 60, 16000, window_seconds=5.0, max_windows=4
-    )
+    bounds = select_reference_window_bounds(16000 * 60, 16000, window_seconds=5.0, max_windows=4)
     window_samples = 5 * 16000
     assert len(bounds) == 4
     assert bounds[0][0] == 0

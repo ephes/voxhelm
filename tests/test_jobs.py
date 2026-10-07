@@ -1015,7 +1015,10 @@ def test_known_speaker_job_differs_from_anonymous_for_dedup(client, settings, mo
                 "id": "1",
                 "name": "A",
                 "references": [
-                    {"kind": "clip_artifact", "audio": {"kind": "url", "url": "https://cdn.example.com/a.wav"}}
+                    {
+                        "kind": "clip_artifact",
+                        "audio": {"kind": "url", "url": "https://cdn.example.com/a.wav"},
+                    }
                 ],
             }
         ],

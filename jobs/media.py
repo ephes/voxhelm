@@ -111,8 +111,7 @@ _THIS_NETWORK: Final = ipaddress.ip_network("0.0.0.0/8")
 # Cloud instance-metadata endpoints outside link-local space (AWS IPv6, Alibaba,
 # Oracle). Refused even for hosts allowed to resolve to private addresses.
 _METADATA_ADDRESSES: Final = frozenset(
-    ipaddress.ip_address(address)
-    for address in ("fd00:ec2::254", "100.100.100.200", "192.0.0.192")
+    ipaddress.ip_address(address) for address in ("fd00:ec2::254", "100.100.100.200", "192.0.0.192")
 )
 
 
@@ -170,9 +169,7 @@ def validate_resolved_address(hostname: str, address: str) -> None:
         raise ApiError("URL host resolved to a non-public network address.")
 
 
-def resolve_host_addresses(
-    host: str, port: int
-) -> list[tuple[int, int, int, tuple[Any, ...]]]:
+def resolve_host_addresses(host: str, port: int) -> list[tuple[int, int, int, tuple[Any, ...]]]:
     """Resolve host for TCP; split out so tests can stub DNS."""
     return [
         (family, socktype, proto, sockaddr)

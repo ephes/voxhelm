@@ -251,6 +251,8 @@ def optional_string(value: object) -> str | None:
         raise ApiError("Optional request fields must be strings when provided.")
     normalized = value.strip()
     return normalized or None
+
+
 def render_response(*, result: TranscriptionResult, response_format: str) -> HttpResponse:
     if response_format == "json":
         return JsonResponse({"text": result.text})

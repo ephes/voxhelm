@@ -193,9 +193,7 @@ class PiperBackend:
             configured_voices=self.configured_voices,
         )
         if not installed:
-            raise BackendUnavailableError(
-                f"No Piper voices were found in '{self.voice_dir}'."
-            )
+            raise BackendUnavailableError(f"No Piper voices were found in '{self.voice_dir}'.")
 
         requested_voice = (voice or "").strip()
         if requested_voice:

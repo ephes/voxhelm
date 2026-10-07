@@ -40,8 +40,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
         raise ApiError("Unsupported uploaded media type for batch staging.")
     if is_video_path(Path(f"input{suffix}"), content_type=content_type):
         raise ApiError(
-            "Batch staged uploads currently support audio only. "
-            "Use URL input for video."
+            "Batch staged uploads currently support audio only. Use URL input for video."
         )
 
     temp_path = write_uploaded_media_to_tempfile(upload.chunks(), suffix=suffix)

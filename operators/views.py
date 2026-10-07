@@ -129,7 +129,7 @@ def get_selected_job(request: HttpRequest) -> Job | None:
             operator=operator,
             job_type=Job.JobType.TRANSCRIBE,
         )
-    except (Job.DoesNotExist, ValidationError, ValueError):
+    except Job.DoesNotExist, ValidationError, ValueError:
         return None
 
 
@@ -192,8 +192,7 @@ def build_download_links(job: Job | None) -> list[dict[str, str]]:
         return []
     order = ["text", "json", "vtt", "dote", "podlove"]
     artifacts_by_format = {
-        artifact.format: artifact
-        for artifact in job.artifacts.filter(exposed=True)
+        artifact.format: artifact for artifact in job.artifacts.filter(exposed=True)
     }
     downloads: list[dict[str, str]] = []
     for format_name in order:

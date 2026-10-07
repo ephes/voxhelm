@@ -134,9 +134,7 @@ def work_fail(request: HttpRequest, job_id: UUID) -> JsonResponse:
         worker_id = require_worker_token(request)
         payload = parse_json_object_request(request, "Worker job failure")
         validate_worker_payload_identity(worker_id=worker_id, payload=payload)
-        return JsonResponse(
-            fail_remote_work(worker_id=worker_id, job_id=job_id, payload=payload)
-        )
+        return JsonResponse(fail_remote_work(worker_id=worker_id, job_id=job_id, payload=payload))
     except Job.DoesNotExist:
         return openai_error_response(
             "Job not found.",

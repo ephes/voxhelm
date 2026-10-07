@@ -1244,9 +1244,7 @@ def test_remote_completion_rechecks_lease_at_commit(client, settings, monkeypatc
 
     def expire_lease_during_validation(*, job: Job, artifacts: object):
         result = original_validate(job=job, artifacts=artifacts)
-        Job.objects.filter(id=job.id).update(
-            lease_expires_at=timezone.now() - timedelta(seconds=1)
-        )
+        Job.objects.filter(id=job.id).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
         return result
 
     monkeypatch.setattr(remote_workers, "validate_remote_artifacts", expire_lease_during_validation)
@@ -1301,9 +1299,7 @@ def test_remote_completion_rejects_traversing_storage_keys(client, settings):
     job = submit_remote_job(client, settings, task_ref="remote-traversal")
     claim = claim_one(client).json()["job"]
     manifest = transcript_manifest(str(job.id), claim["attempt"])
-    manifest[1]["storage_key"] = (
-        f"voxhelm/jobs/{job.id}/attempt-{claim['attempt']}/../outside.txt"
-    )
+    manifest[1]["storage_key"] = f"voxhelm/jobs/{job.id}/attempt-{claim['attempt']}/../outside.txt"
 
     response = client.post(
         f"/v1/internal/work/{job.id}/complete",

@@ -1,6 +1,6 @@
 name: CI
 
-# Same checks as `just check` (lint, typecheck, test), run through uv directly.
+# Same checks as `just check` (lint, format check, typecheck, test), run through uv directly.
 # Tests use SQLite and fake backends; model-dependent tests (requires_models)
 # skip when the models are absent, so no secrets or services are needed.
 # Runs on macOS arm64 like production (macmini): mlx-whisper and piper-tts are
@@ -48,6 +48,8 @@ jobs:
         run: uv sync
       - name: Lint (just lint)
         run: uv run ruff check .
+      - name: Format check (just format-check)
+        run: uv run ruff format --check .
       - name: Typecheck (just typecheck)
         run: uv run mypy .
       - name: Tests (just test)

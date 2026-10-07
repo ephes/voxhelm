@@ -275,7 +275,7 @@ def reconcile_remote_staged_upload_claim_for_submission(*, producer: str, upload
             id=upload_id,
             producer=producer,
         )
-    except (StagedMedia.DoesNotExist, ValueError):
+    except StagedMedia.DoesNotExist, ValueError:
         return
     job = staged.claimed_by_job
     if job is None or job.execution_mode != Job.ExecutionMode.REMOTE_PULL:
@@ -305,9 +305,7 @@ def execution_mode_for_request(request: JobRequest) -> str:
     mode = settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE
     if mode not in Job.ExecutionMode.values:
         accepted = ", ".join(sorted(Job.ExecutionMode.values))
-        raise RuntimeError(
-            "VOXHELM_TRANSCRIPTION_EXECUTION_MODE must be one of: " f"{accepted}."
-        )
+        raise RuntimeError(f"VOXHELM_TRANSCRIPTION_EXECUTION_MODE must be one of: {accepted}.")
     return mode
 
 
@@ -680,9 +678,7 @@ def parse_known_speaker_references(value: object) -> list[dict[str, Any]]:
         reference = ensure_object(raw_reference, "diarization.known_speakers[].references[]")
         kind = optional_string(reference.get("kind"))
         if kind not in {"clip_artifact", "source_range"}:
-            raise ApiError(
-                "diarization reference kind must be 'clip_artifact' or 'source_range'."
-            )
+            raise ApiError("diarization reference kind must be 'clip_artifact' or 'source_range'.")
         audio = parse_reference_audio(reference.get("audio"))
         normalized: dict[str, Any] = {"kind": kind, "audio": audio}
         if kind == "source_range":

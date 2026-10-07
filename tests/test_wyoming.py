@@ -558,9 +558,7 @@ def test_wyoming_handler_cap_applies_to_converted_audio(monkeypatch) -> None:
         # 0.75 s of 16 kHz stereo: 48000 raw bytes (over the 32000-byte cap) but only
         # 24000 bytes once converted to mono.
         assert await handler.handle_event(
-            AudioChunk(
-                rate=16000, width=2, channels=2, audio=b"\x01\x00\x01\x00" * 12000
-            ).event()
+            AudioChunk(rate=16000, width=2, channels=2, audio=b"\x01\x00\x01\x00" * 12000).event()
         )
         await handler.handle_event(AudioStop().event())
 
