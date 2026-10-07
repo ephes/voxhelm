@@ -143,6 +143,21 @@ One new backend, one routing layer, minimal surgery elsewhere:
   attribution comment with upstream URL + revision) and apply it before
   phonemization for German synthesis only. Vendored file is excluded from
   strict lint if needed but covered by tests.
+  - Local deviation (2026-10): a number that ends a sentence ("im Jahr
+    2024.", "Die Antwort ist 42.") is read as a cardinal, or as a year after
+    "Jahr", and keeps its full stop so `split_sentences` still sees the
+    boundary. A bare "N." is an ordinal only before a lowercase word ("Sie
+    kam 3. ins Ziel"); before a capitalised word, a digit or the end of the
+    text it is a cardinal. Prefixed ordinals ("am 3. Oktober", "der 1.
+    Platz") stay ordinals and keep the full stop only at the end of the text
+    or before a capitalised sentence starter (pronoun, article, conjunction,
+    adverb; `SENTENCE_STARTERS`). Years 1100-1999 are read as spoken years
+    ("neunzehnhundertneunzig"). Upstream reads every "N." as an ordinal and
+    drops the stop. Accepted limits: a bare number before a capitalised noun
+    ("Sie wurde 3. Siegerin") reads as a cardinal, and a prefixed ordinal
+    before a capitalised word outside `SENTENCE_STARTERS` loses its full
+    stop. Covered by `tests/test_german_text_rules.py`; the vendored header
+    lists the deviations.
 - **Language routing** in `synthesis/service.py::synthesize_text` (so
   Wyoming, HTTP `/v1/audio/speech`, and batch jobs all benefit):
   - `lingua-language-detector` restricted to GERMAN/ENGLISH, lazy singleton.
