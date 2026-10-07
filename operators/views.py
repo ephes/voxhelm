@@ -28,6 +28,7 @@ from transcriptions.input_media import (
     write_upload_to_tempfile,
 )
 
+from . import login_throttle
 from .forms import LoginForm, TranscriptSubmissionForm
 
 
@@ -43,18 +44,24 @@ def root(request: HttpRequest) -> HttpResponse:
 def login_page(request: HttpRequest) -> HttpResponse:
     form = LoginForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
+        username = form.cleaned_data["username"]
+        if login_throttle.is_locked_out(request, username):
+            form.add_error(None, "Too many failed sign-in attempts. Try again later.")
+            return render(request, "operators/root.html", {"login_form": form}, status=429)
         user = authenticate(
             request,
-            username=form.cleaned_data["username"],
+            username=username,
             password=form.cleaned_data["password"],
         )
         if user is None:
+            login_throttle.record_failure(request, username)
             form.add_error(None, "Invalid username or password.")
         elif not user.is_active:
             form.add_error(None, "This operator account is inactive.")
         elif not user.is_staff:
             form.add_error(None, "This account is not allowed to access the operator UI.")
         else:
+            login_throttle.clear_failures(request, username)
             login(request, user)
             return redirect("root")
     return render(request, "operators/root.html", {"login_form": form})

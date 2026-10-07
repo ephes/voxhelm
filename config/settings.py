@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 VOXHELM_OPERATOR_PRODUCER_LABEL = "__operator_ui__"
 VOXHELM_RESERVED_BEARER_TOKEN_LABELS = {VOXHELM_OPERATOR_PRODUCER_LABEL}
@@ -212,29 +214,79 @@ def validate_remote_pull_s3_configuration(
         )
 
 
+def accepted_stt_models(
+    *,
+    mlx_model: str,
+    whispercpp_model: str,
+    whisperkit_enabled: bool,
+    whisperkit_model: str,
+) -> set[str]:
+    models = {"gpt-4o-mini-transcribe", "whisper-1", mlx_model, whispercpp_model}
+    if whisperkit_enabled:
+        models.update({"whisperkit", whisperkit_model})
+    return models
+
+
 def get_accepted_stt_models() -> set[str]:
     from django.conf import settings as django_settings
 
-    models = {
-        "gpt-4o-mini-transcribe",
-        "whisper-1",
-        django_settings.VOXHELM_MLX_MODEL,
-        django_settings.VOXHELM_WHISPERCPP_MODEL,
-    }
-    if django_settings.VOXHELM_WHISPERKIT_ENABLED:
-        models.update({"whisperkit", django_settings.VOXHELM_WHISPERKIT_MODEL})
-    return models
+    return accepted_stt_models(
+        mlx_model=django_settings.VOXHELM_MLX_MODEL,
+        whispercpp_model=django_settings.VOXHELM_WHISPERCPP_MODEL,
+        whisperkit_enabled=django_settings.VOXHELM_WHISPERKIT_ENABLED,
+        whisperkit_model=django_settings.VOXHELM_WHISPERKIT_MODEL,
+    )
 
 
 def get_batch_accepted_stt_models() -> set[str]:
     return {"auto", *get_accepted_stt_models()}
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-secret-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+DEV_ONLY_SECRET_KEY = "dev-only-insecure-secret-key"
+
+
+def resolve_secret_key(raw: str | None, *, debug: bool) -> str:
+    """Return the Django secret key, failing closed outside ``DEBUG``.
+
+    Production (``DJANGO_DEBUG`` unset/false) must provide ``DJANGO_SECRET_KEY``;
+    a missing or blank value aborts startup instead of silently signing sessions
+    and CSRF tokens with a public default. Only ``DEBUG`` falls back to a fixed
+    development key.
+    """
+    secret_key = (raw or "").strip()
+    if secret_key:
+        return secret_key
+    if debug:
+        return DEV_ONLY_SECRET_KEY
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is off. "
+        "Set DJANGO_DEBUG=true for local development."
+    )
+
+
+SECRET_KEY = resolve_secret_key(os.getenv("DJANGO_SECRET_KEY"), debug=DEBUG)
 ALLOWED_HOSTS = env_list("VOXHELM_ALLOWED_HOSTS", default="localhost,127.0.0.1")
 CSRF_TRUSTED_ORIGINS = env_list("VOXHELM_CSRF_TRUSTED_ORIGINS")
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# The operator UI is reached through the private Traefik HTTPS ingress, so the
+# session and CSRF cookies are HTTPS-only unless DEBUG is on. Set
+# VOXHELM_SECURE_COOKIES=false only to log in over plain HTTP (for example the
+# direct http://<host>:8787 backend port); browsers drop Secure cookies there.
+VOXHELM_SECURE_COOKIES = env_bool("VOXHELM_SECURE_COOKIES", default=not DEBUG)
+SESSION_COOKIE_SECURE = VOXHELM_SECURE_COOKIES
+CSRF_COOKIE_SECURE = VOXHELM_SECURE_COOKIES
+X_FRAME_OPTIONS = "DENY"
+# Failed operator logins allowed per client IP and per username within the
+# window before further attempts are refused until the window expires.
+VOXHELM_LOGIN_MAX_FAILURES = validate_positive_int(
+    "VOXHELM_LOGIN_MAX_FAILURES",
+    int(os.getenv("VOXHELM_LOGIN_MAX_FAILURES", "5")),
+)
+VOXHELM_LOGIN_LOCKOUT_SECONDS = validate_positive_int(
+    "VOXHELM_LOGIN_LOCKOUT_SECONDS",
+    int(os.getenv("VOXHELM_LOGIN_LOCKOUT_SECONDS", "900")),
+)
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
@@ -257,6 +309,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 TEMPLATES = [
@@ -435,8 +488,15 @@ VOXHELM_TRUSTED_HTTP_HOSTS = set(env_list("VOXHELM_TRUSTED_HTTP_HOSTS"))
 # CGNAT/Tailscale, IPv6 ULA). Trusted HTTP hosts are implicitly included.
 # Link-local/metadata, multicast and reserved addresses are always refused.
 VOXHELM_PRIVATE_URL_HOSTS = set(env_list("VOXHELM_PRIVATE_URL_HOSTS"))
-VOXHELM_ACCEPTED_MODELS = get_accepted_stt_models()
-VOXHELM_BATCH_ACCEPTED_MODELS = get_batch_accepted_stt_models()
+# Computed from this module's values rather than django.conf.settings so the
+# module also imports cleanly when wrapped by another settings module (tests).
+VOXHELM_ACCEPTED_MODELS = accepted_stt_models(
+    mlx_model=VOXHELM_MLX_MODEL,
+    whispercpp_model=VOXHELM_WHISPERCPP_MODEL,
+    whisperkit_enabled=VOXHELM_WHISPERKIT_ENABLED,
+    whisperkit_model=VOXHELM_WHISPERKIT_MODEL,
+)
+VOXHELM_BATCH_ACCEPTED_MODELS = {"auto", *VOXHELM_ACCEPTED_MODELS}
 VOXHELM_TTS_BACKEND = os.getenv("VOXHELM_TTS_BACKEND", "piper").strip()
 VOXHELM_PIPER_VOICE_DIR = Path(
     os.getenv("VOXHELM_PIPER_VOICE_DIR", str(BASE_DIR / "var" / "piper"))

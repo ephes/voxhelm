@@ -54,8 +54,12 @@ returns clean transcripts unchanged. Disable it with
 ```bash
 uv sync
 just test
-uv run uvicorn config.asgi:application
+DJANGO_DEBUG=true uv run uvicorn config.asgi:application
 ```
+
+Outside `DJANGO_DEBUG=true` the app refuses to start without `DJANGO_SECRET_KEY`
+(see "Operator UI security" below). The test suite and mypy use
+`tests/settings.py`, which supplies a fixed test-only key.
 
 `just check` runs Ruff lint, a Ruff format check (`just format-check`; fix with
 `uv run ruff format .`), mypy and pytest. GitHub Actions
@@ -70,11 +74,20 @@ export DJANGO_SECRET_KEY="replace-me"
 export VOXHELM_BEARER_TOKENS="archive=replace-me"
 ```
 
+`DJANGO_SECRET_KEY` is mandatory unless `DJANGO_DEBUG=true`: a missing or blank
+value raises `ImproperlyConfigured` at startup instead of falling back to a
+public default. Only `DJANGO_DEBUG=true` uses a fixed development key.
+
 Optional settings:
 
 ```bash
 export VOXHELM_ALLOWED_HOSTS="localhost,127.0.0.1"
 export VOXHELM_CSRF_TRUSTED_ORIGINS="https://voxhelm.example.com"
+# Operator UI hardening (defaults shown; see "Operator UI security").
+# VOXHELM_SECURE_COOKIES defaults to true unless DJANGO_DEBUG=true.
+export VOXHELM_SECURE_COOKIES="true"
+export VOXHELM_LOGIN_MAX_FAILURES="5"
+export VOXHELM_LOGIN_LOCKOUT_SECONDS="900"
 export VOXHELM_STT_BACKEND="whispercpp"
 export VOXHELM_STT_FALLBACK_BACKEND="mlx"
 export VOXHELM_MLX_MODEL="mlx-community/whisper-large-v3-mlx"
@@ -175,6 +188,34 @@ uv run python manage.py bootstrap_operator --username jochen --password "replace
 ```
 
 Deploy-time note: the deployment layer should call the same in-app command with the real secret rather than creating the operator directly in a separate repo.
+
+### Operator UI security
+
+The operator UI at `/` is meant to be reached through the private Traefik HTTPS
+ingress, which forwards `X-Forwarded-Proto: https`.
+
+- **Secret key:** `DJANGO_SECRET_KEY` must be set unless `DJANGO_DEBUG=true`;
+  startup fails closed otherwise. The ops-library `voxhelm_deploy` role writes it
+  to `voxhelm.env`. The remote worker defaults it to a fixed local value because
+  it serves no sessions.
+- **Secure cookies:** the session and CSRF cookies carry `Secure` (and the
+  session cookie `HttpOnly`) unless `DJANGO_DEBUG=true`. Browsers do not store
+  `Secure` cookies from a plain-HTTP origin other than `localhost`, so signing in
+  directly at `http://<host>:8787` stops working. Use the HTTPS ingress, or set
+  `VOXHELM_SECURE_COOKIES=false` deliberately if plain-HTTP LAN login is needed.
+- **Framing:** every response sends `X-Frame-Options: DENY`, including on the
+  direct backend port. The ops-library Traefik headers middleware sets
+  `customFrameOptionsValue: SAMEORIGIN`, which may replace it at the edge.
+- **Login throttle:** after `VOXHELM_LOGIN_MAX_FAILURES` failed sign-ins (default
+  5) from one client address or for one username, further attempts are refused
+  with HTTP 429 without checking the password until the window of
+  `VOXHELM_LOGIN_LOCKOUT_SECONDS` (default 900, starting at the first failure)
+  expires. A successful login resets the username counter. The client address is
+  `REMOTE_ADDR`, so behind Traefik all browsers share the proxy's address
+  bucket; `X-Forwarded-For` is not trusted because the backend port is also
+  reachable directly. Counters live in the default Django cache, which is
+  per-process local memory and matches the single uvicorn process; a restart
+  clears them.
 
 ## OpenAI-Compatible API
 
