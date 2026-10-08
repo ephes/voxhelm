@@ -147,7 +147,8 @@ def require_bearer_token(request: HttpRequest) -> str:
 
     presented = header.removeprefix("Bearer ").strip()
     for label, token in settings.VOXHELM_BEARER_TOKENS.items():
-        if hmac.compare_digest(presented, token):
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+        if hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
             return label
 
     raise ApiError(
