@@ -260,9 +260,35 @@ consumed the sidecar unchanged. In the first 75 s, 7 of 12 transcript lines now
 carry no name; the vetoes at 16.40-21.84 and 28.02-33.34 look plausible from
 the text but were not checked against the audio.
 
-Still open for 1b: the thresholds have been checked on episode 206 only, not on
-episode 205 as planned under "Risk" below, and the false-veto rate is not
-measured.
+Thresholds checked on episode 205 ("Django Developers Survey 2026", public
+feed MP3, 2997 s, same whisper.cpp settings and references, 2026-10-12): 710
+segments, 495 confident before the veto (Will 258 / Carlton 237), 28 vetoed at
+the defaults (5.7%, episode 206: 6.8%). Vetoed counts for 1.5 s / 0.75 s
+windows, as no floor / similarity >= 0.30 / >= 0.40:
+
+| Margin | Episode 205 | Episode 206 |
+| --- | --- | --- |
+| 0.10 | 36 / 29 / 25 | 28 / 25 / 19 |
+| 0.15 | 33 / 28 / 24 | 25 / 23 / 17 |
+| 0.20 | 28 / 24 / 23 | 22 / 22 / 17 |
+| 0.25 | 21 / 20 / 20 | 18 / 18 / 15 |
+
+As a proxy for a labelled reference, each confident segment was compared with
+the raw pyannote turns (`num_speakers=2`): a segment counts as pyannote-mixed
+when a second speaker's turns overlap it for at least 0.3 s. On episode 205 all
+28 vetoed segments are pyannote-mixed; on episode 206, 19 of 23 are, and the
+other four (10.02-16.40, 16.40-21.84, 338.26-343.50, 442.86-447.20) are in
+stretches where pyannote emitted no second-speaker turn at all. The defaults
+stay as they are. The proxy does not prove a veto is right, and it is not
+independent of the embedding model family.
+
+The same comparison shows what the veto leaves alone: 57 confident segments on
+episode 205 and 38 on episode 206 are pyannote-mixed without a veto (18 and 14
+when the second speaker needs at least 1.0 s). That is the population step 1a
+would address; how many of them are backchannels was not examined.
+
+Still open for 1b: no speaker-labelled reference exists, so the false-veto
+rate is estimated by the proxy only.
 
 The change is not classifier-only. It also needs:
 
