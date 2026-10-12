@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 # transcript, so a threshold of 4 catches the artifacts with comfortable margin.
 DEFAULT_REPEAT_THRESHOLD = 4
 
+# Adjacent cues may have at most one second of silence; overlaps must still
+# progress forward in time. Longer gaps split otherwise identical runs.
+MAX_REPEAT_GAP_SECONDS = 1.0
+
 # A run of 4+ dots (optionally space-separated) is a degenerate artifact. A
 # normal ellipsis is exactly three dots ("..." / "…") and is left intact.
 _DOT_RUN_PATTERN = re.compile(r"\.(?:\s*\.){3,}")
@@ -75,6 +79,9 @@ def sanitize_result(
     byte-identical to today's output.
     """
 
+    from transcriptions.formats import validate_timestamps
+
+    validate_timestamps(result)
     if not enabled or not result.segments:
         return result
 
@@ -134,7 +141,13 @@ def _collapse_loops(
         key = _comparison_key(segments[index].text)
         run_end = index + 1
         if key:
-            while run_end < count and _comparison_key(segments[run_end].text) == key:
+            while (
+                run_end < count
+                and _comparison_key(segments[run_end].text) == key
+                and segments[run_end].start >= segments[run_end - 1].start
+                and segments[run_end].end >= segments[run_end - 1].end
+                and segments[run_end].start - segments[run_end - 1].end <= MAX_REPEAT_GAP_SECONDS
+            ):
                 run_end += 1
         run_length = run_end - index
         if run_length >= repeat_threshold:

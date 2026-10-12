@@ -166,36 +166,46 @@ class UnavailableKnownSpeakerEmbeddingBackend:
 # --------------------------------------------------------------------------- #
 
 
+def validate_embedding(vector: Sequence[float]) -> None:
+    if len(vector) == 0 or any(not math.isfinite(value) for value in vector):
+        raise KnownSpeakerError("Embedding must be nonempty and contain only finite coordinates.")
+
+
 def l2_normalize(vector: Sequence[float]) -> list[float]:
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0.0:
+    validate_embedding(vector)
+    scale = max(abs(value) for value in vector)
+    if scale == 0.0:
         return [0.0 for _ in vector]
-    return [value / norm for value in vector]
+    scaled = [value / scale for value in vector]
+    norm = math.hypot(*scaled)
+    return [value / norm for value in scaled]
 
 
 def average_vectors(vectors: Sequence[Sequence[float]]) -> list[float]:
     if not vectors:
         raise KnownSpeakerConfigurationError("Cannot average an empty set of embeddings.")
     length = len(vectors[0])
-    totals = [0.0] * length
     for vector in vectors:
+        validate_embedding(vector)
         if len(vector) != length:
             raise KnownSpeakerConfigurationError("Embeddings have inconsistent dimensions.")
-        for index, value in enumerate(vector):
-            totals[index] += value
-    count = float(len(vectors))
-    return [total / count for total in totals]
+    # Scale before summing to keep finite backend coordinates from overflowing.
+    scale = max(abs(value) for vector in vectors for value in vector)
+    if scale == 0.0:
+        return [0.0] * length
+    count = len(vectors)
+    return [
+        (math.fsum(vector[index] / scale for vector in vectors) / count) * scale
+        for index in range(length)
+    ]
 
 
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right):
         raise KnownSpeakerConfigurationError("Cannot compare embeddings of different dimensions.")
-    dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(a * a for a in left))
-    right_norm = math.sqrt(sum(b * b for b in right))
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    return dot / (left_norm * right_norm)
+    left_unit = l2_normalize(left)
+    right_unit = l2_normalize(right)
+    return max(-1.0, min(1.0, math.fsum(a * b for a, b in zip(left_unit, right_unit, strict=True))))
 
 
 def build_centroid(embeddings: Sequence[Sequence[float]]) -> list[float]:

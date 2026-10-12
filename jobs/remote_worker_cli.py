@@ -631,6 +631,7 @@ def upload_transcript_artifacts(
     formats: list[str],
     result: TranscriptionResult,
 ) -> list[dict[str, Any]]:
+    transcript_formats.validate_timestamps(result)
     artifacts: list[dict[str, Any]] = []
     for output_format in formats:
         try:

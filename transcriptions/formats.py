@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import TYPE_CHECKING, Any, Protocol
+
+from transcriptions.errors import TranscriptionError
 
 if TYPE_CHECKING:
     from transcriptions.service import TranscriptionResult
@@ -15,7 +18,20 @@ class SegmentLike(Protocol):
     speaker: str | None
 
 
+def validate_timestamps(result: TranscriptionResult) -> None:
+    """Reject invalid backend cues, including empty cues, before rendering."""
+    for segment in result.segments:
+        if any(
+            not math.isfinite(value) or not math.isfinite(value * 1000)
+            for value in (segment.start, segment.end)
+        ):
+            raise TranscriptionError(
+                "Transcript cue timestamps must be finite and representable in milliseconds."
+            )
+
+
 def render_verbose_json(result: TranscriptionResult) -> dict[str, Any]:
+    validate_timestamps(result)
     segments: list[dict[str, Any]] = []
     for segment in result.segments:
         payload = {
@@ -37,6 +53,7 @@ def render_verbose_json(result: TranscriptionResult) -> dict[str, Any]:
 
 
 def render_text(result: TranscriptionResult) -> str:
+    validate_timestamps(result)
     return result.text
 
 
@@ -105,6 +122,7 @@ def render_podlove(result: TranscriptionResult) -> dict[str, Any]:
 
 
 def normalized_segments(result: TranscriptionResult) -> list[SegmentLike]:
+    validate_timestamps(result)
     if result.segments:
         return [
             SimpleSegment(
