@@ -344,3 +344,112 @@ def test_environment_proxy_is_ignored(media_server, local_allowlist, monkeypatch
         assert result.read_bytes() == AUDIO_BYTES
     finally:
         result.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("phase", ["body", "headers", "redirect"])
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
+def test_elapsed_budget_stops_slow_progress(
+    phase, fetch, local_allowlist, isolated_tempdir, settings
+):
+    import time
+
+    class SlowHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            try:
+                if phase == "headers":
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                    self.wfile.flush()
+                    for _ in range(20):
+                        time.sleep(0.04)
+                        self.wfile.write(b"X-Progress: yes\r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"Content-Type: audio/mpeg\r\n\r\n")
+                elif phase == "redirect" and self.path != "/file.mp3":
+                    time.sleep(0.12)
+                    self.send_response(302)
+                    self.send_header("Location", "/file.mp3")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Length", "20")
+                    self.end_headers()
+                for _ in range(20):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.04)
+            except OSError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.2
+    started = time.monotonic()
+    try:
+        with pytest.raises(ApiError):
+            fetch(f"http://127.0.0.1:{server.server_port}/slow.mp3")
+        assert time.monotonic() - started < 0.6
+        assert list(isolated_tempdir.iterdir()) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_dns_consumes_elapsed_budget(monkeypatch, settings, local_allowlist, isolated_tempdir):
+    import time
+
+    def slow_dns(*args):
+        time.sleep(0.5)
+        return []
+
+    monkeypatch.setattr(media, "resolve_host_addresses", slow_dns)
+    settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.05
+    started = time.monotonic()
+    with pytest.raises(ApiError, match="elapsed budget"):
+        _fetch_media("http://127.0.0.1/file.mp3")
+    assert time.monotonic() - started < 0.3
+    assert list(isolated_tempdir.iterdir()) == []
+
+
+def test_elapsed_budget_interrupts_tls_handshake(
+    monkeypatch, settings, local_allowlist, isolated_tempdir
+):
+    import time
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    finished = threading.Event()
+
+    def stall_tls():
+        connection, _ = listener.accept()
+        with connection:
+            finished.wait(2)
+
+    thread = threading.Thread(target=stall_tls, daemon=True)
+    thread.start()
+    settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.6
+    settings.VOXHELM_PRIVATE_URL_HOSTS = {"127.0.0.1"}
+    original_resolve = media.resolve_host_addresses
+
+    def delayed_dns(*args):
+        time.sleep(0.4)
+        return original_resolve(*args)
+
+    monkeypatch.setattr(media, "resolve_host_addresses", delayed_dns)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ApiError):
+            _fetch_media(f"https://127.0.0.1:{listener.getsockname()[1]}/file.mp3")
+        assert time.monotonic() - started < 0.85
+        assert list(isolated_tempdir.iterdir()) == []
+    finally:
+        finished.set()
+        listener.close()
+        thread.join(timeout=3)

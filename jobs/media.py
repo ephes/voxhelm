@@ -3,10 +3,14 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import mimetypes
+import queue
 import socket
 import subprocess
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -123,6 +127,67 @@ _METADATA_ADDRESSES: Final = frozenset(
 )
 
 
+class _FetchDeadline:
+    """One watchdog for all sockets in a fetch, including redirect responses."""
+
+    def __init__(self, seconds: float) -> None:
+        self.ends_at = time.monotonic() + seconds
+        self.sockets: list[socket.socket] = []
+        self.lock = threading.Lock()
+        self.timer = threading.Timer(seconds, self.interrupt)
+        self.timer.daemon = True
+
+    def remaining(self) -> float:
+        remaining = self.ends_at - time.monotonic()
+        if remaining <= 0:
+            raise ApiError("URL fetch exceeded the configured elapsed budget.")
+        return remaining
+
+    def register(self, sock: socket.socket) -> None:
+        with self.lock:
+            self.remaining()
+            sock.settimeout(self.remaining())
+            # Keep a descriptor for the same connection even when TLS wrapping
+            # detaches the original socket. shutdown() interrupts both descriptors.
+            self.sockets.append(sock.dup())
+
+    def interrupt(self) -> None:
+        with self.lock:
+            for sock in self.sockets:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+
+_FETCH_DEADLINE: ContextVar[_FetchDeadline | None] = ContextVar("fetch_deadline", default=None)
+
+
+def _resolve_with_deadline(host: str, port: int) -> list[tuple[int, int, int, tuple[Any, ...]]]:
+    deadline = _FETCH_DEADLINE.get()
+    if deadline is None:
+        return resolve_host_addresses(host, port)
+    # getaddrinfo has no timeout API. A daemon resolver may finish later, but it
+    # never opens sockets or owns media files after the caller's deadline.
+    result: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result.put(resolve_host_addresses(host, port))
+        except Exception as exc:
+            result.put(exc)
+
+    threading.Thread(target=resolve, daemon=True).start()
+    try:
+        resolved = result.get(timeout=deadline.remaining())
+    except queue.Empty as exc:
+        raise ApiError("URL fetch exceeded the configured elapsed budget.") from exc
+    deadline.remaining()
+    if isinstance(resolved, Exception):
+        raise resolved
+    return resolved
+
+
 def validate_allowed_media_url(source_url: str) -> None:
     parsed = urlparse(source_url)
     hostname = (parsed.hostname or "").lower()
@@ -202,7 +267,7 @@ def _guarded_create_connection(
     """
     host, port = address
     try:
-        resolved = resolve_host_addresses(host, port)
+        resolved = _resolve_with_deadline(host, port)
     except socket.gaierror as exc:
         raise ApiError(f"URL fetch failed: could not resolve host ({exc}).") from exc
     if not resolved:
@@ -217,11 +282,19 @@ def _guarded_create_connection(
                 sock.settimeout(timeout)
             if source_address:
                 sock.bind(source_address)
+            deadline = _FETCH_DEADLINE.get()
+            if deadline is not None:
+                deadline.register(sock)
             sock.connect(sockaddr)
+            if deadline is not None:
+                deadline.remaining()
             return sock
         except OSError as exc:
             sock.close()
             last_error = exc
+        except BaseException:
+            sock.close()
+            raise
     assert last_error is not None
     raise last_error
 
@@ -260,6 +333,13 @@ class _AllowlistRedirectHandler(HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> Request | None:
+        deadline = _FETCH_DEADLINE.get()
+        if deadline is not None:
+            try:
+                req.timeout = deadline.remaining()
+            except ApiError:
+                fp.close()
+                raise
         hops = getattr(req, "voxhelm_redirect_hops", 0) + 1
         try:
             if hops > MAX_URL_REDIRECTS:
@@ -313,10 +393,12 @@ def fetch_allowed_url_to_tempfile(
     validate_allowed_media_url(source_url)
     request = Request(source_url, headers={"User-Agent": "voxhelm/0.1", "Accept": accept})
     temp_path: Path | None = None
+    deadline = _FetchDeadline(settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS)
+    marker = _FETCH_DEADLINE.set(deadline)
+    deadline.timer.start()
     try:
-        with open_allowed_url(
-            request, timeout=settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS
-        ) as response:
+        with open_allowed_url(request, timeout=deadline.remaining()) as response:
+            deadline.remaining()
             final_url = response.geturl() or source_url
             # Redundant with the per-hop check; keeps the final URL honest.
             validate_allowed_media_url(final_url)
@@ -328,7 +410,12 @@ def fetch_allowed_url_to_tempfile(
             total = 0
             with temp_path.open("wb") as handle:
                 while True:
-                    chunk = response.read(_FETCH_CHUNK_BYTES)
+                    deadline.remaining()
+                    # read1 performs at most one underlying read, so slow progress
+                    # cannot hide inside a read(size) loop until the chunk fills.
+                    read = getattr(response, "read1", response.read)
+                    chunk = read(_FETCH_CHUNK_BYTES)
+                    deadline.remaining()
                     if not chunk:
                         break
                     total += len(chunk)
@@ -346,7 +433,7 @@ def fetch_allowed_url_to_tempfile(
         if isinstance(exc.reason, ApiError):
             raise exc.reason from exc
         raise ApiError(f"URL fetch failed: {exc.reason}.") from exc
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         raise ApiError(f"URL fetch failed: {exc}.") from exc
@@ -354,6 +441,16 @@ def fetch_allowed_url_to_tempfile(
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         raise
+    except BaseException:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        deadline.timer.cancel()
+        with deadline.lock:
+            for sock in deadline.sockets:
+                sock.close()
+        _FETCH_DEADLINE.reset(marker)
 
 
 def download_allowed_media(*, source_url: str) -> DownloadedMedia:
@@ -376,6 +473,7 @@ def download_allowed_media(*, source_url: str) -> DownloadedMedia:
 
 def extract_audio_from_video(*, source_path: Path) -> Path:
     target_path = reserve_temp_media_path(suffix=".wav")
+    completed = False
     try:
         subprocess.run(
             [
@@ -395,9 +493,20 @@ def extract_audio_from_video(*, source_path: Path) -> Path:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=settings.VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS,
         )
+        completed = True
     except subprocess.CalledProcessError as exc:
-        target_path.unlink(missing_ok=True)
-        stderr = exc.stderr.strip() or exc.stdout.strip() or "unknown ffmpeg error"
-        raise RuntimeError(f"ffmpeg audio extraction failed: {stderr}") from exc
+        stderr = (exc.stderr or "").strip() or (exc.stdout or "").strip() or "unknown ffmpeg error"
+        raise RuntimeError(f"ffmpeg audio extraction failed: {stderr[:2000]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        # run() kills and waits for the child before raising TimeoutExpired.
+        raise RuntimeError(
+            "ffmpeg audio extraction exceeded the configured processing budget."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError("ffmpeg audio extraction could not start or complete.") from exc
+    finally:
+        if not completed:
+            target_path.unlink(missing_ok=True)
     return target_path
