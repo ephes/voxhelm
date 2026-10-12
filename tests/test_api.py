@@ -1138,3 +1138,36 @@ def test_json_request_rejects_invalid_model_before_downloading(
     assert response.status_code == 400
     assert "Unsupported model 'not-a-model'." in response.json()["error"]["message"]
     assert downloads == []
+
+
+@pytest.mark.parametrize("failure", ["timeout", "startup"])
+def test_speech_export_failure_cleans_source_and_output(client, monkeypatch, tmp_path, failure):
+    import subprocess
+
+    source = tmp_path / "speech.wav"
+    source.write_bytes(b"RIFFtest")
+    targets = []
+    monkeypatch.setattr(
+        "synthesis.views.synthesize_text", lambda text, params: DummySpeechResult(source)
+    )
+
+    def run(args, **kwargs):
+        target = Path(args[-1])
+        targets.append(target)
+        target.write_bytes(b"partial")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        raise OSError("cannot start converter")
+
+    monkeypatch.setattr("synthesis.service.subprocess.run", run)
+    response = client.post(
+        "/v1/audio/speech",
+        content_type="application/json",
+        data=json.dumps({"input": "Hello", "model": "tts-1", "response_format": "mp3"}),
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 500
+    assert response.json()["error"]["type"] == "server_error"
+    assert len(targets) == 1
+    assert not targets[0].exists()
+    assert not source.exists()

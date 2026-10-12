@@ -183,7 +183,7 @@ def test_export_audio_missing_ffmpeg_removes_target(monkeypatch, tmp_path: Path,
     )
     settings.VOXHELM_FFMPEG_BIN = str(tmp_path / "no-such-ffmpeg")
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(RuntimeError, match="Audio conversion could not start ffmpeg"):
         export_audio(result, output_format="mp3")
 
     assert list(temp_dir.iterdir()) == []
@@ -673,3 +673,146 @@ def test_synthesize_text_explicit_kokoro_model_forces_backend_with_routing_off(
     assert result.backend_name == "kokoro"
     # request_model reaches the backend unchanged (routing did not touch it).
     assert captured["params"].request_model == "kokoro"
+
+
+@pytest.mark.parametrize("changed_artifact", ["model", "config"])
+def test_piper_cache_tracks_artifact_identity(monkeypatch, tmp_path, changed_artifact):
+    import sys
+    from types import SimpleNamespace
+
+    from synthesis import service
+
+    service._PIPER_VOICE_CACHE.clear()
+    calls = []
+
+    def load(model, *, config_path):
+        loaded = object()
+        calls.append((model, config_path, loaded))
+        return loaded
+
+    monkeypatch.setitem(
+        sys.modules, "piper", SimpleNamespace(PiperVoice=SimpleNamespace(load=load))
+    )
+
+    def voice_at(root):
+        root.mkdir()
+        model = root / "voice.onnx"
+        config = root / "voice.json"
+        model.write_bytes(b"model")
+        config.write_text("{}")
+        return InstalledVoice(
+            key="same",
+            name="same",
+            backend="piper",
+            languages=("en",),
+            artifacts={"model": model, "config": config},
+        )
+
+    try:
+        a = voice_at(tmp_path / "a")
+        b = voice_at(tmp_path / "b")
+        first = service.load_piper_voice(a)
+        assert service.load_piper_voice(a) is first
+        second = service.load_piper_voice(b)
+        assert second is not first
+        assert service.load_piper_voice(b) is second
+        # Atomic replacement with identical bytes still changes the inode.
+        artifact = a.artifacts[changed_artifact]
+        replacement = artifact.with_suffix(".replacement")
+        replacement.write_bytes(artifact.read_bytes())
+        replacement.replace(artifact)
+        third = service.load_piper_voice(a)
+        assert third is not first
+        assert service.load_piper_voice(a) is third
+        # Explicit timestamp change avoids relying on clock resolution or sleeps.
+        import os
+
+        old_stat = artifact.stat()
+        artifact.write_bytes(b"changed")
+        os.utime(artifact, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000_000))
+        fourth = service.load_piper_voice(a)
+        assert fourth is not third
+        assert service.load_piper_voice(a) is fourth
+        assert len(calls) == 4
+    finally:
+        service._PIPER_VOICE_CACHE.clear()
+
+
+@pytest.mark.parametrize("output_format", ["mp3", "ogg"])
+@pytest.mark.parametrize("failure", ["timeout", "startup", "nonzero", "success"])
+def test_export_audio_deadline_and_owned_cleanup(
+    monkeypatch, tmp_path, settings, output_format, failure
+):
+    import subprocess
+
+    from synthesis import service
+
+    temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"RIFF")
+    result = SynthesisResult(
+        audio_path=source,
+        backend_name="piper",
+        model_name="piper",
+        voice_name="test",
+        language="en",
+        sample_rate=22050,
+        sample_width=2,
+        channels=1,
+        duration_seconds=1.0,
+    )
+    settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS = 17
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        Path(args[-1]).write_bytes(b"partial" if failure != "success" else b"converted")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, 17, stderr=b"partial")
+        if failure == "startup":
+            raise OSError("cannot start converter")
+        return subprocess.CompletedProcess(args, 1 if failure == "nonzero" else 0, "", "failed")
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    if failure == "success":
+        exported = export_audio(result, output_format=output_format)
+        assert exported.path.read_bytes() == b"converted"
+        exported.path.unlink()
+    else:
+        with pytest.raises(RuntimeError, match="Audio conversion"):
+            export_audio(result, output_format=output_format)
+    assert len(calls) == 1
+    assert calls[0].get("timeout") == 17
+    assert list(temp_dir.iterdir()) == []
+    assert source.read_bytes() == b"RIFF"
+
+
+def test_piper_cache_reuses_resolved_artifacts_and_evicts_lru(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from synthesis import service
+
+    monkeypatch.setattr(service, "_PIPER_CACHE_LIMIT", 2)
+    monkeypatch.setattr(service, "_PIPER_VOICE_CACHE", service.OrderedDict())
+    monkeypatch.setitem(
+        sys.modules,
+        "piper",
+        SimpleNamespace(PiperVoice=SimpleNamespace(load=lambda *args, **kwargs: object())),
+    )
+    voices = []
+    for i in range(3):
+        model, config = write_voice_fixture(tmp_path, str(i))
+        voices.append(build_voice_metadata(voice_name=str(i), model_path=model, config_path=config))
+    first = service.load_piper_voice(voices[0])
+    second = service.load_piper_voice(voices[1])
+    alias = tmp_path / "alias.onnx"
+    alias.symlink_to(voices[0].model_path)
+    same_artifacts = replace(
+        voices[0], key="alias", artifacts={"model": alias, "config": voices[0].config_path}
+    )
+    assert service.load_piper_voice(same_artifacts) is first  # refresh recency
+    service.load_piper_voice(voices[2])
+    assert len(service._PIPER_VOICE_CACHE) == 2
+    assert service.load_piper_voice(voices[0]) is first
+    assert service.load_piper_voice(voices[1]) is not second
