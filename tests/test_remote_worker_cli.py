@@ -389,3 +389,80 @@ def test_materialize_staged_upload_removes_reserved_file_on_download_failure(
         )
 
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("status", [200, 301, 302, 303, 307, 308])
+@pytest.mark.parametrize("operation", ["heartbeat", "claim"])
+def test_worker_api_refuses_credential_redirects(status, operation):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received: list[str | None] = []
+    initial: list[str | None] = []
+
+    class Destination(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            received.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"job": {}}')
+
+        do_POST = do_GET
+
+    destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
+    destination_thread = threading.Thread(target=destination.serve_forever, daemon=True)
+    destination_thread.start()
+
+    class Origin(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):  # noqa: N802
+            initial.append(self.headers.get("Authorization"))
+            self.send_response(status)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{destination.server_port}/credential-destination"
+            )
+            self.end_headers()
+            # A redirect body can reflect a credential; it must never be displayed.
+            self.wfile.write(b'{"job": {}, "echo": "synthetic-worker-credential"}')
+
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+    origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+    origin_thread.start()
+    client = worker_cli.WorkerClient(
+        config=worker_cli.WorkerConfig(
+            base_url=f"http://127.0.0.1:{origin.server_port}",
+            worker_id="test-worker",
+            token="synthetic-worker-credential",
+            hostname="test-host",
+            http_timeout_seconds=2,
+        )
+    )
+
+    def request():
+        if operation == "heartbeat":
+            return client.heartbeat_worker(capabilities={}, running_job_ids=[])
+        return client.claim(capabilities={})
+
+    try:
+        if status == 200:
+            assert isinstance(request(), dict)
+        else:
+            with pytest.raises(worker_cli.WorkerError, match="redirects are refused") as error:
+                request()
+            assert "synthetic-worker-credential" not in str(error.value)
+            assert "credential-destination" not in str(error.value)
+            assert len(str(error.value)) < 200
+        assert initial == ["Bearer synthetic-worker-credential"]
+        assert received == []
+    finally:
+        origin.shutdown()
+        destination.shutdown()
+        origin.server_close()
+        destination.server_close()
+        origin_thread.join(timeout=3)
+        destination_thread.join(timeout=3)
