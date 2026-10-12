@@ -511,6 +511,14 @@ window, default `3600`), and `VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS`
 (how recently a peer must have heartbeated to count, default `30`). This is
 control-plane-only behavior; workers need no changes.
 
+Configure `VOXHELM_WORKER_BASE_URL` (or `VOXHELM_BASE_URL`) with the canonical
+worker API origin (the final
+HTTPS URL when using ingress). Worker control-plane requests refuse all HTTP
+redirects, including redirects on the same origin, and report only the status
+and a configuration hint. A redirect never forwards the worker bearer token or
+prints the redirect target or response body. Media URL redirects still use the
+separate allowlisted media fetcher.
+
 Worker endpoints are internal and use a separate bearer-token domain from
 producer tokens. Startup configuration rejects any raw token value shared
 between `VOXHELM_BEARER_TOKENS` and `VOXHELM_WORKER_TOKENS`:
