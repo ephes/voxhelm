@@ -5,12 +5,19 @@ import math
 import numpy
 import pytest
 
+from jobs.remote_worker_cli import known_speaker_config_from_claim
+from jobs.remote_workers import (
+    KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS,
+    KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS,
+    KNOWN_SPEAKER_SUMMARY_STRING_KEYS,
+)
 from jobs.services import parse_diarization_option
 from transcriptions.diarization import SpeakerTurn
 from transcriptions.errors import ApiError
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     KNOWN_SPEAKER_STRATEGY,
+    MIXED_SPEAKERS_REASON,
     KnownSpeakerBackendUnavailableError,
     KnownSpeakerConfig,
     KnownSpeakerConfigurationError,
@@ -25,9 +32,12 @@ from transcriptions.known_speaker import (
     build_speakers_artifact,
     classify_embedding,
     cosine_similarity,
+    find_mixed_windows,
     get_pyannote_embedding_backend,
     is_confident,
+    known_speaker_config_from_mapping,
     l2_normalize,
+    mixed_window_bounds,
     pad_to_min_duration,
     run_known_speaker_postprocess,
     select_reference_window_bounds,
@@ -341,6 +351,267 @@ def test_build_speakers_artifact_serializes_segments_and_summary() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Mixed-segment veto (sub-window classification)
+# --------------------------------------------------------------------------- #
+
+
+def test_mixed_window_bounds_slide_and_cover_the_tail() -> None:
+    bounds = mixed_window_bounds(10.0, 14.0, config=KnownSpeakerConfig())
+    assert bounds == [(10.0, 11.5), (10.75, 12.25), (11.5, 13.0), (12.25, 13.75), (12.5, 14.0)]
+
+
+def test_mixed_window_bounds_empty_when_disabled_or_segment_fits_one_window() -> None:
+    assert mixed_window_bounds(0.0, 10.0, config=KnownSpeakerConfig(mixed_window_duration=0)) == []
+    assert mixed_window_bounds(0.0, 1.5, config=KnownSpeakerConfig()) == []
+
+
+def test_mixed_window_bounds_clamps_tiny_hop() -> None:
+    bounds = mixed_window_bounds(0.0, 2.0, config=KnownSpeakerConfig(mixed_window_hop=0.0))
+    # 0.1s minimum hop: starts 0.0 .. 0.4, then the end-aligned window.
+    assert len(bounds) == 6
+    assert bounds[-1] == (0.5, 2.0)
+
+
+def test_mixed_window_bounds_raises_tiny_duration_to_minimum() -> None:
+    bounds = mixed_window_bounds(0.0, 1.0, config=KnownSpeakerConfig(mixed_window_duration=0.01))
+    assert bounds[0] == (0.0, 0.5)
+    assert bounds[-1] == (0.5, 1.0)
+
+
+def test_find_mixed_windows_skips_windows_clipped_by_the_audio_end() -> None:
+    # The segment claims 8.5-11.49s but the audio ends at 10s, so the
+    # end-aligned window 9.99-11.49 is clipped to a 10ms sliver the embedding
+    # model cannot take.
+    backend = ScriptedEmbeddingBackend([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+    windows = find_mixed_windows(
+        segment_start=8.5,
+        segment_end=11.49,
+        segment_speaker="Johannes",
+        job_audio_samples=numpy.zeros(10 * 16000, dtype="float32"),
+        centroids={"Johannes": [1.0, 0.0, 0.0], "Dominik": [0.0, 1.0, 0.0]},
+        config=KnownSpeakerConfig(),
+        backend=backend,
+    )
+
+    # 8.5-10.0 is a full window and 9.25-10.75 keeps 0.75s; the sliver is skipped.
+    assert windows == []
+    assert backend.calls == 2
+
+
+def mixed_segment_audio(sample_rate: int = 16000):
+    # 5s of Johannes (0.1) followed by 1.5s of Dominik (0.2). The whole-segment
+    # mean still rounds to Johannes, like a segment with a short interjection.
+    return numpy.concatenate(
+        [
+            numpy.full(5 * sample_rate, 0.1, dtype="float32"),
+            numpy.full(int(1.5 * sample_rate), 0.2, dtype="float32"),
+        ]
+    )
+
+
+def run_mixed_segment(config: KnownSpeakerConfig):
+    references = [make_reference("Johannes", 0.1), make_reference("Dominik", 0.2)]
+    result = TranscriptionResult(
+        text="a",
+        language="de",
+        segments=[TranscriptionSegment(id=0, start=0.0, end=6.5, text="a")],
+    )
+    return run_known_speaker_postprocess(
+        result,
+        references=references,
+        job_audio_samples=mixed_segment_audio(),
+        raw_turns=[SpeakerTurn(start=0.0, end=6.5, speaker="SPEAKER_00")],
+        config=config,
+        backend=StubEmbeddingBackend(),
+    )
+
+
+def test_mixed_segment_is_downgraded_to_uncertain() -> None:
+    outcome = run_mixed_segment(KnownSpeakerConfig())
+
+    segment = outcome.segments[0]
+    # The whole segment still classifies as Johannes with full confidence ...
+    assert segment.speaker_candidates[0].speaker == "Johannes"
+    assert math.isclose(segment.speaker_confidence, 1.0)
+    # ... but a sub-window is clearly Dominik, so no speaker is auto-applied.
+    assert segment.speaker is None
+    assert segment.speaker_uncertain is True
+    assert segment.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert {window.speaker for window in segment.speaker_mixed_windows} == {"Dominik"}
+    assert segment.speaker_mixed_windows[-1].end == 6.5
+    assert outcome.summary["mixed_segment_count"] == 1
+    assert outcome.summary["confident_segment_count"] == 0
+    assert outcome.summary["uncertain_segment_count"] == 1
+    assert outcome.summary["confident_speaker_distribution"] == {}
+
+
+def test_mixed_segment_veto_can_be_disabled() -> None:
+    outcome = run_mixed_segment(KnownSpeakerConfig(mixed_window_duration=0))
+
+    segment = outcome.segments[0]
+    assert segment.speaker == "Johannes"
+    assert segment.speaker_uncertain is False
+    assert segment.speaker_uncertain_reason is None
+    assert segment.speaker_mixed_windows == []
+    assert outcome.summary["mixed_segment_count"] == 0
+
+
+def test_mixed_segment_fields_are_only_serialized_for_mixed_segments() -> None:
+    mixed = build_speakers_artifact(run_mixed_segment(KnownSpeakerConfig()))
+    plain = build_speakers_artifact(run_mixed_segment(KnownSpeakerConfig(mixed_window_duration=0)))
+
+    assert mixed["version"] == 1
+    assert mixed["segments"][0]["speaker_uncertain_reason"] == "mixed_speakers"
+    window = mixed["segments"][0]["speaker_mixed_windows"][-1]
+    assert window == {
+        "start": 5.0,
+        "end": 6.5,
+        "speaker": "Dominik",
+        "similarity": 1.0,
+        "margin": 1.0,
+    }
+    assert "speaker_uncertain_reason" not in plain["segments"][0]
+    assert "speaker_mixed_windows" not in plain["segments"][0]
+    assert mixed["summary"]["mixed_window_duration"] == 1.5
+    assert mixed["summary"]["mixed_window_hop"] == 0.75
+    assert mixed["summary"]["mixed_window_margin"] == 0.15
+    assert mixed["summary"]["mixed_window_min_similarity"] == 0.3
+
+
+class ScriptedEmbeddingBackend:
+    """Returns the queued vectors in order, one per ``embed`` call."""
+
+    embedding_version = "scripted-v1"
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.vectors = list(vectors)
+        self.calls = 0
+
+    def embed(self, samples, sample_rate):
+        del samples, sample_rate
+        self.calls += 1
+        return self.vectors.pop(0)
+
+
+@pytest.mark.parametrize(
+    ("vector", "expected_speakers"),
+    [
+        # Clearly the other speaker: similarity 1.0, margin 1.0.
+        ([0.0, 1.0, 0.0], ["Dominik"]),
+        # Same speaker as the segment: never a veto.
+        ([1.0, 0.0, 0.0], []),
+        # Other speaker on top, but below the margin threshold (0.6 vs 0.5).
+        ([0.5, 0.6, 0.62], []),
+        # Other speaker with a wide margin but a similarity below the floor,
+        # like music or silence that resembles nobody.
+        ([0.0, 0.25, 0.97], []),
+    ],
+)
+def test_find_mixed_windows_requires_margin_and_similarity(vector, expected_speakers) -> None:
+    centroids = {"Johannes": [1.0, 0.0, 0.0], "Dominik": [0.0, 1.0, 0.0]}
+    # A 2s segment has two windows: 0.0-1.5 and the end-aligned 0.5-2.0.
+    backend = ScriptedEmbeddingBackend([[1.0, 0.0, 0.0], vector])
+
+    windows = find_mixed_windows(
+        segment_start=0.0,
+        segment_end=2.0,
+        segment_speaker="Johannes",
+        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+        centroids=centroids,
+        config=KnownSpeakerConfig(),
+        backend=backend,
+    )
+
+    assert backend.calls == 2
+    assert [window.speaker for window in windows] == expected_speakers
+
+
+def test_uncertain_segments_skip_the_sub_window_embeddings() -> None:
+    centroids_reference = [make_reference("Johannes", 0.1), make_reference("Dominik", 0.2)]
+
+    class CountingBackend(StubEmbeddingBackend):
+        calls = 0
+
+        def embed(self, samples, sample_rate):
+            type(self).calls += 1
+            return super().embed(samples, sample_rate)
+
+    result = TranscriptionResult(
+        text="a",
+        language="de",
+        segments=[TranscriptionSegment(id=0, start=0.0, end=6.5, text="a")],
+    )
+    # A top-similarity threshold nothing can reach keeps the segment uncertain.
+    run_known_speaker_postprocess(
+        result,
+        references=centroids_reference,
+        job_audio_samples=mixed_segment_audio(),
+        raw_turns=[],
+        config=KnownSpeakerConfig(min_top_similarity=2.0),
+        backend=CountingBackend(),
+    )
+
+    # Two reference windows plus one whole-segment embedding, no sub-windows.
+    assert CountingBackend.calls == 3
+
+
+def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None:
+    assert known_speaker_config_from_mapping({}) == KnownSpeakerConfig()
+    config = known_speaker_config_from_mapping(
+        {
+            "embedding_model": "custom/model",
+            "min_segment_duration": 2,
+            "auto_accept_margin": 0.2,
+            "min_top_similarity": 0.6,
+            "mixed_window_duration": 2.0,
+            "mixed_window_hop": 0.5,
+            "mixed_window_margin": 0.25,
+            "mixed_window_min_similarity": 0.4,
+        }
+    )
+    assert config == KnownSpeakerConfig(
+        embedding_model="custom/model",
+        min_segment_duration=2.0,
+        auto_accept_margin=0.2,
+        min_top_similarity=0.6,
+        mixed_window_duration=2.0,
+        mixed_window_hop=0.5,
+        mixed_window_margin=0.25,
+        mixed_window_min_similarity=0.4,
+    )
+
+
+def test_remote_claim_config_carries_mixed_window_options() -> None:
+    config = known_speaker_config_from_claim(
+        {"known_speaker": {"mixed_window_duration": 0, "mixed_window_margin": 0.3}}
+    )
+    assert config.mixed_window_duration == 0.0
+    assert config.mixed_window_margin == 0.3
+    assert config.mixed_window_hop == KnownSpeakerConfig().mixed_window_hop
+    assert known_speaker_config_from_claim({}) == KnownSpeakerConfig()
+
+
+def test_remote_summary_allowlist_covers_every_local_summary_key() -> None:
+    # The control plane drops summary keys it does not know, so a key added to
+    # the local summary must also be allowlisted or remote jobs lose it.
+    summary = run_mixed_segment(KnownSpeakerConfig()).summary
+    structured_keys = {
+        "known_speakers",
+        "confident_speaker_distribution",
+        "raw_diarization_available",
+    }
+    allowlisted = (
+        KNOWN_SPEAKER_SUMMARY_STRING_KEYS
+        | KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS
+        | KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS
+        | structured_keys
+    )
+    assert set(summary) == allowlisted
+    assert all(isinstance(summary[key], int) for key in KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS)
+
+
+# --------------------------------------------------------------------------- #
 # Embedding backend factory
 # --------------------------------------------------------------------------- #
 
@@ -447,6 +718,10 @@ def test_parse_known_speaker_config_is_normalized() -> None:
                 "min_segment_duration": 1.5,
                 "auto_accept_margin": 0.15,
                 "min_top_similarity": 0.55,
+                "mixed_window_duration": 2,
+                "mixed_window_hop": 0.5,
+                "mixed_window_margin": 0.2,
+                "mixed_window_min_similarity": 0.35,
             }
         )
     )
@@ -455,7 +730,43 @@ def test_parse_known_speaker_config_is_normalized() -> None:
         "min_segment_duration": 1.5,
         "auto_accept_margin": 0.15,
         "min_top_similarity": 0.55,
+        "mixed_window_duration": 2.0,
+        "mixed_window_hop": 0.5,
+        "mixed_window_margin": 0.2,
+        "mixed_window_min_similarity": 0.35,
     }
+
+
+def test_parse_known_speaker_config_allows_disabling_the_mixed_veto() -> None:
+    parsed = parse_diarization_option(
+        known_speaker_payload(known_speaker={"mixed_window_duration": 0})
+    )
+    assert parsed["known_speaker"] == {"mixed_window_duration": 0.0}
+
+
+@pytest.mark.parametrize("hop", [0, 0.05])
+def test_parse_known_speaker_config_rejects_too_small_hop(hop) -> None:
+    with pytest.raises(ApiError, match="mixed_window_hop must be at least 0.1"):
+        parse_diarization_option(known_speaker_payload(known_speaker={"mixed_window_hop": hop}))
+
+
+def test_parse_known_speaker_config_rejects_too_small_window() -> None:
+    with pytest.raises(ApiError, match="mixed_window_duration must be 0 \\(off\\) or at least"):
+        parse_diarization_option(
+            known_speaker_payload(known_speaker={"mixed_window_duration": 0.01})
+        )
+
+
+@pytest.mark.parametrize("key", ["mixed_window_duration", "min_top_similarity"])
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_parse_known_speaker_config_rejects_non_finite_numbers(key, value) -> None:
+    with pytest.raises(ApiError, match=f"{key} must be a finite number"):
+        parse_diarization_option(known_speaker_payload(known_speaker={key: value}))
+
+
+def test_parse_known_speaker_config_rejects_negative_mixed_options() -> None:
+    with pytest.raises(ApiError, match="mixed_window_margin must not be negative"):
+        parse_diarization_option(known_speaker_payload(known_speaker={"mixed_window_margin": -0.1}))
 
 
 def test_clip_artifact_reference_does_not_require_range() -> None:

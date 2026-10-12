@@ -15,6 +15,12 @@ top candidate, full candidate list, confidence, margin, an uncertainty flag,
 and the raw anonymous diarization label so the consumer can review uncertain
 segments instead of silently trusting them.
 
+One embedding per segment hides a second voice: a segment with a short
+interjection from another speaker still classifies confidently as the main
+speaker. Confident segments are therefore re-checked with sliding sub-windows,
+and a segment in which a window clearly belongs to a different known speaker is
+downgraded to uncertain (see ``find_mixed_windows``).
+
 The heavy embedding model is loaded lazily through ``importlib`` and hidden
 behind :class:`KnownSpeakerEmbeddingBackendProtocol`, mirroring the diarization
 backend, so the classification logic stays testable without torch/pyannote.
@@ -27,7 +33,7 @@ import math
 import subprocess
 import tempfile
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
@@ -52,6 +58,33 @@ DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM
 DEFAULT_MIN_SEGMENT_DURATION = 1.5
 DEFAULT_AUTO_ACCEPT_MARGIN = 0.15
 DEFAULT_MIN_TOP_SIMILARITY = 0.55
+# Mixed-segment veto. Measured on Django Chat episode 206 (see
+# specs/2026-10-12_mixed_speaker_segments.md): 1.5s windows separate a 1.5s
+# interjection from the surrounding speaker, 1.0s windows are too noisy. Short
+# windows score lower than whole segments, so the veto has its own similarity
+# floor instead of reusing ``min_top_similarity``; the floor also keeps
+# music/silence windows, which score near zero for everyone, from counting.
+DEFAULT_MIXED_WINDOW_DURATION = 1.5
+DEFAULT_MIXED_WINDOW_HOP = 0.75
+DEFAULT_MIXED_WINDOW_MARGIN = 0.15
+DEFAULT_MIXED_WINDOW_MIN_SIMILARITY = 0.30
+# Lower bound for the hop so a tiny configured value cannot turn one segment
+# into an unbounded number of embeddings.
+MIN_MIXED_WINDOW_HOP = 0.1
+# Shortest sub-window worth embedding. The embedding model rejects slices of a
+# few milliseconds, and well under half a second it has no speaker evidence.
+MIN_MIXED_WINDOW_DURATION = 0.5
+MIXED_SPEAKERS_REASON = "mixed_speakers"
+
+KNOWN_SPEAKER_NUMBER_OPTIONS = (
+    "min_segment_duration",
+    "auto_accept_margin",
+    "min_top_similarity",
+    "mixed_window_duration",
+    "mixed_window_hop",
+    "mixed_window_margin",
+    "mixed_window_min_similarity",
+)
 
 # Reference centroids are built from a handful of clean, spaced windows rather
 # than the whole clip, matching the research spike's 16 high-energy 5s windows.
@@ -81,12 +114,38 @@ class KnownSpeakerConfig:
     The defaults come from the diarization-quality research: WeSpeaker had the
     best margin separation, and duration >=1.5s, margin >=0.15, top similarity
     >=0.55 was the recommended conservative auto-accept policy.
+
+    The ``mixed_window_*`` options drive the mixed-segment veto;
+    ``mixed_window_duration=0`` turns it off.
     """
 
     embedding_model: str = DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL
     min_segment_duration: float = DEFAULT_MIN_SEGMENT_DURATION
     auto_accept_margin: float = DEFAULT_AUTO_ACCEPT_MARGIN
     min_top_similarity: float = DEFAULT_MIN_TOP_SIMILARITY
+    mixed_window_duration: float = DEFAULT_MIXED_WINDOW_DURATION
+    mixed_window_hop: float = DEFAULT_MIXED_WINDOW_HOP
+    mixed_window_margin: float = DEFAULT_MIXED_WINDOW_MARGIN
+    mixed_window_min_similarity: float = DEFAULT_MIXED_WINDOW_MIN_SIMILARITY
+
+
+def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSpeakerConfig:
+    """Build a config from a stored/claimed ``diarization.known_speaker`` mapping."""
+    defaults = KnownSpeakerConfig()
+
+    def number(name: str) -> float:
+        return float(config_data.get(name, getattr(defaults, name)))
+
+    return KnownSpeakerConfig(
+        embedding_model=str(config_data.get("embedding_model") or defaults.embedding_model),
+        min_segment_duration=number("min_segment_duration"),
+        auto_accept_margin=number("auto_accept_margin"),
+        min_top_similarity=number("min_top_similarity"),
+        mixed_window_duration=number("mixed_window_duration"),
+        mixed_window_hop=number("mixed_window_hop"),
+        mixed_window_margin=number("mixed_window_margin"),
+        mixed_window_min_similarity=number("mixed_window_min_similarity"),
+    )
 
 
 @dataclass(frozen=True)
@@ -120,6 +179,17 @@ class SegmentClassification:
 
 
 @dataclass(frozen=True)
+class MixedWindow:
+    """A sub-window that clearly belongs to another speaker than its segment."""
+
+    start: float
+    end: float
+    speaker: str
+    similarity: float
+    margin: float
+
+
+@dataclass(frozen=True)
 class KnownSpeakerSegment:
     """Full reviewable per-segment result emitted in the sidecar artifact."""
 
@@ -133,6 +203,8 @@ class KnownSpeakerSegment:
     speaker_candidates: list[SpeakerCandidate]
     speaker_uncertain: bool
     raw_diarization_speaker: str | None
+    speaker_uncertain_reason: str | None = None
+    speaker_mixed_windows: list[MixedWindow] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -248,6 +320,80 @@ def is_confident(
         and classification.top_similarity >= config.min_top_similarity
         and classification.margin >= config.auto_accept_margin
     )
+
+
+def mixed_window_bounds(
+    start: float,
+    end: float,
+    *,
+    config: KnownSpeakerConfig,
+) -> list[tuple[float, float]]:
+    """Sliding sub-window bounds inside a segment for the mixed-segment veto.
+
+    Empty when the veto is off or the segment is not longer than one window,
+    since a single window would only repeat the whole-segment classification.
+    A last window is aligned to the segment end so the tail is always covered.
+    Window duration and hop are raised to their minimums, because claimed and
+    stored configs do not pass through the API validation.
+    """
+    if config.mixed_window_duration <= 0:
+        return []
+    size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
+    if end - start <= size:
+        return []
+    hop = max(config.mixed_window_hop, MIN_MIXED_WINDOW_HOP)
+    last_start = end - size
+    bounds: list[tuple[float, float]] = []
+    index = 0
+    while start + index * hop < last_start:
+        window_start = start + index * hop
+        bounds.append((window_start, window_start + size))
+        index += 1
+    bounds.append((last_start, end))
+    return bounds
+
+
+def find_mixed_windows(
+    *,
+    segment_start: float,
+    segment_end: float,
+    segment_speaker: str,
+    job_audio_samples: Any,
+    centroids: Mapping[str, Sequence[float]],
+    config: KnownSpeakerConfig,
+    backend: KnownSpeakerEmbeddingBackendProtocol,
+) -> list[MixedWindow]:
+    """Return the sub-windows that clearly belong to a different known speaker.
+
+    A window counts only when its top speaker differs from the segment's, its
+    margin reaches ``mixed_window_margin`` and its top similarity reaches
+    ``mixed_window_min_similarity``. Ambiguous or non-speech windows are
+    ignored, so they neither confirm nor veto the segment.
+    """
+    mixed: list[MixedWindow] = []
+    min_samples = int(MIN_MIXED_WINDOW_DURATION * SAMPLE_RATE)
+    for window_start, window_end in mixed_window_bounds(segment_start, segment_end, config=config):
+        window = slice_samples(job_audio_samples, SAMPLE_RATE, window_start, window_end)
+        # ASR timestamps can run past the end of the audio; a clipped sliver is
+        # no evidence and too short for the embedding model.
+        if len(window) < min_samples:
+            continue
+        classification = classify_embedding(backend.embed(window, SAMPLE_RATE), centroids)
+        if (
+            classification.top_speaker != segment_speaker
+            and classification.margin >= config.mixed_window_margin
+            and classification.top_similarity >= config.mixed_window_min_similarity
+        ):
+            mixed.append(
+                MixedWindow(
+                    start=round(window_start, 3),
+                    end=round(window_end, 3),
+                    speaker=classification.top_speaker,
+                    similarity=round(classification.top_similarity, 6),
+                    margin=round(classification.margin, 6),
+                )
+            )
+    return mixed
 
 
 def select_reference_window_bounds(
@@ -402,6 +548,19 @@ def classify_segments(
         embedding = backend.embed(window, SAMPLE_RATE)
         classification = classify_embedding(embedding, centroids)
         confident = is_confident(classification, duration=duration, config=config)
+        mixed_windows: list[MixedWindow] = []
+        if confident:
+            # Only segments that would be auto-accepted need the extra embeddings.
+            mixed_windows = find_mixed_windows(
+                segment_start=segment.start,
+                segment_end=segment.end,
+                segment_speaker=classification.top_speaker,
+                job_audio_samples=job_audio_samples,
+                centroids=centroids,
+                config=config,
+                backend=backend,
+            )
+            confident = not mixed_windows
         raw_label = None
         if normalized_raw_turns:
             raw_label = choose_speaker_for_segment(
@@ -421,6 +580,8 @@ def classify_segments(
                 speaker_candidates=classification.candidates,
                 speaker_uncertain=not confident,
                 raw_diarization_speaker=raw_label,
+                speaker_uncertain_reason=MIXED_SPEAKERS_REASON if mixed_windows else None,
+                speaker_mixed_windows=mixed_windows,
             )
         )
     return segments
@@ -436,6 +597,7 @@ def summarize_known_speaker(
 ) -> dict[str, Any]:
     total = len(segments)
     confident = sum(1 for segment in segments if not segment.speaker_uncertain)
+    mixed = sum(1 for segment in segments if segment.speaker_mixed_windows)
     per_speaker: dict[str, int] = {}
     for segment in segments:
         if segment.speaker:
@@ -449,9 +611,14 @@ def summarize_known_speaker(
         "min_segment_duration": config.min_segment_duration,
         "auto_accept_margin": config.auto_accept_margin,
         "min_top_similarity": config.min_top_similarity,
+        "mixed_window_duration": config.mixed_window_duration,
+        "mixed_window_hop": config.mixed_window_hop,
+        "mixed_window_margin": config.mixed_window_margin,
+        "mixed_window_min_similarity": config.mixed_window_min_similarity,
         "segment_count": total,
         "confident_segment_count": confident,
         "uncertain_segment_count": total - confident,
+        "mixed_segment_count": mixed,
         "confident_speaker_distribution": per_speaker,
         "margin_median": _median(margins),
         "raw_diarization_available": bool(raw_turns),
@@ -468,24 +635,39 @@ def _median(values: list[float]) -> float:
 
 
 def serialize_known_speaker_segments(segments: list[KnownSpeakerSegment]) -> list[dict[str, Any]]:
-    return [
-        {
-            "index": segment.index,
-            "start": segment.start,
-            "end": segment.end,
-            "speaker": segment.speaker,
-            "speaker_source": segment.speaker_source,
-            "speaker_confidence": segment.speaker_confidence,
-            "speaker_margin": segment.speaker_margin,
-            "speaker_candidates": [
-                {"speaker": candidate.speaker, "similarity": round(candidate.similarity, 6)}
-                for candidate in segment.speaker_candidates
-            ],
-            "speaker_uncertain": segment.speaker_uncertain,
-            "raw_diarization_speaker": segment.raw_diarization_speaker,
-        }
-        for segment in segments
-    ]
+    return [_serialize_known_speaker_segment(segment) for segment in segments]
+
+
+def _serialize_known_speaker_segment(segment: KnownSpeakerSegment) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "index": segment.index,
+        "start": segment.start,
+        "end": segment.end,
+        "speaker": segment.speaker,
+        "speaker_source": segment.speaker_source,
+        "speaker_confidence": segment.speaker_confidence,
+        "speaker_margin": segment.speaker_margin,
+        "speaker_candidates": [
+            {"speaker": candidate.speaker, "similarity": round(candidate.similarity, 6)}
+            for candidate in segment.speaker_candidates
+        ],
+        "speaker_uncertain": segment.speaker_uncertain,
+        "raw_diarization_speaker": segment.raw_diarization_speaker,
+    }
+    # Additive, optional fields: only present on segments the mixed veto caught.
+    if segment.speaker_mixed_windows:
+        payload["speaker_uncertain_reason"] = segment.speaker_uncertain_reason
+        payload["speaker_mixed_windows"] = [
+            {
+                "start": window.start,
+                "end": window.end,
+                "speaker": window.speaker,
+                "similarity": window.similarity,
+                "margin": window.margin,
+            }
+            for window in segment.speaker_mixed_windows
+        ]
+    return payload
 
 
 def build_speakers_artifact(outcome: KnownSpeakerOutcome) -> dict[str, Any]:
@@ -654,13 +836,18 @@ def embed_under_inference_lane(
 __all__ = [
     "ANONYMOUS_STRATEGY",
     "DIARIZATION_STRATEGIES",
+    "KNOWN_SPEAKER_NUMBER_OPTIONS",
     "KNOWN_SPEAKER_STRATEGY",
+    "MIN_MIXED_WINDOW_DURATION",
+    "MIN_MIXED_WINDOW_HOP",
+    "MIXED_SPEAKERS_REASON",
     "KnownSpeakerBackendUnavailableError",
     "KnownSpeakerConfig",
     "KnownSpeakerConfigurationError",
     "KnownSpeakerError",
     "KnownSpeakerOutcome",
     "KnownSpeakerSegment",
+    "MixedWindow",
     "ReferenceAudio",
     "SpeakerCandidate",
     "build_known_speaker_backend",
@@ -668,8 +855,11 @@ __all__ = [
     "classify_embedding",
     "decode_mono_16k",
     "extract_reference_windows",
+    "find_mixed_windows",
     "get_known_speaker_backend",
     "is_confident",
+    "known_speaker_config_from_mapping",
+    "mixed_window_bounds",
     "run_known_speaker_postprocess",
     "select_reference_window_bounds",
     "slice_samples",

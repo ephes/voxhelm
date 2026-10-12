@@ -45,6 +45,7 @@ from transcriptions.known_speaker import (
     decode_mono_16k,
     extract_reference_windows,
     get_known_speaker_backend,
+    known_speaker_config_from_mapping,
     run_known_speaker_postprocess,
     slice_samples,
 )
@@ -601,19 +602,7 @@ def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
 def known_speaker_config_from_claim(diarization: dict[str, Any]) -> KnownSpeakerConfig:
     raw_config = diarization.get("known_speaker")
     config_data = raw_config if isinstance(raw_config, dict) else {}
-    defaults = KnownSpeakerConfig()
-    return KnownSpeakerConfig(
-        embedding_model=str(config_data.get("embedding_model") or defaults.embedding_model),
-        min_segment_duration=float(
-            config_data.get("min_segment_duration", defaults.min_segment_duration)
-        ),
-        auto_accept_margin=float(
-            config_data.get("auto_accept_margin", defaults.auto_accept_margin)
-        ),
-        min_top_similarity=float(
-            config_data.get("min_top_similarity", defaults.min_top_similarity)
-        ),
-    )
+    return known_speaker_config_from_mapping(config_data)
 
 
 def diarization_params(diarization: dict[str, Any]) -> DiarizationParams:

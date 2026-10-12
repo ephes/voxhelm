@@ -1,11 +1,11 @@
-# Mixed-speaker transcript segments (plan, not yet implemented)
+# Mixed-speaker transcript segments (plan, step 1b implemented)
 
-Status: draft plan, 2026-10-12. No service code has been changed. Revised after
-a fresh-context review by gpt-6.1-sol (high effort) on the same day; the main
-findings were checked against the source and are folded in below. The open
-question is settled, see "Findings" below: pyannote emitted no turn for the
-greeting, the sub-window classification does separate the voices, and the job
-was transcribed by whisper.cpp.
+Status: 2026-10-12. Step 1b (sub-window veto) is implemented; steps 1a, 2 and 3
+are still plan. Revised after a fresh-context review by gpt-6.1-sol (high
+effort) on the same day; the main findings were checked against the source and
+are folded in below. The open question is settled, see "Findings" below:
+pyannote emitted no turn for the greeting, the sub-window classification does
+separate the voices, and the job was transcribed by whisper.cpp.
 
 ## Problem
 
@@ -220,6 +220,39 @@ For both: record the reason and the evidence in the sidecar segment as new
 optional fields (version stays 1, fields are additive) and report
 `mixed_segment_count` in the summary.
 
+**1b as implemented.** `find_mixed_windows` in `transcriptions/known_speaker.py`
+checks every segment that would be auto-accepted: 1.5 s windows, 0.75 s hop,
+plus a window aligned to the segment end. A window that names a different top
+speaker with margin >= 0.15 and top similarity >= 0.30 vetoes the segment. The
+segment gets `speaker_uncertain_reason="mixed_speakers"` and the dissenting
+windows in `speaker_mixed_windows`. The four values are request options
+(`diarization.known_speaker.mixed_window_*`), `mixed_window_duration=0` turns
+the veto off, and the contract is described in `known-speaker-diarization.md`.
+
+Thresholds were chosen on the 454 segments of episode 206 (339 confident
+without the veto). Number of confident segments vetoed, by window margin and
+similarity floor, for 1.5 s windows with 0.75 s hop:
+
+| margin | no floor | sim >= 0.30 | sim >= 0.40 |
+|---:|---:|---:|---:|
+| 0.10 | 28 | 25 | 19 |
+| 0.15 | 25 | 23 | 17 |
+| 0.20 | 22 | 22 | 17 |
+| 0.25 | 18 | 18 | 15 |
+
+The 10.02-16.40 segment is vetoed in every cell. With the defaults, 23 segments
+(6.8% of the confident ones) become uncertain and 316 stay confident. Their
+texts read as exchanges ("... as well as versioning yes", "... i don't want to
+minimize the word bgt oh yeah so mark smith and i ..."), but they were not
+checked against a speaker-labelled reference, so the false-veto rate is not
+measured. The margin-only rule is not enough on its own: a window over intro
+music reached margin 0.195 at a top similarity of 0.03. The veto adds 2198
+embeddings for this episode, 1.7 s on `atlas` on top of 12.9 s.
+
+Still open for 1b: the thresholds have been checked on episode 206 only, not on
+episode 205 as planned under "Risk" below, and the deployed worker has not
+re-run the job yet (item 3 under "Order and verification").
+
 The change is not classifier-only. It also needs:
 
 - `parse_known_speaker_config` and both job/claim config builders, which copy
@@ -293,9 +326,9 @@ This experiment is cheap and should run before committing to step 2.
    retained turns, and the sub-window experiment (1b) on the 10.02-16.40
    segment.
 2. Implement step 1 with the config, remote-summary, test and documentation
-   work listed there. 1b is required, because it is the only veto that catches
-   the episode 206 segment; 1a covers the cases where pyannote did see a
-   second speaker.
+   work listed there. 1b is done, because it is the only veto that catches
+   the episode 206 segment; 1a, which covers the cases where pyannote did see
+   a second speaker, is still open.
 3. Re-run episode 206 on the worker and compare the sidecar: the 10.02-16.40
    segment must no longer be confident for Will.
 4. Run the step 3 experiment.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,13 +60,17 @@ from transcriptions.formats import render_dote, render_podlove, render_text, val
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     DIARIZATION_STRATEGIES,
+    KNOWN_SPEAKER_NUMBER_OPTIONS,
     KNOWN_SPEAKER_STRATEGY,
+    MIN_MIXED_WINDOW_DURATION,
+    MIN_MIXED_WINDOW_HOP,
     KnownSpeakerConfig,
     ReferenceAudio,
     build_speakers_artifact,
     decode_mono_16k,
     extract_reference_windows,
     get_known_speaker_backend,
+    known_speaker_config_from_mapping,
     run_known_speaker_postprocess,
     slice_samples,
 )
@@ -738,12 +743,7 @@ def parse_known_speaker_config(value: object) -> dict[str, Any]:
     if value is None:
         return {}
     config = ensure_object(value, "diarization.known_speaker")
-    allowed_keys = {
-        "embedding_model",
-        "min_segment_duration",
-        "auto_accept_margin",
-        "min_top_similarity",
-    }
+    allowed_keys = {"embedding_model", *KNOWN_SPEAKER_NUMBER_OPTIONS}
     unknown_keys = sorted(set(config) - allowed_keys)
     if unknown_keys:
         raise ApiError(f"Unsupported diarization.known_speaker option: {', '.join(unknown_keys)}.")
@@ -751,11 +751,22 @@ def parse_known_speaker_config(value: object) -> dict[str, Any]:
     embedding_model = optional_string(config.get("embedding_model"))
     if embedding_model:
         normalized["embedding_model"] = embedding_model
-    for key in ("min_segment_duration", "auto_accept_margin", "min_top_similarity"):
+    for key in KNOWN_SPEAKER_NUMBER_OPTIONS:
         if key in config:
             normalized[key] = require_non_negative_number(
                 config.get(key), f"diarization.known_speaker.{key}"
             )
+    duration = normalized.get("mixed_window_duration")
+    if duration is not None and 0 < duration < MIN_MIXED_WINDOW_DURATION:
+        raise ApiError(
+            "diarization.known_speaker.mixed_window_duration must be 0 (off) or at least "
+            f"{MIN_MIXED_WINDOW_DURATION}."
+        )
+    hop = normalized.get("mixed_window_hop")
+    if hop is not None and hop < MIN_MIXED_WINDOW_HOP:
+        raise ApiError(
+            f"diarization.known_speaker.mixed_window_hop must be at least {MIN_MIXED_WINDOW_HOP}."
+        )
     return normalized
 
 
@@ -771,6 +782,8 @@ def require_non_negative_number(value: object, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError(f"{field_name} must be a number.")
     number = float(value)
+    if not math.isfinite(number):
+        raise ApiError(f"{field_name} must be a finite number.")
     if number < 0:
         raise ApiError(f"{field_name} must not be negative.")
     return number
@@ -1146,19 +1159,7 @@ def known_speaker_config_for_job(job: Job) -> KnownSpeakerConfig:
         raw_config = raw_diarization.get("known_speaker")
         if isinstance(raw_config, dict):
             config_data = raw_config
-    defaults = KnownSpeakerConfig()
-    return KnownSpeakerConfig(
-        embedding_model=config_data.get("embedding_model") or defaults.embedding_model,
-        min_segment_duration=float(
-            config_data.get("min_segment_duration", defaults.min_segment_duration)
-        ),
-        auto_accept_margin=float(
-            config_data.get("auto_accept_margin", defaults.auto_accept_margin)
-        ),
-        min_top_similarity=float(
-            config_data.get("min_top_similarity", defaults.min_top_similarity)
-        ),
-    )
+    return known_speaker_config_from_mapping(config_data)
 
 
 def build_known_speaker_references(job: Job) -> list[ReferenceAudio]:

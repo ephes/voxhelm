@@ -1562,6 +1562,9 @@ def test_known_speaker_completion_strips_private_worker_metadata(client, setting
                                 {"references": [{"url": private_reference_url}]},
                             ],
                             "segment_count": 1,
+                            "mixed_segment_count": 1,
+                            "mixed_window_margin": 0.15,
+                            "mixed_window_hop": float("nan"),
                             "confident_speaker_distribution": {
                                 "Johannes": 1,
                                 private_reference_url: 1,
@@ -1601,6 +1604,8 @@ def test_known_speaker_completion_strips_private_worker_metadata(client, setting
     assert metadata["diarization"]["known_speaker_summary"] == {
         "strategy": "pyannote_known_speaker",
         "segment_count": 1,
+        "mixed_segment_count": 1,
+        "mixed_window_margin": 0.15,
         "known_speakers": ["Johannes"],
         "confident_speaker_distribution": {"Johannes": 1},
         "raw_diarization_available": True,
