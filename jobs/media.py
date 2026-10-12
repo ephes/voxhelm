@@ -94,13 +94,21 @@ def reserve_temp_media_path(*, suffix: str) -> Path:
 
 
 def write_uploaded_media_to_tempfile(chunks: Iterable[bytes], *, suffix: str) -> Path:
-    file_handle = reserve_temp_media_path(suffix=suffix).open("wb")
+    """Copy uploaded chunks into a reserved temp file and return its path.
+
+    The caller owns the returned file and removes it when done. A failed copy
+    (broken upload stream, disk write error) removes the partial file here, so
+    an interrupted upload leaves no local media behind.
+    """
+    temp_path = reserve_temp_media_path(suffix=suffix)
     try:
-        for chunk in chunks:
-            file_handle.write(chunk)
-    finally:
-        file_handle.close()
-    return Path(file_handle.name)
+        with temp_path.open("wb") as file_handle:
+            for chunk in chunks:
+                file_handle.write(chunk)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
 
 
 MAX_URL_REDIRECTS: Final[int] = 5
