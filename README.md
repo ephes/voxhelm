@@ -292,8 +292,11 @@ Staging registers the upload in the database before it writes the object to the
 artifact backend, so a stored staged object always has a row that expiry cleanup
 can find. If the object upload or the final row update fails, Voxhelm deletes
 the object and the row again and returns the error; if that deletion fails as
-well, the row is kept and the normal expiry cleanup retries the object deletion
-after `VOXHELM_STAGED_INPUT_RETENTION_SECONDS`.
+well, the row is kept (or written again) as already expired, so the next expiry
+cleanup retries the object deletion. While the object is still uploading the
+registration carries a 24-hour in-progress expiry, so a concurrent cleanup never
+removes it; `VOXHELM_STAGED_INPUT_RETENTION_SECONDS` counts from the finished
+upload.
 If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.

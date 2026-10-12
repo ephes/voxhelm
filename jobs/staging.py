@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
@@ -26,6 +26,10 @@ from jobs.models import Job, StagedMedia
 from transcriptions.errors import ApiError
 
 logger = logging.getLogger(__name__)
+
+# A registration whose object is still uploading must not look expired to the
+# cleanup of a concurrent request, however short the configured retention is.
+STAGED_UPLOAD_IN_PROGRESS_SECONDS = 24 * 60 * 60
 
 
 def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
@@ -68,7 +72,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             size_bytes=upload_size,
             storage_backend=store.backend_name,
             storage_identity=current_artifact_store_identity(),
-            expires_at=staged_media_expiry(),
+            expires_at=timezone.now() + timedelta(seconds=STAGED_UPLOAD_IN_PROGRESS_SECONDS),
         )
         staged.storage_key = build_staged_media_key(staged=staged)
         with transaction.atomic(durable=True):
@@ -82,11 +86,17 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             staged.storage_backend = stored.backend
             staged.storage_key = stored.key
             staged.size_bytes = stored.size_bytes
-            # Retention counts from the finished upload, not from registration.
-            staged.expires_at = staged_media_expiry()
-            staged.save(
-                update_fields=["storage_backend", "storage_key", "size_bytes", "expires_at"]
+            # Retention counts from the finished upload; until here the row
+            # carried the in-progress expiry.
+            staged.expires_at = timezone.now() + timedelta(
+                seconds=settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS
             )
+            # Own atomic block: a failed update must leave the connection usable
+            # for the compensation below even when a transaction is open.
+            with transaction.atomic():
+                staged.save(
+                    update_fields=["storage_backend", "storage_key", "size_bytes", "expires_at"]
+                )
         except BaseException:
             discard_unfinished_staged_media(staged=staged)
             raise
@@ -95,15 +105,12 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
         temp_path.unlink(missing_ok=True)
 
 
-def staged_media_expiry() -> datetime:
-    return timezone.now() + timedelta(seconds=settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS)
-
-
 def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
     """Remove the object and row of a staging attempt that did not complete.
 
     Never raises, so the original staging error propagates. On failure the row
-    is kept: it is the record expiry cleanup uses to retry the object deletion.
+    is kept, or written again if something removed it meanwhile: it is the
+    record expiry cleanup uses to retry the object deletion.
     """
     try:
         delete_staged_media(staged=staged, missing_ok=False)
@@ -113,6 +120,15 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
             staged.id,
             staged.storage_key,
         )
+        try:
+            staged.expires_at = timezone.now()
+            staged.save()
+        except Exception:
+            logger.exception(
+                "Could not keep a cleanup record for staged upload %s (%s).",
+                staged.id,
+                staged.storage_key,
+            )
 
 
 def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> None:

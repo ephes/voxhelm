@@ -767,6 +767,60 @@ def test_staging_keeps_row_for_expiry_cleanup_when_compensation_fails(
 
 
 @pytest.mark.django_db
+def test_staging_registration_survives_concurrent_expiry_cleanup_during_upload(
+    settings, monkeypatch, staging_temp_paths
+):
+    settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS = 0
+    real_put_file = FilesystemArtifactStore.put_file
+
+    def put_file_during_other_request(self, **kwargs):
+        stored = real_put_file(self, **kwargs)
+        # Another staging/submission request sweeps expired uploads meanwhile.
+        jobs_staging.cleanup_expired_staged_media()
+        return stored
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_file_during_other_request)
+
+    staged = stage_audio_directly()
+
+    stored = StagedMedia.objects.get(id=staged.id)
+    assert stored.expires_at <= timezone.now()
+    assert stored_staged_objects(settings) == [
+        Path(settings.VOXHELM_ARTIFACT_ROOT) / stored.storage_key
+    ]
+
+
+@pytest.mark.django_db
+def test_staging_restores_cleanup_record_when_row_vanished_and_compensation_fails(
+    settings, monkeypatch, staging_temp_paths
+):
+    real_put_file = FilesystemArtifactStore.put_file
+
+    def put_file_then_lose_row(self, **kwargs):
+        stored = real_put_file(self, **kwargs)
+        StagedMedia.objects.all().delete()
+        return stored
+
+    def failing_delete(self, *, key: str) -> None:
+        raise OSError("delete exploded")
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_file_then_lose_row)
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", failing_delete)
+        with pytest.raises(DatabaseError):
+            stage_audio_directly()
+
+    leftover = StagedMedia.objects.get()
+    object_path = Path(settings.VOXHELM_ARTIFACT_ROOT) / leftover.storage_key
+    assert stored_staged_objects(settings) == [object_path]
+
+    jobs_staging.cleanup_expired_staged_media()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+
+
+@pytest.mark.django_db
 def test_expired_staged_uploads_are_cleaned_on_next_stage_request(client, settings):
     first = stage_upload(
         client,
