@@ -254,6 +254,10 @@ ingress, which forwards `X-Forwarded-Proto: https`.
 
 ## OpenAI-Compatible API
 
+The synchronous speech and transcription JSON endpoints require UTF-8 JSON.
+Invalid UTF-8 returns HTTP 400 with the same `invalid_request_error` envelope
+as malformed JSON, before any download or inference. Authentication runs first.
+
 Multipart upload:
 
 ```bash

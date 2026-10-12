@@ -1171,3 +1171,31 @@ def test_speech_export_failure_cleans_source_and_output(client, monkeypatch, tmp
     assert len(targets) == 1
     assert not targets[0].exists()
     assert not source.exists()
+
+
+@pytest.mark.parametrize("endpoint", ["speech", "transcriptions"])
+@pytest.mark.parametrize("authenticated", [True, False])
+def test_sync_json_invalid_utf8(client, monkeypatch, endpoint, authenticated):
+    from unittest.mock import Mock
+
+    download = Mock(side_effect=AssertionError("must not download"))
+    synthesize = Mock(side_effect=AssertionError("must not synthesize"))
+    transcribe = Mock(side_effect=AssertionError("must not transcribe"))
+    monkeypatch.setattr("transcriptions.views.download_allowed_url_to_tempfile", download)
+    monkeypatch.setattr("transcriptions.views.transcribe_audio", transcribe)
+    monkeypatch.setattr("synthesis.views.synthesize_text", synthesize)
+    response = client.post(
+        f"/v1/audio/{endpoint}",
+        data=b"\xff",
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token" if authenticated else "",
+    )
+    assert response.status_code == (400 if authenticated else 401)
+    if authenticated:
+        assert response.json()["error"] == {
+            "message": "Request body was not valid JSON.",
+            "type": "invalid_request_error",
+        }
+    download.assert_not_called()
+    synthesize.assert_not_called()
+    transcribe.assert_not_called()

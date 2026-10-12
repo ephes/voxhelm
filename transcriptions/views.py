@@ -197,7 +197,7 @@ def parse_multipart_request(request: HttpRequest) -> ParsedRequest:
 def parse_json_request(request: HttpRequest) -> ParsedRequest:
     try:
         payload = json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ApiError("Request body was not valid JSON.") from exc
     if not isinstance(payload, dict):
         raise ApiError("JSON request body must be an object.")
