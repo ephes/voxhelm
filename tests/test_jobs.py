@@ -13,13 +13,15 @@ from typing import Any, cast
 import pytest
 from asgiref.local import Local
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, connection, connections, transaction
+from django.db import DatabaseError, IntegrityError, connection, connections, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
 from django_tasks import task_backends
 
+from jobs import media as jobs_media
 from jobs import services
-from jobs.artifacts import get_artifact_store
+from jobs import staging as jobs_staging
+from jobs.artifacts import FilesystemArtifactStore, get_artifact_store
 from jobs.fingerprints import stored_job_request_fingerprint
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
@@ -630,6 +632,192 @@ def test_malformed_upload_id_is_rejected(client, settings):
 
     assert response.status_code == 400
     assert response.json()["error"]["message"] == "input.upload_id must be a UUID string."
+
+
+def stored_staged_objects(settings) -> list[Path]:
+    root = Path(settings.VOXHELM_ARTIFACT_ROOT)
+    return sorted(path for path in root.rglob("*") if path.is_file())
+
+
+@pytest.fixture
+def staging_temp_paths(monkeypatch, tmp_path) -> list[Path]:
+    reserved: list[Path] = []
+
+    def reserve(*, suffix: str) -> Path:
+        path = tmp_path / f"staging-temp-{len(reserved)}{suffix}"
+        path.touch()
+        reserved.append(path)
+        return path
+
+    monkeypatch.setattr(jobs_media, "reserve_temp_media_path", reserve)
+    return reserved
+
+
+def stage_audio_directly() -> StagedMedia:
+    return jobs_staging.stage_uploaded_audio(
+        producer="archive",
+        upload=SimpleUploadedFile("episode.mp3", b"private-audio", content_type="audio/mpeg"),
+    )
+
+
+@pytest.mark.django_db
+def test_staging_keeps_object_and_row_on_success(settings, staging_temp_paths):
+    staged = stage_audio_directly()
+
+    stored = StagedMedia.objects.get(id=staged.id)
+    assert stored.size_bytes == len(b"private-audio")
+    assert stored.storage_backend == "filesystem"
+    assert stored_staged_objects(settings) == [
+        Path(settings.VOXHELM_ARTIFACT_ROOT) / stored.storage_key
+    ]
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+def test_staging_uploads_nothing_when_registration_fails(settings, monkeypatch, staging_temp_paths):
+    def failing_save(self, *args, **kwargs):
+        raise DatabaseError("registration exploded")
+
+    monkeypatch.setattr(StagedMedia, "save", failing_save)
+
+    with pytest.raises(DatabaseError, match="registration exploded"):
+        stage_audio_directly()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+def test_staging_removes_object_and_row_when_final_row_update_fails(
+    settings, monkeypatch, staging_temp_paths
+):
+    real_save = StagedMedia.save
+
+    def failing_update(self, *args, **kwargs):
+        if kwargs.get("update_fields"):
+            raise DatabaseError("update exploded")
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(StagedMedia, "save", failing_update)
+
+    with pytest.raises(DatabaseError, match="update exploded"):
+        stage_audio_directly()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+def test_staging_removes_partial_object_and_row_when_upload_fails(
+    settings, monkeypatch, staging_temp_paths
+):
+    def failing_put_file(self, *, key: str, source_path: Path, content_type: str):
+        target = self.root / key
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"partial")
+        raise OSError("artifact store exploded")
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", failing_put_file)
+
+    with pytest.raises(OSError, match="artifact store exploded"):
+        stage_audio_directly()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+def test_staging_keeps_row_for_expiry_cleanup_when_compensation_fails(
+    settings, monkeypatch, staging_temp_paths
+):
+    real_save = StagedMedia.save
+
+    def failing_update(self, *args, **kwargs):
+        if kwargs.get("update_fields"):
+            raise DatabaseError("update exploded")
+        return real_save(self, *args, **kwargs)
+
+    def failing_delete(self, *, key: str) -> None:
+        raise OSError("delete exploded")
+
+    monkeypatch.setattr(StagedMedia, "save", failing_update)
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", failing_delete)
+        with pytest.raises(DatabaseError, match="update exploded"):
+            stage_audio_directly()
+
+    # The original error won, and the row still points at the leftover object.
+    leftover = StagedMedia.objects.get()
+    object_path = Path(settings.VOXHELM_ARTIFACT_ROOT) / leftover.storage_key
+    assert stored_staged_objects(settings) == [object_path]
+    assert leftover.storage_identity["backend"] == "filesystem"
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+    # Expiry cleanup finds the row and removes the object once deletion works.
+    StagedMedia.objects.filter(id=leftover.id).update(
+        expires_at=timezone.now() - timedelta(seconds=1)
+    )
+    jobs_staging.cleanup_expired_staged_media()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+
+
+@pytest.mark.django_db
+def test_staging_registration_survives_concurrent_expiry_cleanup_during_upload(
+    settings, monkeypatch, staging_temp_paths
+):
+    settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS = 0
+    real_put_file = FilesystemArtifactStore.put_file
+
+    def put_file_during_other_request(self, **kwargs):
+        stored = real_put_file(self, **kwargs)
+        # Another staging/submission request sweeps expired uploads meanwhile.
+        jobs_staging.cleanup_expired_staged_media()
+        return stored
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_file_during_other_request)
+
+    staged = stage_audio_directly()
+
+    stored = StagedMedia.objects.get(id=staged.id)
+    assert stored.expires_at <= timezone.now()
+    assert stored_staged_objects(settings) == [
+        Path(settings.VOXHELM_ARTIFACT_ROOT) / stored.storage_key
+    ]
+
+
+@pytest.mark.django_db
+def test_staging_restores_cleanup_record_when_row_vanished_and_compensation_fails(
+    settings, monkeypatch, staging_temp_paths
+):
+    real_put_file = FilesystemArtifactStore.put_file
+
+    def put_file_then_lose_row(self, **kwargs):
+        stored = real_put_file(self, **kwargs)
+        StagedMedia.objects.all().delete()
+        return stored
+
+    def failing_delete(self, *, key: str) -> None:
+        raise OSError("delete exploded")
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_file_then_lose_row)
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", failing_delete)
+        with pytest.raises(DatabaseError):
+            stage_audio_directly()
+
+    leftover = StagedMedia.objects.get()
+    object_path = Path(settings.VOXHELM_ARTIFACT_ROOT) / leftover.storage_key
+    assert stored_staged_objects(settings) == [object_path]
+
+    jobs_staging.cleanup_expired_staged_media()
+
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
 
 
 @pytest.mark.django_db
