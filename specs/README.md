@@ -200,6 +200,7 @@ Active top-level spec set:
 - [`delivery-chunks.md`](./delivery-chunks.md)
 - [`implementation-sequence.md`](./implementation-sequence.md)
 - [`diarization-quality-research.md`](./diarization-quality-research.md)
+- [`2026-10-12_mixed_speaker_segments.md`](./2026-10-12_mixed_speaker_segments.md)
 - [`remote-transcription-workers.md`](./remote-transcription-workers.md)
 - [`README.md`](./README.md)
 
