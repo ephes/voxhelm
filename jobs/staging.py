@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -23,8 +25,20 @@ from jobs.media import (
 from jobs.models import Job, StagedMedia
 from transcriptions.errors import ApiError
 
+logger = logging.getLogger(__name__)
+
 
 def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
+    """Store an uploaded audio file as staged media and return its row.
+
+    The ``StagedMedia`` row is committed before the object is uploaded, so a
+    stored object always has a row that expiry cleanup can find. If the upload
+    or the final row update fails, the object and the row are removed again; if
+    that removal fails too, the row stays and expiry cleanup retries it.
+
+    Must not run inside a caller's transaction: a rollback there would drop the
+    row and orphan the object. The durable registration block enforces this.
+    """
     cleanup_expired_staged_media()
     upload_size = upload.size or 0
     if upload_size > settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES:
@@ -44,32 +58,61 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
         )
 
     temp_path = write_uploaded_media_to_tempfile(upload.chunks(), suffix=suffix)
-    staged = StagedMedia(
-        id=uuid.uuid4(),
-        producer=producer,
-        original_filename=original_filename,
-        content_type=content_type or "application/octet-stream",
-        size_bytes=upload_size,
-        storage_backend="",
-        storage_key="",
-        expires_at=timezone.now()
-        + timedelta(seconds=settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS),
-    )
     try:
         store = get_artifact_store()
-        stored = store.put_file(
-            key=build_staged_media_key(staged=staged),
-            source_path=temp_path,
-            content_type=staged.content_type,
+        staged = StagedMedia(
+            id=uuid.uuid4(),
+            producer=producer,
+            original_filename=original_filename,
+            content_type=content_type or "application/octet-stream",
+            size_bytes=upload_size,
+            storage_backend=store.backend_name,
+            storage_identity=current_artifact_store_identity(),
+            expires_at=staged_media_expiry(),
         )
-        staged.storage_backend = stored.backend
-        staged.storage_key = stored.key
-        staged.storage_identity = current_artifact_store_identity()
-        staged.size_bytes = stored.size_bytes
-        staged.save()
+        staged.storage_key = build_staged_media_key(staged=staged)
+        with transaction.atomic(durable=True):
+            staged.save(force_insert=True)
+        try:
+            stored = store.put_file(
+                key=staged.storage_key,
+                source_path=temp_path,
+                content_type=staged.content_type,
+            )
+            staged.storage_backend = stored.backend
+            staged.storage_key = stored.key
+            staged.size_bytes = stored.size_bytes
+            # Retention counts from the finished upload, not from registration.
+            staged.expires_at = staged_media_expiry()
+            staged.save(
+                update_fields=["storage_backend", "storage_key", "size_bytes", "expires_at"]
+            )
+        except BaseException:
+            discard_unfinished_staged_media(staged=staged)
+            raise
         return staged
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def staged_media_expiry() -> datetime:
+    return timezone.now() + timedelta(seconds=settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS)
+
+
+def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
+    """Remove the object and row of a staging attempt that did not complete.
+
+    Never raises, so the original staging error propagates. On failure the row
+    is kept: it is the record expiry cleanup uses to retry the object deletion.
+    """
+    try:
+        delete_staged_media(staged=staged, missing_ok=False)
+    except Exception:
+        logger.exception(
+            "Could not remove unfinished staged upload %s (%s); expiry cleanup will retry.",
+            staged.id,
+            staged.storage_key,
+        )
 
 
 def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> None:
