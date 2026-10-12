@@ -759,3 +759,18 @@ which cannot open a connection or create a file.
 bounds ffmpeg video-to-audio processing on the server and remote workers.
 Expiry kills and reaps ffmpeg. Every failed extraction removes its reserved WAV;
 a successful extraction leaves the WAV for its caller to consume and remove.
+
+Piper models are cached per worker process by resolved model/config paths and
+file metadata (device, inode, size, nanosecond modification and change times),
+with at most eight least-recently-used entries. Unchanged artifacts reuse the
+loaded voice regardless of its registry key; replacing or modifying either file
+reloads it on the next request. Publish complete model/config pairs while the
+worker is stopped to avoid requests observing a partially updated pair. Restart
+workers after changes on filesystems that do not reliably report metadata changes.
+
+MP3/OGG speech export runs ffmpeg with a positive integer deadline configured by
+`VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS` (default `300` seconds). Timeout kills
+and reaps the converter; timeout, startup and nonzero-exit failures remove the
+owned output and raise a synthesis error (HTTP 500 `server_error` on the sync
+API, failed batch job). Callers still own and clean up the source WAV. WAV
+passthrough does not invoke ffmpeg or use this deadline.

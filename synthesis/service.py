@@ -5,6 +5,7 @@ import logging
 import subprocess
 import tempfile
 import wave
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -118,7 +119,11 @@ class BackendProtocol(Protocol):
 
 
 _PIPER_LOCK = Lock()
-_PIPER_VOICE_CACHE: dict[str, object] = {}
+# LRU entries are process-local and invalidated by artifact metadata changes.
+_PIPER_CACHE_LIMIT = 8
+_PIPER_CACHE_LOCK = Lock()
+ArtifactIdentity = tuple[Path, int, int, int, int, int]
+_PIPER_VOICE_CACHE: OrderedDict[tuple[ArtifactIdentity, ArtifactIdentity], object] = OrderedDict()
 
 
 class PiperBackend:
@@ -457,9 +462,17 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run kills and waits for the child before raising.
+        target_path.unlink(missing_ok=True)
+        raise RuntimeError("Audio conversion exceeded the configured export deadline.") from exc
+    except OSError as exc:
+        target_path.unlink(missing_ok=True)
+        raise RuntimeError("Audio conversion could not start ffmpeg.") from exc
     except BaseException:
-        # e.g. a missing ffmpeg binary (FileNotFoundError) must not leak the target file.
+        # Interruptions must not leak the reserved output either.
         target_path.unlink(missing_ok=True)
         raise
     if completed.returncode != 0:
@@ -539,13 +552,31 @@ def load_piper_voice(voice: InstalledVoice):
             "piper-tts is not installed. Install the project dependencies first."
         ) from exc
 
-    cached = _PIPER_VOICE_CACHE.get(voice.key)
-    if cached is not None:
-        return cached
+    with _PIPER_CACHE_LOCK:
+        identity = (
+            piper_artifact_identity(voice.model_path),
+            piper_artifact_identity(voice.config_path),
+        )
+        cached = _PIPER_VOICE_CACHE.get(identity)
+        if cached is not None:
+            _PIPER_VOICE_CACHE.move_to_end(identity)
+            return cached
 
-    loaded_voice = PiperVoice.load(voice.model_path, config_path=voice.config_path)
-    _PIPER_VOICE_CACHE[voice.key] = loaded_voice
-    return loaded_voice
+        loaded_voice = PiperVoice.load(identity[0][0], config_path=identity[1][0])
+        # Discard superseded versions at these paths before publishing the new entry.
+        for existing in list(_PIPER_VOICE_CACHE):
+            if (existing[0][0], existing[1][0]) == (identity[0][0], identity[1][0]):
+                del _PIPER_VOICE_CACHE[existing]
+        _PIPER_VOICE_CACHE[identity] = loaded_voice
+        if len(_PIPER_VOICE_CACHE) > _PIPER_CACHE_LIMIT:
+            _PIPER_VOICE_CACHE.popitem(last=False)
+        return loaded_voice
+
+
+def piper_artifact_identity(path: Path) -> ArtifactIdentity:
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    return (resolved, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def cleanup_paths(*paths: Path) -> None:
