@@ -421,14 +421,19 @@ def test_worker_api_refuses_credential_redirects(status, operation):
             pass
 
         def do_POST(self):  # noqa: N802
+            # Drain the POST body before closing; unread bytes can cause a TCP
+            # reset that hides an otherwise-successful response on macOS.
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             initial.append(self.headers.get("Authorization"))
             self.send_response(status)
             self.send_header(
                 "Location", f"http://127.0.0.1:{destination.server_port}/credential-destination"
             )
-            self.end_headers()
             # A redirect body can reflect a credential; it must never be displayed.
-            self.wfile.write(b'{"job": {}, "echo": "synthetic-worker-credential"}')
+            body = b'{"job": {}, "echo": "synthetic-worker-credential"}'
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
     origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
