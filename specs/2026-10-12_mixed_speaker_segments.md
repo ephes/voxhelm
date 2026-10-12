@@ -1,7 +1,8 @@
-# Mixed-speaker transcript segments (plan, step 1b implemented)
+# Mixed-speaker transcript segments (plan, step 1b deployed)
 
-Status: 2026-10-12. Step 1b (sub-window veto) is implemented; steps 1a, 2 and 3
-are still plan. Revised after a fresh-context review by gpt-6.1-sol (high
+Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
+voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
+plan. Revised after a fresh-context review by gpt-6.1-sol (high
 effort) on the same day; the main findings were checked against the source and
 are folded in below. The open question is settled, see "Findings" below:
 pyannote emitted no turn for the greeting, the sub-window classification does
@@ -249,9 +250,19 @@ measured. The margin-only rule is not enough on its own: a window over intro
 music reached margin 0.195 at a top similarity of 0.03. The veto adds 2198
 embeddings for this episode, 1.7 s on `atlas` on top of 12.9 s.
 
+Verified in production on 2026-10-12 (item 3 under "Order and verification"):
+job `4d50f8c2-8074-42a2-981d-2f826e80a81e` re-ran episode 206 on worker `atlas`
+with voxhelm 0.1.3 and reproduced the local numbers: 454 segments, 316
+confident, 138 uncertain, `mixed_segment_count` 23, Will 116 / Carlton 200.
+Segment 10.02-16.40 has `speaker: null` with reason `mixed_speakers` and the
+Carlton window 10.77-12.27 (similarity 0.444214, margin 0.277257). django-cast
+consumed the sidecar unchanged. In the first 75 s, 7 of 12 transcript lines now
+carry no name; the vetoes at 16.40-21.84 and 28.02-33.34 look plausible from
+the text but were not checked against the audio.
+
 Still open for 1b: the thresholds have been checked on episode 206 only, not on
-episode 205 as planned under "Risk" below, and the deployed worker has not
-re-run the job yet (item 3 under "Order and verification").
+episode 205 as planned under "Risk" below, and the false-veto rate is not
+measured.
 
 The change is not classifier-only. It also needs:
 
