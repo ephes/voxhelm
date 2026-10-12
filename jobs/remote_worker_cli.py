@@ -15,7 +15,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
 
@@ -92,6 +92,13 @@ class WorkerConfig:
     poll_seconds: int = DEFAULT_POLL_SECONDS
     http_timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+
+
+class _NoWorkerRedirects(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Request | None:
+        return None
 
 
 class WorkerClient:
@@ -199,10 +206,18 @@ class WorkerClient:
             },
         )
         try:
-            with urlopen(request, timeout=self.config.http_timeout_seconds) as response:
+            with build_opener(_NoWorkerRedirects()).open(
+                request, timeout=self.config.http_timeout_seconds
+            ) as response:
                 body = response.read()
                 return response.status, parse_json_response(body)
         except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                exc.close()
+                raise WorkerError(
+                    f"Voxhelm worker API redirects are refused (HTTP {exc.code}); "
+                    "configure the canonical worker API URL."
+                ) from None
             detail = exc.read().decode("utf-8", errors="replace").strip()
             raise WorkerHttpError(status=exc.code, detail=detail or exc.reason) from exc
         except URLError as exc:
