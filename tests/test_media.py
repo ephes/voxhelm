@@ -108,3 +108,39 @@ def test_write_uploaded_media_removes_tempfile_when_write_fails(
     assert len(handles) == 1
     assert handles[0].closed
     assert not (handles[0].name and Path(handles[0].name).exists())
+
+
+@pytest.mark.parametrize("mode", ["hang", "missing", "exit", "success"])
+def test_extraction_budget_and_cleanup(mode, tmp_path, settings, reserved_paths):
+    import os
+    import time
+
+    executable = tmp_path / "ffmpeg"
+    pid_file = tmp_path / "child.pid"
+    if mode != "missing":
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            + {
+                "hang": "time.sleep(10)\n",
+                "exit": "sys.exit(1)\n",
+                "success": "open(sys.argv[-1], 'wb').write(b'RIFFfake-wave')\n",
+            }[mode]
+        )
+        executable.chmod(0o755)
+    settings.VOXHELM_FFMPEG_BIN = str(executable)
+    settings.VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS = 0.5 if mode == "hang" else 2
+    started = time.monotonic()
+    if mode == "success":
+        result = extract_audio_from_video(source_path=tmp_path / "video.mp4")
+        assert result.read_bytes() == b"RIFFfake-wave"
+    else:
+        with pytest.raises(RuntimeError, match="ffmpeg audio extraction"):
+            extract_audio_from_video(source_path=tmp_path / "video.mp4")
+        assert len(reserved_paths) == 1
+        assert not reserved_paths[0].exists()
+    assert time.monotonic() - started < 3
+    if pid_file.exists():
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)

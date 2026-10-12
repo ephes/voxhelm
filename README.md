@@ -714,3 +714,17 @@ Current limitation: the lane scheduler gates Voxhelm's HTTP, batch, and Wyoming
 entry points, but it does not reach inside the WhisperKit sidecar itself. Once
 Voxhelm has admitted a WhisperKit request, the sidecar's internal inference
 concurrency remains outside that scheduler's direct control.
+
+### Media processing budgets
+
+`VOXHELM_URL_FETCH_TIMEOUT_SECONDS` (default `60`, positive integer) is one
+elapsed budget for DNS, connection attempts, redirects, response headers and
+body download, shared by sync inputs, batch inputs and speaker references.
+Slow progress does not reset it. Expiry interrupts network sockets and removes
+partial temporary media; an OS DNS lookup may finish later in a daemon thread,
+which cannot open a connection or create a file.
+
+`VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS` (default `900`, positive integer)
+bounds ffmpeg video-to-audio processing on the server and remote workers.
+Expiry kills and reaps ffmpeg. Every failed extraction removes its reserved WAV;
+a successful extraction leaves the WAV for its caller to consume and remove.
