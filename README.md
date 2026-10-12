@@ -34,8 +34,11 @@ diarization in each. It removes two artifact classes:
   identical after light normalization (casefold, collapsed whitespace, stripped
   surrounding punctuation) is collapsed to a single segment. The first segment's
   start is kept and its end extended to the run's last end. The run must reach
-  `VOXHELM_SANITIZE_REPEAT_THRESHOLD` (default `4`) consecutive repeats, which
-  catches the real loops (9–84×) while leaving natural backchannels and
+  `VOXHELM_SANITIZE_REPEAT_THRESHOLD` (default `4`) consecutive repeats, with
+  at most **one second** between the previous cue end and the next cue start.
+  Longer gaps and backward-moving starts or ends split runs. Overlapping cues
+  are eligible only when neither boundary moves backward. The repeat threshold
+  catches the observed loops (9–84×) while leaving natural backchannels and
   rhetorical repetition inside a single cue untouched.
 - **Non-speech / credit hallucinations** — subtitle-credit cues
   (`Untertitelung des ZDF, 2020`, `Untertitel im Auftrag des ZDF für funk, 2017`,
@@ -48,6 +51,26 @@ The sanitizer is conservative by design: it biases toward false negatives over
 removing genuine speech, only ever removes or collapses artifact segments, and
 returns clean transcripts unchanged. Disable it with
 `VOXHELM_SANITIZE_TRANSCRIPT=false` only to inspect raw decoder output.
+
+## Transcript numeric validation
+
+Every cue must have finite start and end timestamps whose multiplication by
+1000 remains finite, including empty-text cues.
+NaN, positive/negative infinity and values too large to scale to milliseconds raise a controlled `TranscriptionError`
+before sanitization (even when disabled), rendering or transcript artifact
+publication. Local jobs and remote workers validate the entire cue list before
+writing the first transcript artifact; source audio intermediates may already
+exist. The same rejection policy applies to text, verbose JSON, VTT, DOTE and
+Podlove. Finite negative/reversed timestamps retain the existing policy:
+verbose JSON preserves raw boundaries; timed formats clamp reversed ends to
+starts and render negative times as zero.
+
+Known-speaker reference and segment embeddings must be nonempty and contain
+only finite coordinates. Invalid evidence raises `KnownSpeakerError`, aborting
+classification before a speaker sidecar can be published. Scaled averaging and
+normalization keep very large or very small finite embeddings usable without
+avoidable overflow/underflow. Zero vectors remain valid: their cosine score is
+zero and they cannot clear the default auto-accept similarity threshold.
 
 ## WebVTT Output
 

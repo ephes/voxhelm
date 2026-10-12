@@ -55,7 +55,7 @@ from transcriptions.diarization import (
     diarize_audio,
 )
 from transcriptions.errors import ApiError
-from transcriptions.formats import render_dote, render_podlove, render_text
+from transcriptions.formats import render_dote, render_podlove, render_text, validate_timestamps
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     DIARIZATION_STRATEGIES,
@@ -1268,6 +1268,7 @@ def persist_transcription_output_artifacts(
     result: TranscriptionResult,
     speakers_artifact: dict[str, Any] | None = None,
 ) -> None:
+    validate_timestamps(result)
     requested_formats = set(
         job.output_data.get("formats", list(DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS))
     )

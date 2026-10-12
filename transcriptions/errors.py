@@ -13,3 +13,7 @@ class ApiError(RuntimeError):
         self.message = message
         self.status = status
         self.error_type = error_type
+
+
+class TranscriptionError(RuntimeError):
+    """Raised when backend transcript data cannot safely be published."""
