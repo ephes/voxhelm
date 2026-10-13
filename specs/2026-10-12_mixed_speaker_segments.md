@@ -1,4 +1,4 @@
-# Mixed-speaker transcript segments (step 1b and turn corroboration deployed, re-cut implemented)
+# Mixed-speaker transcript segments (step 1b, turn corroboration and re-cut deployed)
 
 Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
 voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
@@ -559,7 +559,7 @@ length (episode 205, 12.30-12.33 "Hello, Will."). Both episodes have the same
 two speakers. The naming rule is far more permissive than the deployed
 acceptance policy and was not tuned. Text stays lowercase and unpunctuated.
 
-#### Re-cut as implemented (2026-10-13, not deployed)
+#### Re-cut as implemented (2026-10-13, deployed with voxhelm 0.1.5)
 
 The prototype is now `build_speaker_track`, `track_turns`, `resegment_result`
 and the track acceptance in `classify_segments`
@@ -586,6 +586,17 @@ agreement is lowest on episode 206 (30 of 37): it contains the interjections
 pyannote attributes to the surrounding speaker, such as the greeting, so the
 disagreements are not all errors, but none of them was checked by ear.
 Transcription with `-p 1` took 108 s instead of 69 s for episode 206.
+
+Verified in production on 2026-10-13: job
+`768290ef-e343-4702-8263-147befa96463` re-ran episode 206 on worker `atlas`
+with voxhelm 0.1.5 and reproduced the episode 206 column and the opening
+exactly (519 segments, 490 confident, 29 uncertain, 0 mixed, 44 corroborated,
+138 from a split, 81 by track, Will 205 / Carlton 285). django-cast matched
+all 519 sidecar segments to the Podlove, VTT and DOTe artifacts by start time
+without changes on its side. `processing_seconds` was 250.3, against 142.1
+for the 0.1.4 job; the local 190 s estimate left out the anonymous pyannote
+run. Not yet checked against the audio by ear. 41 segments are shorter than
+1 s, 14 shorter than 0.5 s; these are Whisper's own short segments.
 
 ## Order and verification
 
