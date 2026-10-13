@@ -408,6 +408,63 @@ instrumentation, before using this experiment as an adoption gate.
 
 This experiment is cheap and should run before committing to step 2.
 
+#### Results (2026-10-13, episode 206, `atlas`)
+
+Measured on the full episode with `whisper-cli` and `ggml-large-v3.bin`, called
+directly with the worker's arguments (`-l en -np --suppress-nst`) on the same
+16 kHz WAV; "punctuated" is the share of segments containing `.`, `?`, `!` or
+`,`. Raw decoder output, not sanitized.
+
+| Variant | Segments | Punctuated | Words | Mean segment |
+| --- | --- | --- | --- | --- |
+| deployed: `-p 4 --max-context 0` | 454 | 13% | 7453 | 4.8 s |
+| `-p 1 --max-context 0` | 446 | 21% | - | 4.9 s |
+| `-p 1 --max-context -1` | 412 | 1% | - | 5.3 s |
+| `-p 4 --max-context -1` | 418 | 1% | - | 5.2 s |
+| `-p 4 --max-context 0 --prompt P` (with or without `--carry-initial-prompt`) | 454 | 13% | 7453 | 4.8 s |
+| `-p 4 --max-context 32 --prompt P --carry-initial-prompt` | 339 | 98% | 5610 | 6.2 s |
+| `-p 4 --max-context 64 --prompt P --carry-initial-prompt` | 442 | 82% | 6709 | 4.8 s |
+| `-p 4 --max-context 32 --prompt P` | 873 | 88% | 6614 | 2.3 s |
+| MLX `whisper-large-v3-mlx`, worker settings | 549 | 46% | - | 3.9 s |
+
+`P` is "Hello, and welcome to another episode of Django Chat. I'm Will Vincent,
+joined by Carlton Gibson. Hi, Carlton!".
+
+What this shows:
+
+- `-p 4` is not the cause, and the hypothesis is half right: enabling
+  previous-text conditioning makes it worse, because the lowercase style of the
+  first window is then carried through the whole file.
+- **With `--max-context 0` whisper.cpp ignores `--prompt` entirely**: the output
+  is identical with and without it. The API `prompt` parameter therefore has no
+  effect on the whisper.cpp backend as deployed. Not fixed here.
+- The style is decided per 30 s window. The first 90 s of the same WAV give 0%
+  punctuated segments as full 30 s windows (`-p 1`) and 77% as 22.5 s chunks
+  (`-p 4` on a 90 s cut); the first 300 s give 32% / 65% / 67% in 30 / 25 / 20 s
+  chunks. MLX with the same model shows the same lowercase start, so this is
+  model behaviour, not a whisper.cpp artefact.
+- A carried, punctuated prompt with a small context budget fixes the style:
+  sentence-shaped segments, "Hello, Will! Welcome back!" as its own segment
+  10.72-11.96.
+- It is not adoptable as is. The prompt leaks into the transcript ("welcome to
+  another episode of Django Chat" 6 times, "I'm Will Vincent, joined by Carlton
+  Gibson" 3 times at `--max-context 32`), single segments span a whole 30 s
+  window, and the word count drops by 25% (10% at the other two variants).
+  How much of that is dropped filler words and how much is lost speech was not
+  examined. Loop statistics were not compared.
+- Sentence-shaped segments do not by themselves produce more speaker names.
+  Known-speaker classification on the 339-segment variant (veto and turn
+  corroboration on): 253 confident, 86 uncertain, 12 mixed, 26 corroborated;
+  1693 of 2105 segment-seconds are named, against 1752 of 2185 on the deployed
+  segmentation. Mixed segments halve (25 to 12), but the short sentences fall
+  under `min_segment_duration`: in the first 77 s, 11 of 19 lines stay unnamed,
+  among them the 1.24 s greeting.
+
+Open after this experiment: a prompt that cannot be echoed as content (or
+filtering the echo), chunking below 30 s at pauses as an alternative lever, and
+a rule for short single-speaker segments, without which better segmentation
+does not show up as names.
+
 ## Order and verification
 
 1. Done, see "Findings": full-episode diarization of episode 206 with
