@@ -612,6 +612,18 @@ backend names, and concrete STT model names when claiming work. `auto`,
 `whisper-1`, and `gpt-4o-mini-transcribe` match the configured default backend
 and model; claim responses send that resolved concrete backend/model while
 preserving the submitted aliases as `requested_backend`/`requested_model`.
+Heartbeat storage contract: `hostname` is optional and trimmed, with at most
+255 Unicode characters. `concurrency` is an integer from 1 through 2147483647
+(booleans are rejected); omitted or null values default to 1. `capabilities` is
+an object containing finite JSON values with at most 100 nested object/array
+levels (the outer object counts as level 1); `running_job_ids` is a list of strings
+whose entries are trimmed and empty entries omitted. Omitted or null objects
+and lists default to empty. Hostnames, JSON string values and object keys, and
+running-job IDs must be valid Unicode without NUL or unpaired surrogates.
+Invalid reports return HTTP 400 (`invalid_request_error`) before creating or
+updating a worker, leaving liveness, capabilities and all other stored fields
+unchanged. Valid multilingual text and emoji are preserved.
+
 Disabled workers are rejected before heartbeat state is updated.
 Disabling a worker stops new claims but does not block completion, failure, or
 lease heartbeat for a job the worker already owns. Worker completion accepts

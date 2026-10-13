@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import math
 import secrets
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Case, F, IntegerField, Q, Value, When
 from django.db.models.functions import Coalesce
@@ -122,6 +124,7 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
 SUMMARY_STRING_MAX_LENGTH = 256
 SPEAKER_SIDECAR_CONTENT_TYPE = "application/json"
 CLAIM_UPDATE_CANDIDATE_LIMIT = 10
+WORKER_HEARTBEAT_JSON_MAX_DEPTH = 100
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,16 @@ def record_worker_heartbeat(*, worker_id: str, payload: dict[str, Any]) -> dict[
     hostname = optional_string(payload.get("hostname")) or ""
     running_job_ids = normalize_string_list(payload.get("running_job_ids"), "running_job_ids")
     concurrency = optional_positive_int(payload.get("concurrency"), "concurrency") or 1
+    validate_heartbeat_storage_text(hostname, "hostname")
+    try:
+        Worker._meta.get_field("hostname").run_validators(hostname)
+    except ValidationError as exc:
+        raise ApiError("hostname exceeds the supported length.") from exc
+    # PositiveIntegerField's portable range, including stricter database backends.
+    if concurrency > 2**31 - 1:
+        raise ApiError("concurrency must be between 1 and 2147483647.")
+    validate_heartbeat_storage_json(capabilities, "capabilities")
+    validate_heartbeat_storage_json(running_job_ids, "running_job_ids")
     now = timezone.now()
 
     worker, created = Worker.objects.get_or_create(
@@ -218,6 +231,35 @@ def record_worker_heartbeat(*, worker_id: str, payload: dict[str, Any]) -> dict[
         "server_time": isoformat_or_none(now),
         "poll_after_seconds": settings.VOXHELM_REMOTE_WORKER_POLL_SECONDS,
     }
+
+
+def validate_heartbeat_storage_text(value: str, field_name: str) -> None:
+    if "\x00" in value:
+        raise ApiError(f"{field_name} must not contain NUL characters.")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ApiError(f"{field_name} must contain valid Unicode text.") from exc
+
+
+def validate_heartbeat_storage_json(value: object, field_name: str) -> None:
+    try:
+        json.dumps(value, allow_nan=False, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
+        raise ApiError(f"{field_name} must contain finite, valid JSON.") from exc
+    # JSON escapes NUL, but stricter databases still reject it in strings/keys.
+    pending = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, str):
+            validate_heartbeat_storage_text(item, field_name)
+        elif isinstance(item, (dict, list, tuple)):
+            if depth > WORKER_HEARTBEAT_JSON_MAX_DEPTH:
+                raise ApiError(
+                    f"{field_name} exceeds {WORKER_HEARTBEAT_JSON_MAX_DEPTH} JSON nesting levels."
+                )
+            children = [*item.keys(), *item.values()] if isinstance(item, dict) else item
+            pending.extend((child, depth + 1) for child in children)
 
 
 def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim | None:

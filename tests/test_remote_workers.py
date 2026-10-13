@@ -332,6 +332,100 @@ def test_worker_json_request_rejects_invalid_utf8_with_json_error(client, settin
     assert response.json()["error"]["message"] == "Request body was not valid JSON."
 
 
+def nested_heartbeat_capabilities(depth: int) -> dict[str, Any]:
+    # Count the outer object as level 1; use fixed depths independent of recursion limits.
+    value: Any = "leaf"
+    for _ in range(depth - 1):
+        value = [value]
+    return {"nested": value}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"capabilities": nested_heartbeat_capabilities(101)},
+        {"hostname": "h" * 256},
+        {"hostname": "bad\x00host"},
+        {"hostname": "bad\ud800host"},
+        {"concurrency": 2**31},
+        {"concurrency": 2**63},
+        {"concurrency": True},
+        {"concurrency": 0},
+        {"capabilities": {"nested": [float("nan")]}},
+        {"capabilities": {"nested": [float("inf")]}},
+        {"capabilities": {"nested": [float("-inf")]}},
+        {"capabilities": {"nested": ["bad\x00value"]}},
+        {"capabilities": {"bad\x00key": "value"}},
+        {"capabilities": {"nested": ["bad\udfffvalue"]}},
+        {"capabilities": {"bad\ud800key": "value"}},
+        {"running_job_ids": ["bad\x00id"]},
+        {"running_job_ids": ["bad\ud800id"]},
+    ],
+)
+def test_worker_heartbeat_rejects_storage_invalid_values(
+    client, settings, existing, invalid_fields
+):
+    enable_remote_workers(settings)
+    if existing:
+        Worker.objects.create(
+            worker_id="atlas",
+            hostname="original.local",
+            concurrency=2,
+            capabilities=plain_capabilities(),
+            running_job_ids=["original-job"],
+            last_seen_at=timezone.now() - timedelta(minutes=5),
+        )
+    before = list(Worker.objects.values())
+    payload = {
+        "hostname": "replacement.local",
+        "concurrency": 3,
+        "capabilities": {"replacement": True},
+        "running_job_ids": ["replacement-job"],
+    }
+    payload.update(invalid_fields)
+    response = client.post(
+        "/v1/internal/workers/heartbeat",
+        data=json.dumps(payload),
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert list(Worker.objects.values()) == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+def test_worker_heartbeat_accepts_storage_boundaries(client, settings, existing):
+    enable_remote_workers(settings)
+    if existing:
+        Worker.objects.create(worker_id="atlas")
+    payload = {
+        "hostname": "ü" * 254 + "😀",
+        "concurrency": 2**31 - 1,
+        "capabilities": {
+            **nested_heartbeat_capabilities(100),
+            "Gerät😀": [None, True, 1, 1.5, "Grüße", r"\u0000"],
+        },
+        "running_job_ids": [" gültig😀 "],
+    }
+    response = client.post(
+        "/v1/internal/workers/heartbeat",
+        data=json.dumps(payload),
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert response.status_code == 200
+    worker = Worker.objects.get(worker_id="atlas")
+    assert worker.hostname == payload["hostname"]
+    assert worker.concurrency == payload["concurrency"]
+    assert worker.capabilities == payload["capabilities"]
+    assert worker.running_job_ids == ["gültig😀"]
+    assert worker.last_seen_at is not None
+
+
 @pytest.mark.django_db
 def test_worker_heartbeat_rejects_disabled_worker_without_mutating(client, settings):
     enable_remote_workers(settings)
