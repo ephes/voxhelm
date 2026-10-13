@@ -921,7 +921,7 @@ Current completion state:
 **Main risks:**
 
 - A running batch inference can still delay a later Wyoming turn because the first slice does not preempt. Mitigate by keeping interactive backends fast and by preventing any additional non-interactive work from starting ahead of the waiting voice turn.
-- File-lock or state-file recovery bugs could leave the scheduler wedged after process crashes. Mitigate with a stale-lock timeout and explicit test coverage for recovery paths.
+- File-lock or state-file recovery bugs and PID reuse can leave orphan holders. Under the 2026-10-13 D-24 amendment, age only warns; dead-PID cleanup remains automatic. Recover orphans by stopping all inference consumers and their children before removing holder files, as documented in the README. Age-based reclamation cannot safely restore capacity while a holder is live.
 - Folding sync HTTP requests into the non-interactive lane may increase their tail latency during heavy HA usage. This is acceptable in the first slice because the primary user-facing goal is protecting Assist responsiveness.
 
 **Suggested implementation order:** Delivered. Remaining follow-on work, if needed, is stronger isolation or operator visibility beyond this first slice.

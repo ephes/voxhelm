@@ -42,8 +42,7 @@ class InferenceCancelled(RuntimeError):
 def _finite_timestamp(value: object, field: str) -> float:
     """Parse a record timestamp, rejecting NaN and infinities.
 
-    A non-finite ``claimed_at`` would never compare greater than the stale
-    window, so the holder could never be reclaimed while its pid stays alive.
+    Record times must remain usable for ordering and operational age warnings.
     """
     parsed = float(str(value))
     if not math.isfinite(parsed):
@@ -150,6 +149,7 @@ class LaneScheduler:
         self.holders_dir = root_dir / "holders"
         self.control_lock_path = root_dir / "control.lock"
         self.legacy_holder_path = root_dir / "holder.json"
+        self._warned_old_holders: set[Path] = set()
 
     @property
     def total_slots(self) -> int:
@@ -265,7 +265,12 @@ class LaneScheduler:
         """
         total = 0
         non_interactive = 0
-        for holder_path in sorted(self.holders_dir.glob("*.json")):
+        holder_paths = sorted(self.holders_dir.glob("*.json"))
+        present_paths = set(holder_paths)
+        if self.legacy_holder_path.exists():
+            present_paths.add(self.legacy_holder_path)
+        self._warned_old_holders.intersection_update(present_paths)
+        for holder_path in holder_paths:
             holder = self._reclaim_holder(holder_path)
             if holder is None:
                 continue
@@ -304,16 +309,15 @@ class LaneScheduler:
             return None
 
         age_seconds = time.time() - holder.claimed_at
-        if age_seconds > self.stale_seconds:
+        if age_seconds > self.stale_seconds and holder_path not in self._warned_old_holders:
             _LOGGER.warning(
-                "lane_scheduler reclaimed stale holder lane=%s pid=%s age_seconds=%.3f token=%s",
+                "lane_scheduler retained old live holder lane=%s pid=%s age_seconds=%.3f token=%s",
                 holder.lane,
                 holder.pid,
                 age_seconds,
                 holder.token,
             )
-            holder_path.unlink(missing_ok=True)
-            return None
+            self._warned_old_holders.add(holder_path)
 
         return holder
 
