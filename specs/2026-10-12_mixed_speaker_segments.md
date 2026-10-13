@@ -602,10 +602,55 @@ end of "hello will welcome back yeah" (10.18-12.28) is already Will, and
 Carlton. In the first case the word time is about 0.5 s early (token
 `yeah@11.93`, spoken around 12.5 in the VAD run); in the second the word time
 is right and the track boundary (19.375) is about 0.13 s late, within the
-0.25 s track step. Open: better word times and snapping the boundary to a
-pause. 41 segments are shorter than
+0.25 s track step. Two refinements were measured afterwards and not adopted
+(see "Boundary refinements that did not help"). 41 segments are shorter than
 1 s, 14 shorter than 0.5 s. The four under 0.3 s are Whisper's own segments;
 the others include pieces of a split, such as "hey carlton" (0.86 s).
+
+#### Boundary refinements that did not help (2026-10-13)
+
+Both were measured on episodes 205 and 206 against the raw pyannote turns,
+which have fine time resolution where pyannote sees a change. The adoption
+rule was: take it only if it measurably helps.
+
+**Snapping a cut to the quietest point nearby** (10 ms RMS envelope, smoothed
+50-200 ms, search radius 0.25-0.6 s). Distance of a cut to the nearest
+pyannote change gap, for cuts pyannote also sees within 1 s (81 of 98 on
+episode 206, 104 of 116 on episode 205):
+
+| | Ep. 206 mean / p90 / within 0.1 s | Ep. 205 mean / p90 / within 0.1 s |
+| --- | --- | --- |
+| track cut as deployed | 0.104 s / 0.314 s / 56 | 0.191 s / 0.576 s / 53 |
+| snap, radius 0.25 s, 100 ms | 0.100 s / 0.387 s / 60 | 0.188 s / 0.624 s / 62 |
+| snap, radius 0.4 s, 100 ms | 0.123 s / 0.452 s / 55 | 0.213 s / 0.654 s / 58 |
+| snap, radius 0.6 s, 100 ms | 0.151 s / 0.600 s / 53 | 0.251 s / 0.705 s / 54 |
+
+A few more cuts land very close, the tail gets worse, the mean does not move.
+At the word level (words within 1 s of a cut, one pyannote speaker), agreement
+with pyannote goes from 359 to 351 of 451 on episode 206 and from 403 to 404
+of 500 on episode 205 at radius 0.25 s, with 52 and 58 words reassigned. On
+the two reported words it fixes "the" (cut 19.375 to 19.31) but not "yeah".
+
+**DTW word times** (`--dtw large.v3`, which only produces values with
+`--no-flash-attn`). On the opening they are visibly better (`yeah` at
+11.84-12.58 instead of 11.70-12.04, matching the VAD run), and "yeah" moves
+to Will; "the" does not move. Over the episodes, the share of words near a
+cut that are assigned like pyannote does not improve:
+
+| Word time | Ep. 206 within 0.5 s / 1.0 s | Ep. 205 within 0.5 s / 1.0 s |
+| --- | --- | --- |
+| offset midpoint (deployed) | 72.8% / 79.4% | 71.9% / 79.8% |
+| DTW of the first token | 72.4% / 78.9% | 70.6% / 81.2% |
+| DTW midpoint | 71.0% / 78.0% | 71.4% / 81.1% |
+
+Disabling flash attention also changes the transcript itself (episode 206: 459
+instead of 446 segments, almost no segment text identical) and costs time
+(124 s instead of 108 s for episode 206, 167 s for episode 205).
+
+Neither is adopted. Limit of this evaluation: pyannote misses short
+interjections, which is why agreement near cuts is only 70-80% to begin with,
+so a real but small gain could hide in that noise. Settling it would need
+hand-labelled word boundaries.
 
 ## Order and verification
 
