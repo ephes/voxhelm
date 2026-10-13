@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib.metadata
 import importlib.util
 import json
@@ -8,15 +9,16 @@ import logging
 import os
 import platform
 import shlex
+import ssl
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+import httpx
 from django.conf import settings
 
 from jobs.artifacts import get_artifact_store_for_identity
@@ -70,6 +72,7 @@ SPEAKER_SIDECAR_NAME = "transcript.speakers.json"
 SPEAKER_SIDECAR_CONTENT_TYPE = "application/json"
 DEFAULT_POLL_SECONDS = 5
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
+MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60
 
 
@@ -93,13 +96,6 @@ class WorkerConfig:
     poll_seconds: int = DEFAULT_POLL_SECONDS
     http_timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
-
-
-class _NoWorkerRedirects(HTTPRedirectHandler):
-    def redirect_request(
-        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> Request | None:
-        return None
 
 
 class WorkerClient:
@@ -194,37 +190,75 @@ class WorkerClient:
         path: str,
         payload: dict[str, Any],
     ) -> tuple[int, Any]:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        request = Request(
-            url=f"{self.config.base_url.rstrip('/')}{path}",
-            data=data,
-            method=method,
-            headers={
-                "Authorization": f"Bearer {self.config.token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "voxhelm-remote-worker/0.1",
-            },
-        )
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(self._request_async(method, path, payload))
         try:
-            with build_opener(_NoWorkerRedirects()).open(
-                request, timeout=self.config.http_timeout_seconds
-            ) as response:
-                body = response.read()
-                return response.status, parse_json_response(body)
-        except HTTPError as exc:
-            if 300 <= exc.code < 400:
-                exc.close()
-                raise WorkerError(
-                    f"Voxhelm worker API redirects are refused (HTTP {exc.code}); "
-                    "configure the canonical worker API URL."
-                ) from None
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            raise WorkerHttpError(status=exc.code, detail=detail or exc.reason) from exc
-        except URLError as exc:
-            raise WorkerError(f"Could not reach Voxhelm worker API: {exc.reason}") from exc
-        except OSError as exc:
-            raise WorkerError(f"Could not reach Voxhelm worker API: {exc}") from exc
+            return loop.run_until_complete(task)
+        finally:
+            if not task.done():
+                task.cancel()
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            # asyncio.run waits for executor DNS lookups during shutdown, which
+            # can outlive the request deadline. All HTTP streams close above;
+            # closing the loop lets a cancelled OS lookup finish independently.
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+    async def _request_async(
+        self, method: str, path: str, payload: dict[str, Any]
+    ) -> tuple[int, Any]:
+        try:
+            async with asyncio.timeout(self.config.http_timeout_seconds):
+                async with httpx.AsyncClient(
+                    follow_redirects=False,
+                    timeout=self.config.http_timeout_seconds,
+                    verify=ssl.create_default_context(),
+                ) as client:
+                    async with client.stream(
+                        method,
+                        f"{self.config.base_url.rstrip('/')}{path}",
+                        content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                        headers={
+                            "Authorization": f"Bearer {self.config.token}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                            "Accept-Encoding": "identity",
+                            "User-Agent": "voxhelm-remote-worker/0.1",
+                        },
+                    ) as response:
+                        status = response.status_code
+                        if 300 <= status < 400:
+                            raise WorkerError(
+                                f"Voxhelm worker API redirects are refused (HTTP {status}); "
+                                "configure the canonical worker API URL."
+                            )
+                        if status >= 400:
+                            # Do not read untrusted error bodies. Preserve status for
+                            # retry decisions, even for oversized/dripping errors.
+                            try:
+                                detail = HTTPStatus(status).phrase
+                            except ValueError:
+                                detail = "control request failed"
+                            raise WorkerHttpError(status=status, detail=detail)
+                        limit = MAX_CONTROL_RESPONSE_BYTES
+                        body = bytearray()
+                        # Raw bytes avoid unbounded decompression of a server body
+                        # that ignores our identity encoding request.
+                        async for chunk in response.aiter_raw(chunk_size=min(65536, limit + 1)):
+                            if len(body) + len(chunk) > limit:
+                                raise WorkerError(
+                                    f"Voxhelm worker API response exceeded the {limit}-byte limit."
+                                )
+                            body.extend(chunk)
+                        return status, parse_json_response(bytes(body))
+        except TimeoutError, httpx.TimeoutException:
+            raise WorkerError(
+                "Voxhelm worker API request exceeded the configured elapsed budget."
+            ) from None
+        except (httpx.HTTPError, httpx.InvalidURL, OSError) as exc:
+            raise WorkerError(
+                f"Could not reach Voxhelm worker API: {type(exc).__name__}."
+            ) from None
 
 
 class LeaseHeartbeater:
@@ -283,7 +317,7 @@ def parse_json_response(body: bytes) -> Any:
         return None
     try:
         return json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WorkerError("Voxhelm worker API returned invalid JSON.") from exc
 
 

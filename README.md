@@ -546,6 +546,23 @@ and a configuration hint. A redirect never forwards the worker bearer token or
 prints the redirect target or response body. Media URL redirects still use the
 separate allowlisted media fetcher.
 
+Worker control requests use `--http-timeout-seconds` (default `60`) as one
+elapsed budget for connection, response headers and streamed body consumption;
+slow progress does not reset it. Successful responses are limited to 1 MiB,
+independent of Content-Length. HTTP error bodies are never read; their status is
+preserved for retry decisions. Responses and clients close
+on success, failure or expiry; an OS DNS lookup may finish later without opening
+a connection. Workers request identity encoding and read raw bytes, so compressed
+responses cannot bypass the byte cap. Error bodies and remote reason phrases are
+never echoed in exceptions/logs; HTTP errors report only the status and its
+standard description; transport failures include only the exception class name.
+TLS verification retains the standard-library default trust context.
+Oversized, timed-out or invalid claim responses cannot start inference. The success
+cap applies to every control endpoint, including completion/failure responses that
+echo transcript text. A completion may already be recorded by the server before
+an oversized acknowledgement is rejected; check the server job status before
+retrying that job. Update/restart remote workers to adopt these limits.
+
 Worker endpoints are internal and use a separate bearer-token domain from
 producer tokens. Startup configuration rejects any raw token value shared
 between `VOXHELM_BEARER_TOKENS` and `VOXHELM_WORKER_TOKENS`:
