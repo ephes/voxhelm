@@ -476,10 +476,15 @@ def decode_mono_16k(audio_path: Path) -> Any:
                     "wav",
                     str(wav_path),
                 ],
+                timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise KnownSpeakerError(
+                "Reference or segment audio decode exceeded the configured decode deadline."
+            ) from exc
         except (OSError, subprocess.CalledProcessError) as exc:
             raise KnownSpeakerError("Could not decode reference or segment audio.") from exc
         with wave.open(str(wav_path), "rb") as wav_file:

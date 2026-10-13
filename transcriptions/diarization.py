@@ -102,10 +102,15 @@ def load_audio_for_pyannote(audio_path: Path) -> dict[str, Any]:
                     "wav",
                     str(wav_path),
                 ],
+                timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise DiarizationError(
+                "Audio decode for pyannote diarization exceeded the configured decode deadline."
+            ) from exc
         except (OSError, subprocess.CalledProcessError) as exc:
             raise DiarizationError("Could not decode audio for pyannote diarization.") from exc
 

@@ -238,27 +238,34 @@ class WhisperCppBackend:
 
 
 def _normalize_audio_for_whispercpp(*, input_path: Path, output_path: Path) -> None:
-    completed = subprocess.run(
-        [
-            settings.VOXHELM_FFMPEG_BIN,
-            "-y",
-            "-i",
-            str(input_path),
-            "-vn",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "pcm_s16le",
-            str(output_path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                settings.VOXHELM_FFMPEG_BIN,
+                "-nostdin",
+                "-y",
+                "-i",
+                str(input_path),
+                "-vn",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "ffmpeg audio normalization exceeded the configured decode deadline."
+        ) from exc
     if completed.returncode == 0 and output_path.exists():
         return
 

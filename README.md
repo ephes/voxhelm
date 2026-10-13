@@ -787,6 +787,14 @@ Slow progress does not reset it. Expiry interrupts network sockets and removes
 partial temporary media; an OS DNS lookup may finish later in a daemon thread,
 which cannot open a connection or create a file.
 
+`VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS` (default `900`, positive integer) bounds
+each ffmpeg decode for whisper.cpp normalization, pyannote diarization and
+known-speaker reference/segment audio on the server and remote workers. Expiry
+kills and reaps ffmpeg and reports a decode-deadline message using the existing
+normalization or speaker error type.
+Increase this budget for long episodes on slower hosts. These decode calls and speech
+export commands use `-nostdin` to avoid interactive input.
+
 `VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS` (default `900`, positive integer)
 bounds ffmpeg video-to-audio processing on the server and remote workers.
 Expiry kills and reaps ffmpeg. Every failed extraction removes its reserved WAV;
