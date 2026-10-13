@@ -398,24 +398,54 @@ def test_zero_interactive_slots_reproduces_single_slot_serialization(tmp_path: P
     assert tracker.max_total == 1
 
 
-def test_stale_holder_is_reclaimed_while_a_live_holder_is_kept(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("lane", [LANE_INTERACTIVE, LANE_NON_INTERACTIVE])
+def test_old_live_holder_keeps_capacity_until_release(tmp_path: Path, caplog, legacy, lane) -> None:
     scheduler = LaneScheduler(
-        root_dir=tmp_path, stale_seconds=1, interactive_slots=1, non_interactive_slots=1
+        root_dir=tmp_path, stale_seconds=1, interactive_slots=0, non_interactive_slots=1
     )
-    stale_path = write_holder(scheduler, token="stale-holder", pid=os.getpid(), age_seconds=5)
-    live_path = write_holder(scheduler, token="live-holder")
+    old_path = write_holder(
+        scheduler,
+        token="old-holder",
+        lane=lane,
+        age_seconds=5,
+        path=tmp_path / "holder.json" if legacy else None,
+    )
+    scheduler._ensure_layout()
+    # Repeat admission scans to exercise the warning without flooding the log.
+    with scheduler._control_lock():
+        assert scheduler._reclaim_holders() == (
+            1,
+            1 if legacy or lane == LANE_NON_INTERACTIVE else 0,
+        )
+        assert scheduler._reclaim_holders()[0] == 1
+    assert old_path.exists()
+    assert sum("retained old live holder" in record.message for record in caplog.records) == 1
 
-    started_at = time.monotonic()
-    ticket = scheduler.acquire(lane=LANE_INTERACTIVE)
-    elapsed = time.monotonic() - started_at
-    scheduler.release(ticket)
+    admitted = threading.Event()
 
-    assert elapsed < 0.5
-    assert not stale_path.exists()
-    assert live_path.exists()
+    def waiter() -> None:
+        ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+        admitted.set()
+        scheduler.release(ticket)
+
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    try:
+        assert wait_until(lambda: waiter_count(scheduler) == 1)
+        assert not admitted.wait(0.15)
+        assert old_path.exists()
+    finally:
+        if legacy:
+            old_path.unlink(missing_ok=True)
+        else:
+            scheduler.release(AdmissionTicket(lane=lane, token="old-holder", waited_ms=0))
+        thread.join(timeout=TIMEOUT)
+    assert admitted.is_set()
+    assert not thread.is_alive()
 
 
-def test_dead_holder_pid_is_reclaimed_without_waiting_for_the_stale_timeout(
+def test_dead_holder_pid_is_reclaimed_immediately(
     tmp_path: Path,
 ) -> None:
     scheduler = LaneScheduler(
@@ -768,3 +798,21 @@ def test_admit_local_inference_is_a_no_op_when_disabled(settings, tmp_path: Path
         assert ticket.lane == LANE_INTERACTIVE
 
     assert not scheduler_dir.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_age_warning_tracks_presence_and_ignores_young_holders(tmp_path: Path, caplog, legacy):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    scheduler._ensure_layout()
+    path = tmp_path / "holder.json" if legacy else None
+    young = write_holder(scheduler, token="holder", path=path)
+    with scheduler._control_lock():
+        assert scheduler._reclaim_holders()[0] == 1
+        assert not caplog.records
+        write_holder(scheduler, token="holder", age_seconds=120, path=path)
+        assert scheduler._reclaim_holders()[0] == 1
+        young.unlink()
+        assert scheduler._reclaim_holders() == (0, 0)
+        write_holder(scheduler, token="holder", age_seconds=120, path=path)
+        assert scheduler._reclaim_holders()[0] == 1
+    assert sum("retained old live holder" in record.message for record in caplog.records) == 2

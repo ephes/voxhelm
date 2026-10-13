@@ -5,6 +5,12 @@ Status: DEPLOYED — implemented, reviewed and live-verified on the studio
 aca7ffb; ops-control cb2e8a2). Decision: D-24 in `decision-log.md` (reopens
 D-19 Option B with new evidence).
 
+**Recovery policy superseded 2026-10-13:** The age-based reclamation and
+`STALE_SECONDS` semantics below are a historical record. The D-24 recovery
+amendment in `decision-log.md` keeps old live holders counted, uses age only for
+warnings and documents orphan recovery. Dead-PID and invalid-state cleanup remain.
+The current README describes operation; this amendment has no new deployment claim.
+
 ## Verified results (2026-09-06, studio, content-free synthetic audio)
 
 Method: a 20-minute mono MP3 (48 kbps, 7.2 MB) generated locally with `say`

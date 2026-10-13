@@ -401,7 +401,7 @@ The first C13 slice should use a thin host-wide scheduler around local inference
 
 - enable/disable flag
 - shared state directory path
-- stale-lock timeout / recovery window
+- stale-lock timeout / recovery window (historical; see the 2026-10-13 D-24 amendment)
 
 **Recommended initial default:** `VOXHELM_LANE_SCHEDULER_STALE_SECONDS=1800`.
 
@@ -578,11 +578,22 @@ First-slice details:
 - Priority semantics from D-19 stay: interactive waiters win the next free slot, running work is never preempted, callers still cannot pick a lane.
 - Only backends that run outside the calling process may overlap: `whisper-cli` subprocesses and the WhisperKit sidecar. In-process backends keep a per-backend lock in their own process (`mlx-whisper` for STT; Piper and Kokoro already have one for TTS). The process-wide `_TRANSCRIPTION_LOCK` goes away because its safety concern was in-process state, not separate processes.
 - The deployed Wyoming backend (`mlx`, in the Wyoming sidecar process) already overlaps a `whisper-cli` subprocess from the HTTP process without sharing in-process state, so no Wyoming configuration change is required.
-- Stale-holder recovery is kept and applied per holder file (`holders/<token>.json` replaces `holder.json`), same 1800 s window.
+- Dead-holder recovery applies per holder file (`holders/<token>.json` replaces `holder.json`). The 1800 s age threshold is warning-only under the 2026-10-13 amendment below.
 - The sync endpoint terminates its `whisper-cli` child when the HTTP client disconnects (Django 5 ASGI request cancellation), so an abandoned upload no longer burns a slot and GPU time to completion.
 - `VOXHELM_LANE_SCHEDULER_ENABLED=false` still means no gating; `0` interactive plus `1` non-interactive slot is the config-only rollback to D-19 behaviour. A legacy `holder.json` is counted as a non-interactive holder until it is released or reclaimed, so new-code admissions respect a legacy holder that is still running. The reverse does not hold: during the mixed-version window of a deploy or rollback an old-code process can exceed the bound by one holder. That window is seconds (sequential launchd restarts, all three services in one playbook run) or at worst one in-flight legacy inference, and only separate-process backends can overlap, so it is accepted rather than bridged.
 
-**Feasible guarantee on one host:** with `1 + 1` slots an interactive request is admitted immediately whenever total capacity is not exhausted, which on `studio` means: at most one non-interactive inference is running and no other interactive request holds the reserved slot. Admission is not execution: an in-process backend still waits for its own per-process lock (relevant only when two interactive requests overlap inside the Wyoming sidecar). Interactive latency is then bounded by GPU contention (roughly proportional slowdown), not by the remaining runtime of the long job. Stale reclamation bounds the number of *recorded* holders; a reclaimed holder whose process is still running keeps using the GPU until it finishes, exactly as under D-19.
+**Feasible guarantee on one host:** with `1 + 1` slots an interactive request is admitted immediately whenever total capacity is not exhausted, which on `studio` means: at most one non-interactive inference is running and no other interactive request holds the reserved slot. Admission is not execution: an in-process backend still waits for its own per-process lock (relevant only when two interactive requests overlap inside the Wyoming sidecar). Interactive latency is then bounded by GPU contention (roughly proportional slowdown), not by the remaining runtime of the long job. Live holders remain counted until release, so age alone cannot admit work beyond the capacity bound (2026-10-13 amendment).
+
+**Recovery amendment (2026-10-13):** Claims have no renewal mechanism. Reclaiming
+an old live PID lets inference continue while its capacity is reused, violating
+the bound. `VOXHELM_LANE_SCHEDULER_STALE_SECONDS` therefore becomes only an
+operational warning threshold (default still 1800 s); dead-PID and invalid-state
+cleanup remain. This supersedes age-based recovery in D-19, C13 and the dated
+bounded-slots spec, for modern and legacy holder files. PID reuse and leaked
+holders within a live daemon require operator recovery: stop all local inference
+consumers and verify their inference children have exited before removing orphan
+holder files, then restart. Stronger process identity/leases remain future work;
+capacity preservation takes precedence over automatic age-based recovery.
 
 **Not decided here:** slot counts above `1 + 1`, a status API, importer-side scheduling, preemption, and any local `studio` pull worker (which must keep using this scheduler, see BACKLOG).
 

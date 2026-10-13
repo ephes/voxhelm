@@ -691,8 +691,19 @@ Capacity is a small, bounded set of slots (decision D-24):
   then share the GPU, so the interactive request is slower than on an idle host
   but not blocked.
 - Each holder is recorded as its own file; a crashed holder is reclaimed when its
-  process is gone, and a holder older than `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
-  (default `1800`) is reclaimed even if the process is alive.
+  process is gone. Live holders retain capacity until release, regardless of age,
+  including legacy `holder.json` records. `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
+  (default `1800`) is a warning threshold only: each scheduler instance logs an
+  old live holder once while its file remains present (normally once per admission
+  attempt, since callers create a scheduler for each attempt). A stuck live process
+  must be stopped by the operator before its capacity can be reclaimed; deleting its
+  holder file while inference runs can exceed the capacity bound.
+  PID liveness cannot detect PID reuse after a crash/reboot, or a leaked holder
+  inside a live daemon. To recover an orphan, stop all local inference consumers
+  (HTTP, Tasks workers and Wyoming), verify their inference subprocesses have also
+  exited, and then remove the orphan holder files from the configured scheduler
+  directory before restarting. Do not clear holder files on a running service.
+  Restart services/workers when adopting this recovery policy.
 - `VOXHELM_LANE_SCHEDULER_ENABLED=false` disables all gating. Setting
   `0` interactive and `1` non-interactive slots restores the original
   single-slot behaviour without a code change.
