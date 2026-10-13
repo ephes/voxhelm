@@ -24,7 +24,7 @@ class Command(BaseCommand):
         del args
         username = str(options["username"]).strip()
         email = str(options["email"]).strip()
-        password = str(options["password"]).strip()
+        password = str(options["password"])
         if not username:
             raise CommandError("A username is required.")
         if not password:

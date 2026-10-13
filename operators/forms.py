@@ -11,7 +11,7 @@ from transcriptions.input_media import detect_suffix
 
 class LoginForm(forms.Form):
     username = forms.CharField(max_length=150)
-    password = forms.CharField(widget=forms.PasswordInput)
+    password = forms.CharField(widget=forms.PasswordInput, strip=False)
 
 
 class TranscriptSubmissionForm(forms.Form):

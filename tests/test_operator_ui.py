@@ -9,6 +9,7 @@ from asgiref.local import Local
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import Client
 from django_tasks import task_backends
 
@@ -227,6 +228,65 @@ def test_bootstrap_operator_command_creates_jochen_account():
 
     assert user.is_staff is True
     assert user.check_password("secret") is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("from_environment", [False, True])
+@pytest.mark.parametrize("credential", [" passphrase ", "\tpassphrase\n", "   "])
+def test_bootstrap_operator_preserves_password_exactly(
+    existing, from_environment, credential, monkeypatch
+):
+    user_model = get_user_model()
+    if existing:
+        user_model.objects.create_user(username="fictional-operator", password="old")
+    options = {"username": " fictional-operator ", "email": " operator@example.test "}
+    if from_environment:
+        monkeypatch.setenv("VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD", credential)
+    else:
+        options["password"] = credential
+
+    call_command("bootstrap_operator", **options)
+
+    user = user_model.objects.get(username="fictional-operator")
+    assert user.email == "operator@example.test"
+    assert user.check_password(credential) is True
+    assert user.check_password(credential.strip()) is False
+    assert user.check_password("old") is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("credential", [" passphrase ", "   "])
+def test_bootstrap_operator_password_works_through_login(client, credential):
+    call_command("bootstrap_operator", username="fictional-operator", password=credential)
+
+    response = client.post(
+        "/", data={"username": "fictional-operator", "password": credential.strip()}
+    )
+    assert response.status_code == 200
+    assert "_auth_user_id" not in client.session
+
+    response = client.post("/", data={"username": "fictional-operator", "password": credential})
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/"
+    user = get_user_model().objects.get(username="fictional-operator")
+    assert client.session["_auth_user_id"] == str(user.pk)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing", [False, True])
+def test_bootstrap_operator_rejects_empty_password(existing):
+    user_model = get_user_model()
+    if existing:
+        user_model.objects.create_user(username="fictional-operator", password="old")
+
+    with pytest.raises(CommandError, match="A password is required"):
+        call_command("bootstrap_operator", username="fictional-operator", password="")
+
+    if existing:
+        assert user_model.objects.get(username="fictional-operator").check_password("old")
+    else:
+        assert not user_model.objects.filter(username="fictional-operator").exists()
 
 
 @pytest.mark.django_db
