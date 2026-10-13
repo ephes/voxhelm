@@ -492,7 +492,14 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
     )
 
     assert len(calls) == 2
-    assert calls[0][:5] == [settings.VOXHELM_FFMPEG_BIN, "-y", "-i", str(input_path), "-vn"]
+    assert calls[0][:6] == [
+        settings.VOXHELM_FFMPEG_BIN,
+        "-nostdin",
+        "-y",
+        "-i",
+        str(input_path),
+        "-vn",
+    ]
     assert calls[0][-1].endswith("input.wav")
     assert calls[1][0] == "/tmp/fake-whisper-cli"
     assert calls[1][calls[1].index("-f") + 1].endswith("input.wav")
