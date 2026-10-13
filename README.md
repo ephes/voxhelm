@@ -619,7 +619,7 @@ URLs/ranges are not echoed through producer-visible job metadata. Speaker
 sidecars are accepted only for known-speaker jobs.
 
 Run a manual worker on a trusted macOS host with an env file containing the
-worker token, Voxhelm URL, shared artifact credentials, local STT/model cache
+worker token (`VOXHELM_WORKER_TOKEN`), Voxhelm URL, shared artifact credentials, local STT/model cache
 settings, `VOXHELM_ALLOWED_URL_HOSTS`, and optional Hugging Face token. The
 `caffeinate` wrapper keeps the machine awake only while the worker command is
 running:
@@ -629,6 +629,11 @@ running:
   --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
   --once
 ```
+
+The legacy `--token` flag still works and takes precedence over the environment,
+but is deprecated and prints a warning to stderr because command-line arguments
+can expose credentials in process listings. Use `VOXHELM_WORKER_TOKEN` in the
+environment or the env file shown above instead.
 
 From this checkout, `just worker-once` runs the same one-job command. Override
 `VOXHELM_WORKER_ENV_FILE` for a non-default env-file path. It defaults to
