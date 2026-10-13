@@ -471,3 +471,70 @@ def test_worker_api_refuses_credential_redirects(status, operation):
         destination.server_close()
         origin_thread.join(timeout=3)
         destination_thread.join(timeout=3)
+
+
+@pytest.mark.parametrize("log_level", ["INFO", "CRITICAL"])
+def test_main_warns_for_token_flag_without_disclosing_value(monkeypatch, capsys, log_level):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "environment-secret")
+    monkeypatch.setattr(worker_cli, "setup_django_for_worker", lambda: None)
+    monkeypatch.setattr(worker_cli, "build_capabilities", lambda: {})
+    monkeypatch.setattr(worker_cli, "log_startup", lambda config: None)
+    seen = []
+
+    def run_once(*, config, client, capabilities):
+        seen.append(config.token)
+        return False
+
+    monkeypatch.setattr(worker_cli, "run_worker_once", run_once)
+    assert (
+        worker_cli.main(
+            [
+                "--base-url",
+                "http://voxhelm.local",
+                "--worker-id",
+                "atlas",
+                "--token",
+                "argv-secret",
+                "--once",
+                "--log-level",
+                log_level,
+            ]
+        )
+        == 0
+    )
+    assert seen == ["argv-secret"]
+    output = capsys.readouterr()
+    assert "--token is deprecated" in output.err
+    assert "VOXHELM_WORKER_TOKEN" in output.err
+    assert "--env-file" in output.err
+    assert "argv-secret" not in output.out + output.err
+    assert "environment-secret" not in output.out + output.err
+
+
+@pytest.mark.parametrize("use_env_file", [False, True])
+def test_main_environment_token_does_not_warn(monkeypatch, tmp_path, capsys, use_env_file):
+    # Register restoration even when load_env_file writes an initially absent key.
+    monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "placeholder")
+    monkeypatch.delenv("VOXHELM_WORKER_TOKEN")
+    args = ["--base-url", "http://voxhelm.local", "--worker-id", "atlas", "--once"]
+    if use_env_file:
+        env_file = tmp_path / "worker.env"
+        env_file.write_text("VOXHELM_WORKER_TOKEN=environment-secret\n")
+        args.extend(["--env-file", str(env_file)])
+    else:
+        monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "environment-secret")
+    monkeypatch.setattr(worker_cli, "setup_django_for_worker", lambda: None)
+    monkeypatch.setattr(worker_cli, "build_capabilities", lambda: {})
+    monkeypatch.setattr(worker_cli, "log_startup", lambda config: None)
+    seen = []
+
+    def run_once(*, config, client, capabilities):
+        seen.append(config.token)
+        return False
+
+    monkeypatch.setattr(worker_cli, "run_worker_once", run_once)
+    assert worker_cli.main(args) == 0
+    assert seen == ["environment-secret"]
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "environment-secret" not in output.out

@@ -10,6 +10,7 @@ import os
 import platform
 import shlex
 import ssl
+import sys
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -966,6 +967,12 @@ def setup_django_for_worker() -> None:
 
 
 def parse_worker_config(args: argparse.Namespace) -> WorkerConfig:
+    if args.token is not None:
+        print(
+            "Warning: --token is deprecated because command-line arguments can expose credentials. "
+            "Use VOXHELM_WORKER_TOKEN in the environment or an --env-file instead.",
+            file=sys.stderr,
+        )
     worker_id = args.worker_id or os.getenv("VOXHELM_WORKER_ID", "")
     token = args.token or os.getenv("VOXHELM_WORKER_TOKEN", "")
     if not token and worker_id:
@@ -1010,7 +1017,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", type=Path, help="Load worker environment from KEY=VALUE file")
     parser.add_argument("--base-url", help="Voxhelm base URL, e.g. http://studio.local:8000")
     parser.add_argument("--worker-id", help="Worker id configured in VOXHELM_WORKER_TOKENS")
-    parser.add_argument("--token", help="Worker bearer token")
+    parser.add_argument(
+        "--token", help="Deprecated: use VOXHELM_WORKER_TOKEN in the environment or --env-file"
+    )
     parser.add_argument("--hostname", help="Hostname reported in worker heartbeats")
     parser.add_argument("--once", action="store_true", help="Claim at most one job and exit")
     parser.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)
