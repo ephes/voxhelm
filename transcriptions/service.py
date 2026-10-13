@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import mimetypes
 import re
 import shutil
@@ -46,10 +47,20 @@ class TranscribeParams:
     prompt: str | None
     language: str | None
     scheduler_lane: str = LANE_NON_INTERACTIVE
+    # Ask the backend for per-word timings on each segment. Backends that cannot
+    # provide them return segments without words.
+    word_timestamps: bool = False
     # Cooperative cancellation: set by the caller (the sync HTTP view on client
     # disconnect). Excluded from equality/repr so parameter comparisons and log
     # lines stay unchanged.
     cancel_event: threading.Event | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class TranscriptionWord:
+    start: float
+    end: float
+    text: str
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,9 @@ class TranscriptionSegment:
     end: float
     text: str
     speaker: str | None = None
+    # Per-word timings, only when requested and the backend provides them. They
+    # are working data for postprocessing and are not rendered into artifacts.
+    words: tuple[TranscriptionWord, ...] = ()
 
     def as_verbose_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -190,17 +204,21 @@ class WhisperCppBackend:
             )
 
             output_base = temp_root / "transcript"
+            # Token offsets of the later chunks are chunk-relative when
+            # whisper.cpp splits the audio across processors, so word timings
+            # need a single processor.
+            processors = 1 if params.word_timestamps else self.processors
             args = [
                 executable,
                 "-m",
                 str(model_path),
                 "-f",
                 str(normalized_audio_path),
-                "-oj",
+                "-ojf" if params.word_timestamps else "-oj",
                 "-of",
                 str(output_base),
                 "-p",
-                str(self.processors),
+                str(processors),
                 "-l",
                 params.language or "auto",
                 "-np",
@@ -451,12 +469,17 @@ def normalize_whispercpp_payload(
             segment_text = str(raw_segment.get("text", "")).strip()
             if not segment_text:
                 continue
+            start = timestamp_to_seconds(str(timestamps.get("from", "00:00:00,000")))
+            end = timestamp_to_seconds(str(timestamps.get("to", "00:00:00,000")))
             segments.append(
                 TranscriptionSegment(
                     id=index,
-                    start=timestamp_to_seconds(str(timestamps.get("from", "00:00:00,000"))),
-                    end=timestamp_to_seconds(str(timestamps.get("to", "00:00:00,000"))),
+                    start=start,
+                    end=end,
                     text=segment_text,
+                    words=whispercpp_segment_words(
+                        raw_segment.get("tokens"), segment_start=start, segment_end=end
+                    ),
                 )
             )
 
@@ -468,6 +491,64 @@ def normalize_whispercpp_payload(
         backend_name="whisper.cpp",
         model_name=model_name,
     )
+
+
+def whispercpp_segment_words(
+    raw_tokens: object,
+    *,
+    segment_start: float,
+    segment_end: float,
+) -> tuple[TranscriptionWord, ...]:
+    """Build per-word timings from the tokens of a ``-ojf`` whisper.cpp segment.
+
+    Sub-word tokens (no leading space) extend the previous word; special
+    tokens such as ``[_BEG_]`` are skipped. Timings are clamped into the
+    segment and kept non-decreasing. Any malformed token drops the words of
+    the whole segment, because a partial word list would misplace the rest.
+    """
+    if not isinstance(raw_tokens, list) or segment_end <= segment_start:
+        return ()
+    words: list[tuple[float, float, str]] = []
+    # A whitespace-only token separates words although it carries no text.
+    boundary_pending = True
+    for raw_token in raw_tokens:
+        if not isinstance(raw_token, dict):
+            return ()
+        token_text = raw_token.get("text")
+        if not isinstance(token_text, str):
+            return ()
+        if token_text.startswith("[_"):
+            continue
+        if not token_text.strip():
+            boundary_pending = True
+            continue
+        offsets = raw_token.get("offsets")
+        if not isinstance(offsets, dict):
+            return ()
+        raw_from, raw_to = offsets.get("from"), offsets.get("to")
+        if (
+            isinstance(raw_from, bool)
+            or isinstance(raw_to, bool)
+            or not isinstance(raw_from, int | float)
+            or not isinstance(raw_to, int | float)
+        ):
+            return ()
+        try:
+            from_seconds, to_seconds = float(raw_from) / 1000.0, float(raw_to) / 1000.0
+        except OverflowError:
+            return ()
+        if not math.isfinite(from_seconds) or not math.isfinite(to_seconds):
+            return ()
+        floor = words[-1][0] if words else segment_start
+        token_start = min(max(from_seconds, floor), segment_end)
+        token_end = min(max(to_seconds, token_start), segment_end)
+        if words and not boundary_pending and not token_text.startswith(" "):
+            previous_start, previous_end, previous_text = words[-1]
+            words[-1] = (previous_start, max(previous_end, token_end), previous_text + token_text)
+        else:
+            words.append((token_start, token_end, token_text.strip()))
+        boundary_pending = False
+    return tuple(TranscriptionWord(start=start, end=end, text=text) for start, end, text in words)
 
 
 def call_whisperkit_server(

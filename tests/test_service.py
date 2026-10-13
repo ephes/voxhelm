@@ -19,6 +19,7 @@ from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
     TranscriptionSegment,
+    TranscriptionWord,
     WhisperCppBackend,
     WhisperKitBackend,
     _normalize_audio_for_whispercpp,
@@ -34,6 +35,7 @@ from transcriptions.service import (
     run_cancellable_process,
     timestamp_to_seconds,
     transcribe_audio,
+    whispercpp_segment_words,
 )
 
 
@@ -428,6 +430,136 @@ def test_normalize_whispercpp_payload_builds_segments_and_language() -> None:
     ]
 
 
+def _token(text: str, start_ms: float, end_ms: float) -> dict:
+    return {"text": text, "offsets": {"from": start_ms, "to": end_ms}}
+
+
+def test_normalize_whispercpp_payload_builds_words_from_full_json_tokens() -> None:
+    payload = {
+        "result": {"language": "en"},
+        "transcription": [
+            {
+                "text": " hello will welcome",
+                "timestamps": {"from": "00:00:10,000", "to": "00:00:12,000"},
+                "tokens": [
+                    _token("[_BEG_]", 10000, 10000),
+                    _token(" hello", 10180, 10620),
+                    _token(" w", 10620, 10700),
+                    _token("ill", 10700, 10970),
+                    _token(" welcome", 10970, 11580),
+                    _token("[_TT_100]", 12000, 12000),
+                ],
+            }
+        ],
+    }
+
+    result = normalize_whispercpp_payload(payload, model_name="ggml-large-v3.bin")
+
+    assert result.segments[0].words == (
+        TranscriptionWord(start=10.18, end=10.62, text="hello"),
+        TranscriptionWord(start=10.62, end=10.97, text="will"),
+        TranscriptionWord(start=10.97, end=11.58, text="welcome"),
+    )
+    # Words are working data: the rendered segment is unchanged.
+    assert "words" not in result.segments[0].as_verbose_json()
+
+
+def test_whispercpp_segment_words_are_clamped_and_non_decreasing() -> None:
+    words = whispercpp_segment_words(
+        [
+            _token(" early", 500, 900),
+            _token(" back", 400, 700),
+            _token(" late", 2900, 3500),
+        ],
+        segment_start=1.0,
+        segment_end=3.0,
+    )
+
+    assert words == (
+        TranscriptionWord(start=1.0, end=1.0, text="early"),
+        TranscriptionWord(start=1.0, end=1.0, text="back"),
+        TranscriptionWord(start=2.9, end=3.0, text="late"),
+    )
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        None,
+        "not a list",
+        [" hello"],
+        [{"text": " hello"}],
+        [{"text": 5, "offsets": {"from": 0, "to": 10}}],
+        [{"text": " hello", "offsets": {"from": "0", "to": 10}}],
+        [{"text": " hello", "offsets": {"from": True, "to": 10}}],
+        [{"text": " hello", "offsets": {"from": float("nan"), "to": 10}}],
+        [{"text": " hello", "offsets": {"from": 0, "to": float("inf")}}],
+        [{"text": " hello", "offsets": {"from": 10**400, "to": 10}}],
+        [{"text": " hello", "offsets": {"from": 0, "to": 10**400}}],
+        [_token(" fine", 0, 10), {"text": " broken"}],
+    ],
+)
+def test_whispercpp_segment_words_drop_everything_on_malformed_tokens(tokens) -> None:
+    assert whispercpp_segment_words(tokens, segment_start=0.0, segment_end=1.0) == ()
+
+
+def test_whispercpp_segment_words_treat_whitespace_tokens_as_word_boundaries() -> None:
+    words = whispercpp_segment_words(
+        [_token(" hello", 0, 300), _token(" ", 300, 320), _token("world", 320, 700)],
+        segment_start=0.0,
+        segment_end=1.0,
+    )
+
+    assert words == (
+        TranscriptionWord(start=0.0, end=0.3, text="hello"),
+        TranscriptionWord(start=0.32, end=0.7, text="world"),
+    )
+
+
+def test_whispercpp_segment_words_need_a_positive_segment_duration() -> None:
+    tokens = [_token(" hello", 0, 10)]
+    assert whispercpp_segment_words(tokens, segment_start=1.0, segment_end=1.0) == ()
+
+
+def test_whispercpp_backend_requests_full_json_on_one_processor_for_word_timestamps(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    args = _capture_whispercpp_args(
+        backend,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        settings=settings,
+        params=TranscribeParams(
+            request_model="whisper-1", prompt=None, language="de", word_timestamps=True
+        ),
+    )
+    # Token offsets are chunk-relative with several processors.
+    assert args[args.index("-p") + 1] == "1"
+    assert "-ojf" in args
+    assert "-oj" not in args
+
+
+def test_whispercpp_backend_keeps_processors_without_word_timestamps(
+    monkeypatch, tmp_path: Path, settings
+) -> None:
+    backend = WhisperCppBackend(
+        binary_path="/tmp/fake-whisper-cli",
+        model_name="ggml-large-v3.bin",
+        processors=4,
+    )
+    args = _capture_whispercpp_args(
+        backend, monkeypatch=monkeypatch, tmp_path=tmp_path, settings=settings
+    )
+    assert args[args.index("-p") + 1] == "4"
+    assert "-oj" in args
+    assert "-ojf" not in args
+
+
 def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
     monkeypatch, tmp_path: Path, settings
 ) -> None:
@@ -508,7 +640,12 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
 
 
 def _capture_whispercpp_args(
-    backend: WhisperCppBackend, *, monkeypatch, tmp_path: Path, settings
+    backend: WhisperCppBackend,
+    *,
+    monkeypatch,
+    tmp_path: Path,
+    settings,
+    params: TranscribeParams | None = None,
 ) -> list[str]:
     """Run a fully faked whisper.cpp transcription and return the whisper-cli argv."""
     input_path = tmp_path / "sample.m4a"
@@ -559,7 +696,7 @@ def _capture_whispercpp_args(
     monkeypatch.setattr("transcriptions.service.run_cancellable_process", fake_whisper_cli)
     backend.transcribe(
         input_path,
-        TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+        params or TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
     )
     return calls[1]
 

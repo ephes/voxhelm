@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from transcriptions import formats
 from transcriptions.sanitizer import sanitize_result
-from transcriptions.service import TranscriptionResult, TranscriptionSegment
+from transcriptions.service import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 
 
 def _result(segments: list[TranscriptionSegment]) -> TranscriptionResult:
@@ -300,3 +300,31 @@ def test_repeat_threshold_is_configurable() -> None:
     result = sanitize_result(_result(segments), repeat_threshold=3)
 
     assert len(result.segments) == 1
+
+
+def test_words_survive_untouched_segments_and_are_dropped_from_rewritten_ones() -> None:
+    kept = TranscriptionSegment(
+        id=0,
+        start=0.0,
+        end=1.0,
+        text="Hello there",
+        words=(
+            TranscriptionWord(start=0.0, end=0.4, text="Hello"),
+            TranscriptionWord(start=0.4, end=1.0, text="there"),
+        ),
+    )
+    rewritten = TranscriptionSegment(
+        id=1,
+        start=1.0,
+        end=2.0,
+        text="And then.........",
+        words=(TranscriptionWord(start=1.0, end=2.0, text="And"),),
+    )
+    result = TranscriptionResult(text="", language="en", segments=[kept, rewritten])
+
+    sanitized = sanitize_result(result, enabled=True, repeat_threshold=4)
+
+    assert sanitized.segments[0].words == kept.words
+    # The text changed, so the word list no longer describes it.
+    assert sanitized.segments[1].text != rewritten.text
+    assert sanitized.segments[1].words == ()
