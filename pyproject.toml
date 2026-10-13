@@ -9,6 +9,7 @@ dependencies = [
   "Django>=5.2,<5.3",
   "django-tasks>=0.12.0",
   "django-tasks-db>=0.12.0",
+  "httpx>=0.28.1,<0.29",
   "mlx-whisper; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "piper-tts>=1.4.1,<2; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "uvicorn>=0.35.0",
