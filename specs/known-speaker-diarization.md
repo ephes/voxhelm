@@ -285,7 +285,16 @@ re-cuts the segments before classifying them:
   segments, so their start times match. The full transcript text is unchanged.
 
 After the whole-segment rules, a segment that is still uncertain and was not
-flagged by the veto takes the speaker the track supports for it: every clear
+flagged by the veto takes the speaker the track supports for it, but only
+when the anonymous diarization puts known speakers on it: every diarization
+label overlapping the segment for 0.3 s or more (or the longest one, if none
+does) must be tied to a known speaker in this job by the vote described under
+"Turn corroboration". The label need not be the track's speaker, since
+pyannote often gives a short interjection to the surrounding speaker. Without
+raw diarization turns, or on a label nobody was tied to, the track names
+nothing. This matters for episodes with a guest who has no reference: the
+track only compares against the known references, and a guest's voice can
+resemble a host's. The track supports a speaker when: every clear
 frame centred inside the segment (0.4 s in from each edge when it is longer
 than 0.8 s) names the same speaker, there is at least one such frame, and for
 segments of 2.5 s and more at least 30% of the frames are clear. This is not

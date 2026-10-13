@@ -653,6 +653,29 @@ interjections, which is why agreement near cuts is only 70-80% to begin with,
 so a real but small gain could hide in that noise. Settling it would need
 hand-labelled word boundaries.
 
+#### Guest without a reference (2026-10-13)
+
+The most common request on the Django Chat staging catalogue is three
+assigned speakers with references for the two hosts only (115 of 207
+episodes), `num_speakers=3`. Measured locally with the host references on two
+such episodes; "guest" is the pyannote label that is tied to no host.
+
+| | "EuroPython 2026" (1425 s, guest 933 s) | "Deploy on Day One" (3061 s, guest 2111 s) |
+| --- | --- | --- |
+| guest speech named, re-cut off (0.1.4 behaviour) | 0 | 1 segment / 3 s |
+| guest speech named, 0.1.5 | 0 | 72 segments / 266 s, 71 by the speaker track |
+| guest speech named, with the diarization guard | 0 | 1 segment / 3 s |
+| hosts named, 0.1.5 / with the guard | 123 / 116 segments | 309 / 215 segments |
+
+0.1.5 therefore gives a guest whose voice resembles a host that host's name.
+The guard (`raw_labels_are_known`) lets the track name a segment only when
+its diarization labels are tied to known speakers. With it, episodes 205 and
+206 are unchanged (746 and 490 confident, same opening). The remaining false
+name comes from the whole-segment rule and predates the re-cut. Not examined:
+guests with their own reference, more than three speakers, and whether the
+re-cut places sensible boundaries inside guest speech (the track cannot tell
+a guest from the host they resemble).
+
 ## Order and verification
 
 1. Done, see "Findings": full-episode diarization of episode 206 with

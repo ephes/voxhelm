@@ -863,6 +863,30 @@ def map_raw_labels_to_speakers(votes: Mapping[str, Mapping[str, int]]) -> dict[s
     return mapping
 
 
+def raw_labels_are_known(
+    overlaps: Mapping[str, float],
+    label_speakers: Mapping[str, str],
+) -> bool:
+    """True when every diarization label on a segment belongs to a known speaker.
+
+    Labels overlapping for less than ``TURN_CORROBORATION_MAX_OTHER_SECONDS``
+    are ignored unless nothing overlaps longer, in which case the longest one
+    counts. A segment without any diarization turn is not known. This keeps
+    the speaker track, which only compares against the known references, from
+    naming the speech of someone who has no reference, such as a guest.
+    """
+    if not overlaps:
+        return False
+    labels = [
+        label
+        for label, seconds in overlaps.items()
+        if seconds >= TURN_CORROBORATION_MAX_OTHER_SECONDS
+    ]
+    if not labels:
+        labels = [min(overlaps.items(), key=lambda item: (-item[1], item[0]))[0]]
+    return all(label in label_speakers for label in labels)
+
+
 def is_turn_corroboration_candidate(
     classification: SegmentClassification,
     *,
@@ -894,7 +918,8 @@ def classify_segments(
 
     ``track_frames`` is the speaker track of the re-cut, when it ran. A segment
     that is still uncertain after the whole-segment rules, and that the veto
-    did not flag, takes the speaker the track supports for it.
+    did not flag, takes the speaker the track supports for it, provided the
+    anonymous diarization puts only known speakers on it.
     """
     track_centers = [frame.center for frame in track_frames]
     normalized_raw_turns = normalize_speaker_turns(raw_turns) if raw_turns else []
@@ -914,6 +939,7 @@ def classify_segments(
     confident_flags: list[bool] = []
     mixed_by_index: list[list[MixedWindow]] = []
     single_labels: list[str | None] = []
+    overlaps_by_index: list[dict[str, float]] = []
     label_votes: dict[str, dict[str, int]] = {}
     for segment in result.segments:
         duration = max(segment.end - segment.start, 0.0)
@@ -927,9 +953,8 @@ def classify_segments(
             # Only segments that would be auto-accepted need the extra embeddings.
             mixed_windows = mixed_windows_for(segment, classification.top_speaker)
             confident = not mixed_windows
-        single_label = single_raw_label(
-            raw_turn_overlaps(segment.start, segment.end, normalized_raw_turns)
-        )
+        overlaps = raw_turn_overlaps(segment.start, segment.end, normalized_raw_turns)
+        single_label = single_raw_label(overlaps)
         if confident and single_label is not None:
             speaker_votes = label_votes.setdefault(single_label, {})
             speaker_votes[classification.top_speaker] = (
@@ -939,6 +964,7 @@ def classify_segments(
         confident_flags.append(confident)
         mixed_by_index.append(mixed_windows)
         single_labels.append(single_label)
+        overlaps_by_index.append(overlaps)
 
     label_speakers = map_raw_labels_to_speakers(label_votes)
     segments: list[KnownSpeakerSegment] = []
@@ -964,7 +990,11 @@ def classify_segments(
             confident = corroborated
         speaker = classification.top_speaker
         accept_reason = TURN_CORROBORATED_REASON if corroborated else None
-        if not confident and not mixed_windows:
+        if (
+            not confident
+            and not mixed_windows
+            and raw_labels_are_known(overlaps_by_index[index], label_speakers)
+        ):
             duration = max(segment.end - segment.start, 0.0)
             track_speaker = track_speaker_for_segment(
                 segment.start, segment.end, track_frames, track_centers

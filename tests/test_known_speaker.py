@@ -46,6 +46,7 @@ from transcriptions.known_speaker import (
     l2_normalize,
     mixed_window_bounds,
     pad_to_min_duration,
+    raw_labels_are_known,
     resegment_result,
     resegmentation_enabled,
     run_known_speaker_postprocess,
@@ -1051,30 +1052,6 @@ def test_split_pieces_have_increasing_starts_and_positive_durations() -> None:
     assert all(piece.end - piece.start >= 0.3 for piece in pieces)
 
 
-def test_track_acceptance_runs_the_mixed_veto_first() -> None:
-    # The whole segment is too weak for the whole-segment rules, the track
-    # supports Johannes, but the end-aligned veto window is clearly Dominik.
-    segment = classify_segments(
-        TranscriptionResult(
-            text="a",
-            language="de",
-            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
-        ),
-        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
-        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
-        raw_turns=[],
-        config=KnownSpeakerConfig(),
-        backend=ScriptedEmbeddingBackend([[0.3, 0.0, 0.954], JOHANNES, DOMINIK]),
-        track_frames=[frame(1.0, "Johannes")],
-    )[0]
-
-    assert segment.speaker is None
-    assert segment.speaker_uncertain is True
-    assert segment.speaker_accept_reason is None
-    assert segment.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
-    assert [window.speaker for window in segment.speaker_mixed_windows] == ["Dominik"]
-
-
 def test_split_segment_keeps_segments_without_words_or_within_one_turn() -> None:
     no_words = TranscriptionSegment(id=0, start=2.0, end=8.0, text="a b")
     one_turn = TranscriptionSegment(
@@ -1156,84 +1133,141 @@ def test_track_speaker_needs_a_share_of_clear_frames_on_long_segments() -> None:
     assert track_speaker(12.5, 13.5, one_clear) == "Johannes"
 
 
-def test_track_speaker_is_rejected_when_the_embedding_clearly_names_another() -> None:
-    # Similarity 0.3 to Johannes: below every whole-segment rule.
-    segments = classify_scripted(
-        [[0.3, 0.0, 0.954]],
-        raw_turns=[],
-        config=KnownSpeakerConfig(mixed_window_duration=0),
-    )
-    assert segments[0].speaker is None
+def classify_tracked(
+    vectors: list[list[float]],
+    *,
+    seconds: float = 2.0,
+    track_speaker: str = "Dominik",
+    config: KnownSpeakerConfig | None = None,
+    raw_turns: list[SpeakerTurn] | None = None,
+    confident_vectors: int = 1,
+) -> KnownSpeakerSegment:
+    """Classify one segment after five confident Johannes segments.
 
-    tracked = classify_segments(
-        TranscriptionResult(
-            text="a",
-            language="de",
-            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
-        ),
-        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+    The five segments tie SPEAKER_00 to Johannes; the last segment lies in the
+    same diarization turn unless ``raw_turns`` says otherwise, and the track
+    has one clear frame for ``track_speaker`` in its middle. ``vectors`` are
+    the embeddings requested for the last segment; ``confident_vectors`` is
+    how many each confident segment consumes (3 with the veto on).
+    """
+    segments = [
+        TranscriptionSegment(id=index, start=index * 2.0, end=(index + 1) * 2.0, text="a")
+        for index in range(5)
+    ]
+    segments.append(TranscriptionSegment(id=5, start=10.0, end=10.0 + seconds, text="a"))
+    if raw_turns is None:
+        raw_turns = [SpeakerTurn(start=0.0, end=10.0 + seconds, speaker="SPEAKER_00")]
+    return classify_segments(
+        TranscriptionResult(text="a", language="de", segments=segments),
+        job_audio_samples=numpy.zeros(int((10.0 + seconds) * 16000), dtype="float32"),
         centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
-        raw_turns=[],
-        config=KnownSpeakerConfig(mixed_window_duration=0),
-        backend=ScriptedEmbeddingBackend([[0.3, 0.0, 0.954]]),
-        track_frames=[frame(1.0, "Dominik")],
-    )[0]
+        raw_turns=raw_turns,
+        config=config or KnownSpeakerConfig(mixed_window_duration=0),
+        backend=ScriptedEmbeddingBackend([JOHANNES] * (5 * confident_vectors) + vectors),
+        track_frames=[frame(10.0 + seconds / 2, track_speaker)],
+    )[-1]
 
-    # The whole-segment margin is clear and names Johannes: a contradiction.
+
+def test_track_speaker_is_rejected_when_the_embedding_clearly_names_another() -> None:
+    # Similarity 0.3 to Johannes with a clear margin, and the track says Dominik.
+    tracked = classify_tracked([[0.3, 0.0, 0.954]])
+
     assert tracked.speaker is None
     assert tracked.speaker_accept_reason is None
 
 
 def test_track_speaker_is_accepted_without_a_contradicting_embedding() -> None:
-    def classify(vector: list[float], seconds: float) -> KnownSpeakerSegment:
-        return classify_segments(
-            TranscriptionResult(
-                text="a",
-                language="de",
-                segments=[TranscriptionSegment(id=0, start=0.0, end=seconds, text="a")],
-            ),
-            job_audio_samples=numpy.zeros(int(seconds * 16000), dtype="float32"),
-            centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
-            raw_turns=[],
-            config=KnownSpeakerConfig(mixed_window_duration=0),
-            backend=ScriptedEmbeddingBackend([vector]),
-            track_frames=[frame(seconds / 2, "Dominik")],
-        )[0]
-
     # Same speaker as the weak embedding.
-    agreeing = classify([0.0, 0.3, 0.954], 2.0)
+    agreeing = classify_tracked([[0.0, 0.3, 0.954]])
     assert agreeing.speaker == "Dominik"
     assert agreeing.speaker_uncertain is False
     assert agreeing.speaker_accept_reason == SPEAKER_TRACK_REASON
     # Embedding undecided (margin 0.05): the track settles it.
-    undecided = classify([0.35, 0.3, 0.9], 2.0)
+    undecided = classify_tracked([[0.35, 0.3, 0.9]])
     assert undecided.speaker == "Dominik"
     assert undecided.speaker_candidates[0].speaker == "Johannes"
     # Too short for the embedding to count as a contradiction.
-    short = classify([0.6, 0.0, 0.8], 1.0)
+    short = classify_tracked([[0.6, 0.0, 0.8]], seconds=1.0)
     assert short.speaker == "Dominik"
     assert short.speaker_accept_reason == SPEAKER_TRACK_REASON
 
 
-def test_track_does_not_override_the_mixed_veto() -> None:
-    outcome_segments = classify_segments(
-        TranscriptionResult(
-            text="a",
-            language="de",
-            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
-        ),
-        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
-        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
-        raw_turns=[],
-        config=KnownSpeakerConfig(),
-        # Whole segment Johannes, first sub-window Johannes, second Dominik.
-        backend=ScriptedEmbeddingBackend([JOHANNES, JOHANNES, DOMINIK]),
-        track_frames=[frame(1.0, "Johannes")],
+@pytest.mark.parametrize(
+    "raw_turns",
+    [
+        # No diarization at all.
+        [],
+        # The segment lies in the turn of a speaker nobody has a reference for.
+        [
+            SpeakerTurn(start=0.0, end=10.0, speaker="SPEAKER_00"),
+            SpeakerTurn(start=10.0, end=12.0, speaker="SPEAKER_GUEST"),
+        ],
+        # A guest overlaps the segment for half a second.
+        [
+            SpeakerTurn(start=0.0, end=11.5, speaker="SPEAKER_00"),
+            SpeakerTurn(start=11.5, end=12.0, speaker="SPEAKER_GUEST"),
+        ],
+        # The diarization has no turn on the segment.
+        [SpeakerTurn(start=0.0, end=10.0, speaker="SPEAKER_00")],
+    ],
+)
+def test_track_speaker_needs_known_diarization_speakers(raw_turns) -> None:
+    tracked = classify_tracked([[0.0, 0.3, 0.954]], raw_turns=raw_turns)
+
+    assert tracked.speaker is None
+    assert tracked.speaker_uncertain is True
+    assert tracked.speaker_accept_reason is None
+
+
+def test_track_speaker_ignores_a_brief_unknown_diarization_label() -> None:
+    tracked = classify_tracked(
+        [[0.0, 0.3, 0.954]],
+        raw_turns=[
+            SpeakerTurn(start=0.0, end=11.9, speaker="SPEAKER_00"),
+            SpeakerTurn(start=11.9, end=12.0, speaker="SPEAKER_GUEST"),
+        ],
     )
 
-    assert outcome_segments[0].speaker is None
-    assert outcome_segments[0].speaker_uncertain_reason == MIXED_SPEAKERS_REASON
-    assert outcome_segments[0].speaker_accept_reason is None
+    assert tracked.speaker == "Dominik"
+
+
+def test_raw_labels_are_known_uses_the_longest_label_when_all_are_brief() -> None:
+    known = {"SPEAKER_00": "Johannes"}
+
+    assert raw_labels_are_known({"SPEAKER_00": 0.2, "SPEAKER_GUEST": 0.1}, known) is True
+    assert raw_labels_are_known({"SPEAKER_00": 0.1, "SPEAKER_GUEST": 0.2}, known) is False
+    assert raw_labels_are_known({}, known) is False
+
+
+def test_track_does_not_override_the_mixed_veto() -> None:
+    # Whole segment Johannes, first sub-window Johannes, second Dominik.
+    vetoed = classify_tracked(
+        [JOHANNES, JOHANNES, DOMINIK],
+        track_speaker="Johannes",
+        config=KnownSpeakerConfig(),
+        confident_vectors=3,
+    )
+
+    assert vetoed.speaker is None
+    assert vetoed.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert vetoed.speaker_accept_reason is None
+
+
+def test_track_acceptance_runs_the_mixed_veto_first() -> None:
+    # The whole segment is too weak for the whole-segment rules, the track
+    # supports Johannes, but the end-aligned veto window is clearly Dominik.
+    vetoed = classify_tracked(
+        [[0.3, 0.0, 0.954], JOHANNES, DOMINIK],
+        track_speaker="Johannes",
+        config=KnownSpeakerConfig(turn_corroborated_min_similarity=0),
+        confident_vectors=3,
+    )
+
+    assert vetoed.speaker is None
+    assert vetoed.speaker_uncertain is True
+    assert vetoed.speaker_accept_reason is None
+    assert vetoed.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert [window.speaker for window in vetoed.speaker_mixed_windows] == ["Dominik"]
 
 
 def run_two_speaker_segment(config: KnownSpeakerConfig, *, with_words: bool = True):
@@ -1309,23 +1343,11 @@ def test_postprocess_leaves_segments_alone_without_recut_or_words(config, with_w
 
 def test_track_accepted_segments_are_serialized_and_summarized() -> None:
     centroids = {"Johannes": JOHANNES, "Dominik": DOMINIK}
-    classified = classify_segments(
-        TranscriptionResult(
-            text="a",
-            language="de",
-            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
-        ),
-        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
-        centroids=centroids,
-        raw_turns=[],
-        config=KnownSpeakerConfig(mixed_window_duration=0),
-        backend=ScriptedEmbeddingBackend([[0.0, 0.3, 0.954]]),
-        track_frames=[frame(1.0, "Dominik")],
-    )
+    tracked = classify_tracked([[0.0, 0.3, 0.954]])
 
-    serialized = serialize_known_speaker_segments(classified)[0]
+    serialized = serialize_known_speaker_segments([tracked])[0]
     summary = summarize_known_speaker(
-        classified,
+        [tracked],
         centroids=centroids,
         config=KnownSpeakerConfig(),
         embedding_version="scripted-v1",
