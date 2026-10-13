@@ -595,7 +595,15 @@ exactly (519 segments, 490 confident, 29 uncertain, 0 mixed, 44 corroborated,
 all 519 sidecar segments to the Podlove, VTT and DOTe artifacts by start time
 without changes on its side. `processing_seconds` was 250.3, against 142.1
 for the 0.1.4 job; the local 190 s estimate left out the anonymous pyannote
-run. Not yet checked against the audio by ear. 41 segments are shorter than
+run. Checked by ear on staging by the maintainer on 2026-10-13 for the
+opening: judged acceptable, with two boundaries one word late. "yeah" at the
+end of "hello will welcome back yeah" (10.18-12.28) is already Will, and
+"the" at the end of "... fall season so the" (15.76-19.47) is already
+Carlton. In the first case the word time is about 0.5 s early (token
+`yeah@11.93`, spoken around 12.5 in the VAD run); in the second the word time
+is right and the track boundary (19.375) is about 0.13 s late, within the
+0.25 s track step. Open: better word times and snapping the boundary to a
+pause. 41 segments are shorter than
 1 s, 14 shorter than 0.5 s. The four under 0.3 s are Whisper's own segments;
 the others include pieces of a split, such as "hey carlton" (0.86 s).
 
