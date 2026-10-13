@@ -492,6 +492,66 @@ sub-window evidence of step 1b for changes pyannote misses), plus a rule for
 the short single-speaker segments this produces. Punctuation and casing would
 then be a separate text-restoration question.
 
+#### Prototype: re-cut at speaker changes from word timestamps (2026-10-13)
+
+Not production code; scripts ran outside the repository against the worker's
+dependencies. Method:
+
+1. Word timestamps: `whisper-cli -ojf` with the deployed settings but `-p 1`.
+   With `-p 4` the token offsets of the later chunks are relative to their
+   chunk, so they cannot be used as they are; segment offsets are correct.
+2. Speaker track: the known-speaker embedding of a 1.5 s window every 0.25 s
+   over the whole file, classified against the job's centroids. A frame is
+   clear when margin >= 0.15 and similarity >= 0.30 (the veto's thresholds).
+   Clear frames of one speaker form runs (at least two frames); between runs
+   of different speakers the boundary is the last frame where the top speaker
+   flips.
+3. Each Whisper segment is split where its words fall into different turns;
+   pieces of a single word are folded into a neighbour.
+4. A piece gets its turn's speaker unless a clear frame of another speaker
+   lies inside it (0.4 s in from each edge) or, for pieces of 2.5 s and more,
+   fewer than 30% of its frames are clear for that speaker.
+
+| | Episode 206 | Episode 205 |
+| --- | --- | --- |
+| Whisper segments (`-p 1`) | 446 | 737 |
+| segments after the re-cut | 521 | 814 |
+| named | 491 (2118 of 2164 s) | 762 (2785 of 2885 s) |
+| named, single pyannote speaker: agreeing with it | 388 of 397 | 660 of 664 |
+| of those, pieces from a split: agreeing | 61 of 69 | 83 of 85 |
+| deployed 0.1.4 for comparison: named | 337 of 454 | 520 of 710 |
+| extra cost on `atlas` | 48 s track, 2195 s audio | 65 s track, 2997 s audio |
+
+The opening of episode 206 after the re-cut:
+
+```
+  0.00-  9.32 Will     hello welcome to another episode of django chat i'm will vincent with carlton gibson
+  9.32- 10.18 Will     hey carlton
+ 10.18- 12.28 Carlton  hello will welcome back yeah
+ 12.28- 15.76 Will     we're back we did a sneak peek one for the developer
+ 15.76- 19.47 Will     survey but this is the first start of the fall season so the
+ 19.47- 21.84 Carlton  long the long stretch until christmas
+ 21.84- 28.02 Will     and even this is number 206 it still took us what 20 minutes to figure out the logistics of
+ 28.02- 29.42 Will     the technology so
+ 29.42- 33.58 Carlton  i just getting the pipes lined up so they actually connect to each other is
+ 33.58- 36.55 -        harder than it should be yeah yeah okay well
+ 36.55- 40.34 Will     you look tanned and rested tell us where have you been
+ 40.34- 48.42 Carlton  well i've just got back um from pescara at brutto in italy where we had the second episode of
+```
+
+On episode 205 the block boundary error at 36.68 / 43.76 is cut correctly
+("... how important is the survey but" Will / "historically it's been very
+important so i" Carlton).
+
+Limits: not checked against the audio by ear; pyannote agreement is the only
+independent check and pyannote misses the very interjections this is for, so
+disagreement on split pieces is expected and not all of it is error. Word
+times are up to about 0.6 s early, so a boundary can be one word off ("yeah"
+at 11.93 belongs to Will's next sentence). A piece can collapse to near-zero
+length (episode 205, 12.30-12.33 "Hello, Will."). Both episodes have the same
+two speakers. The naming rule is far more permissive than the deployed
+acceptance policy and was not tuned. Text stays lowercase and unpunctuated.
+
 ## Order and verification
 
 1. Done, see "Findings": full-episode diarization of episode 206 with
