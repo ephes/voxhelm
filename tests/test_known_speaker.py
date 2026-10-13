@@ -18,6 +18,7 @@ from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     KNOWN_SPEAKER_STRATEGY,
     MIXED_SPEAKERS_REASON,
+    TURN_CORROBORATED_REASON,
     KnownSpeakerBackendUnavailableError,
     KnownSpeakerConfig,
     KnownSpeakerConfigurationError,
@@ -31,6 +32,7 @@ from transcriptions.known_speaker import (
     build_known_speaker_backend,
     build_speakers_artifact,
     classify_embedding,
+    classify_segments,
     cosine_similarity,
     find_mixed_windows,
     get_pyannote_embedding_backend,
@@ -41,7 +43,9 @@ from transcriptions.known_speaker import (
     pad_to_min_duration,
     run_known_speaker_postprocess,
     select_reference_window_bounds,
+    serialize_known_speaker_segments,
     slice_samples,
+    summarize_known_speaker,
 )
 from transcriptions.service import TranscriptionResult, TranscriptionSegment
 
@@ -556,6 +560,220 @@ def test_uncertain_segments_skip_the_sub_window_embeddings() -> None:
     assert CountingBackend.calls == 3
 
 
+JOHANNES = [1.0, 0.0, 0.0]
+DOMINIK = [0.0, 1.0, 0.0]
+# Similarity 0.5 to Johannes and 0.0 to Dominik: a clear margin, but below
+# the default ``min_top_similarity`` of 0.55.
+WEAK_JOHANNES = [0.5, 0.0, 0.866]
+
+
+def classify_scripted(
+    vectors: list[list[float]],
+    *,
+    raw_turns: list[SpeakerTurn],
+    config: KnownSpeakerConfig | None = None,
+    segment_seconds: float = 2.0,
+):
+    """Classify back-to-back segments, one scripted whole-segment vector each."""
+    segments = [
+        TranscriptionSegment(
+            id=index,
+            start=index * segment_seconds,
+            end=(index + 1) * segment_seconds,
+            text="a",
+        )
+        for index in range(len(vectors))
+    ]
+    return classify_segments(
+        TranscriptionResult(text="a", language="de", segments=segments),
+        job_audio_samples=numpy.zeros(int(len(vectors) * segment_seconds * 16000), dtype="float32"),
+        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+        raw_turns=raw_turns,
+        # Without the veto every segment costs exactly one embedding.
+        config=config or KnownSpeakerConfig(mixed_window_duration=0),
+        backend=ScriptedEmbeddingBackend(vectors),
+    )
+
+
+def test_weak_segment_is_accepted_when_the_diarization_turn_corroborates_it() -> None:
+    # Five confident Johannes segments tie SPEAKER_00 to Johannes; the sixth
+    # misses only the similarity threshold and lies in the same turn.
+    segments = classify_scripted(
+        [JOHANNES] * 5 + [WEAK_JOHANNES],
+        raw_turns=[SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+    )
+
+    weak = segments[-1]
+    assert weak.speaker == "Johannes"
+    assert weak.speaker_uncertain is False
+    assert weak.speaker_accept_reason == TURN_CORROBORATED_REASON
+    assert math.isclose(weak.speaker_confidence, 0.5, abs_tol=1e-3)
+    assert all(segment.speaker_accept_reason is None for segment in segments[:5])
+
+
+@pytest.mark.parametrize(
+    ("vectors", "raw_turns", "config"),
+    [
+        # No diarization turns at all.
+        ([JOHANNES] * 5 + [WEAK_JOHANNES], [], None),
+        # The weak segment lies in another speaker's turn.
+        (
+            [JOHANNES] * 5 + [WEAK_JOHANNES],
+            [
+                SpeakerTurn(start=0.0, end=10.0, speaker="SPEAKER_00"),
+                SpeakerTurn(start=10.0, end=12.0, speaker="SPEAKER_01"),
+            ],
+            None,
+        ),
+        # A second diarization speaker overlaps the weak segment for 0.5s.
+        (
+            [JOHANNES] * 5 + [WEAK_JOHANNES],
+            [
+                SpeakerTurn(start=0.0, end=11.5, speaker="SPEAKER_00"),
+                SpeakerTurn(start=11.5, end=12.0, speaker="SPEAKER_01"),
+            ],
+            None,
+        ),
+        # Too few confident segments to tie the label to a known speaker.
+        (
+            [JOHANNES] * 4 + [WEAK_JOHANNES],
+            [SpeakerTurn(start=0.0, end=10.0, speaker="SPEAKER_00")],
+            None,
+        ),
+        # The label is split between two known speakers.
+        (
+            [JOHANNES] * 4 + [DOMINIK] * 2 + [WEAK_JOHANNES],
+            [SpeakerTurn(start=0.0, end=14.0, speaker="SPEAKER_00")],
+            None,
+        ),
+        # Below the corroboration floor (similarity 0.3 to Johannes).
+        (
+            [JOHANNES] * 5 + [[0.3, 0.0, 0.954]],
+            [SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+            None,
+        ),
+        # Margin too small (0.5 vs 0.45): the turn cannot settle a close call.
+        (
+            [JOHANNES] * 5 + [[0.5, 0.45, 0.74]],
+            [SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+            None,
+        ),
+        # Switched off.
+        (
+            [JOHANNES] * 5 + [WEAK_JOHANNES],
+            [SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+            KnownSpeakerConfig(mixed_window_duration=0, turn_corroborated_min_similarity=0),
+        ),
+    ],
+)
+def test_weak_segment_stays_uncertain_without_corroboration(vectors, raw_turns, config) -> None:
+    weak = classify_scripted(vectors, raw_turns=raw_turns, config=config)[-1]
+
+    assert weak.speaker is None
+    assert weak.speaker_uncertain is True
+    assert weak.speaker_accept_reason is None
+
+
+def test_short_weak_segment_is_not_corroborated() -> None:
+    weak = classify_scripted(
+        [JOHANNES] * 5 + [WEAK_JOHANNES],
+        raw_turns=[SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+        config=KnownSpeakerConfig(mixed_window_duration=0, min_segment_duration=3.0),
+    )[-1]
+
+    assert weak.speaker_uncertain is True
+
+
+def test_corroborated_segment_is_still_subject_to_the_mixed_veto() -> None:
+    # With the veto on, a 2s segment has two sub-windows. The five confident
+    # segments pass theirs; the corroborated one has a clear Dominik window.
+    confident = [JOHANNES, JOHANNES, JOHANNES]
+    vectors = confident * 5 + [WEAK_JOHANNES] + [JOHANNES, DOMINIK]
+    segments = [
+        TranscriptionSegment(id=index, start=index * 2.0, end=(index + 1) * 2.0, text="a")
+        for index in range(6)
+    ]
+    centroids = {"Johannes": JOHANNES, "Dominik": DOMINIK}
+    raw_turns = [SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")]
+    config = KnownSpeakerConfig()
+    classified = classify_segments(
+        TranscriptionResult(text="a", language="de", segments=segments),
+        job_audio_samples=numpy.zeros(12 * 16000, dtype="float32"),
+        centroids=centroids,
+        raw_turns=raw_turns,
+        config=config,
+        backend=ScriptedEmbeddingBackend(vectors),
+    )
+    weak = classified[-1]
+
+    assert weak.speaker is None
+    assert weak.speaker_uncertain is True
+    assert weak.speaker_accept_reason is None
+    # The dissenting window is kept for review like on any vetoed segment.
+    assert weak.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert [window.speaker for window in weak.speaker_mixed_windows] == ["Dominik"]
+    serialized = serialize_known_speaker_segments(classified)[-1]
+    assert serialized["speaker_uncertain_reason"] == "mixed_speakers"
+    assert serialized["speaker_mixed_windows"][0]["speaker"] == "Dominik"
+    assert "speaker_accept_reason" not in serialized
+    summary = summarize_known_speaker(
+        classified,
+        centroids=centroids,
+        config=config,
+        embedding_version="scripted-v1",
+        raw_turns=raw_turns,
+    )
+    assert summary["mixed_segment_count"] == 1
+    assert summary["turn_corroborated_segment_count"] == 0
+
+
+def test_turn_corroboration_is_serialized_and_summarized() -> None:
+    references = [make_reference("Johannes", 0.1), make_reference("Dominik", 0.2)]
+    result = TranscriptionResult(
+        text="a",
+        language="de",
+        segments=[
+            TranscriptionSegment(id=index, start=index * 2.0, end=(index + 1) * 2.0, text="a")
+            for index in range(6)
+        ],
+    )
+
+    class WeakLastSegmentBackend(StubEmbeddingBackend):
+        """One-hot like the stub, but the sixth segment is only a weak Johannes."""
+
+        def embed(self, samples, sample_rate):
+            if 0.14 < float(numpy.mean(samples)) < 0.16:
+                return [0.0, 0.5, 0.0, 0.866, 0.0, 0.0]
+            return super().embed(samples, sample_rate)
+
+    audio = numpy.concatenate(
+        [numpy.full(10 * 16000, 0.1, dtype="float32"), numpy.full(2 * 16000, 0.15, "float32")]
+    )
+    outcome = run_known_speaker_postprocess(
+        result,
+        references=references,
+        job_audio_samples=audio,
+        raw_turns=[SpeakerTurn(start=0.0, end=12.0, speaker="SPEAKER_00")],
+        config=KnownSpeakerConfig(),
+        backend=WeakLastSegmentBackend(),
+    )
+    artifact = build_speakers_artifact(outcome)
+
+    assert artifact["segments"][-1]["speaker"] == "Johannes"
+    assert artifact["segments"][-1]["speaker_accept_reason"] == "turn_corroborated"
+    assert "speaker_accept_reason" not in artifact["segments"][0]
+    assert artifact["summary"]["turn_corroborated_segment_count"] == 1
+    assert artifact["summary"]["turn_corroborated_min_similarity"] == 0.35
+    assert artifact["summary"]["confident_segment_count"] == 6
+
+
+def test_parse_known_speaker_config_accepts_the_corroboration_floor() -> None:
+    parsed = parse_diarization_option(
+        known_speaker_payload(known_speaker={"turn_corroborated_min_similarity": 0})
+    )
+    assert parsed["known_speaker"]["turn_corroborated_min_similarity"] == 0.0
+
+
 def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None:
     assert known_speaker_config_from_mapping({}) == KnownSpeakerConfig()
     config = known_speaker_config_from_mapping(
@@ -568,6 +786,7 @@ def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None
             "mixed_window_hop": 0.5,
             "mixed_window_margin": 0.25,
             "mixed_window_min_similarity": 0.4,
+            "turn_corroborated_min_similarity": 0.45,
         }
     )
     assert config == KnownSpeakerConfig(
@@ -579,13 +798,21 @@ def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None
         mixed_window_hop=0.5,
         mixed_window_margin=0.25,
         mixed_window_min_similarity=0.4,
+        turn_corroborated_min_similarity=0.45,
     )
 
 
 def test_remote_claim_config_carries_mixed_window_options() -> None:
     config = known_speaker_config_from_claim(
-        {"known_speaker": {"mixed_window_duration": 0, "mixed_window_margin": 0.3}}
+        {
+            "known_speaker": {
+                "mixed_window_duration": 0,
+                "mixed_window_margin": 0.3,
+                "turn_corroborated_min_similarity": 0,
+            }
+        }
     )
+    assert config.turn_corroborated_min_similarity == 0.0
     assert config.mixed_window_duration == 0.0
     assert config.mixed_window_margin == 0.3
     assert config.mixed_window_hop == KnownSpeakerConfig().mixed_window_hop

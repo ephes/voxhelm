@@ -48,7 +48,8 @@ contract is unchanged; known-speaker mode is opt-in through
       "mixed_window_duration": 1.5,
       "mixed_window_hop": 0.75,
       "mixed_window_margin": 0.15,
-      "mixed_window_min_similarity": 0.3
+      "mixed_window_min_similarity": 0.3,
+      "turn_corroborated_min_similarity": 0.35
     }
   }
 }
@@ -80,6 +81,9 @@ Rules:
   optional, finite and non-negative; `mixed_window_hop` must be at least 0.1
   and `mixed_window_duration` either 0 or at least 0.5.
   `mixed_window_duration=0` turns the veto off.
+- `turn_corroborated_min_similarity=0.35` is the lower similarity floor for
+  segments the anonymous diarization corroborates (see "Turn corroboration").
+  Optional, finite and non-negative; `0` turns it off.
 - `num_speakers`/`min_speakers`/`max_speakers` may still be sent; they drive the
   anonymous pyannote run kept as a fallback/debug signal whose raw label is
   recorded per segment.
@@ -107,10 +111,12 @@ segment still carries the confident speaker name (or `null` when uncertain).
     "mixed_window_hop": 0.75,
     "mixed_window_margin": 0.15,
     "mixed_window_min_similarity": 0.3,
+    "turn_corroborated_min_similarity": 0.35,
     "segment_count": 1249,
     "confident_segment_count": 1175,
     "uncertain_segment_count": 74,
     "mixed_segment_count": 12,
+    "turn_corroborated_segment_count": 40,
     "confident_speaker_distribution": {"Johannes": 390, "Dominik": 191},
     "margin_median": 0.372,
     "raw_diarization_available": true
@@ -159,16 +165,25 @@ the whole segment, so its main speaker remains visible for review.
 `speaker_mixed_windows` lists only the windows that voted for another speaker.
 `uncertain_segment_count` includes the `mixed_segment_count` segments.
 
+A segment accepted by turn corroboration carries
+`"speaker_accept_reason": "turn_corroborated"`; the field is absent on every
+other segment. Its `speaker_confidence` is below `min_top_similarity` by
+construction. `confident_segment_count` and `confident_speaker_distribution`
+include the `turn_corroborated_segment_count` segments.
+
 The job `result.metadata.diarization` also carries a `known_speaker_summary`
 (the summary block above) and a non-sensitive `known_speakers` list of
 `{id, name, reference_count}` — never the private reference URLs/ranges.
 
 ## Acceptance policy
 
-A segment is auto-accepted (gets a sidecar `speaker`) only when
+A segment is auto-accepted (gets a sidecar `speaker`) when
 `duration >= min_segment_duration` and `top_similarity >= min_top_similarity`
-and `margin >= auto_accept_margin`. Otherwise it is `speaker_uncertain=true`
-with `speaker=null`, keeping the best-effort candidate list for review. The
+and `margin >= auto_accept_margin`, and the mixed-segment veto below does not
+object. A segment that misses only the similarity threshold can still be
+accepted through "Turn corroboration" below. Every other segment is
+`speaker_uncertain=true` with `speaker=null`, keeping the best-effort
+candidate list for review. The
 sidecar is a suggestion: it never writes the public transcript artifacts. Raw
 anonymous pyannote labels are preserved per segment for audit and remapping.
 
@@ -196,8 +211,36 @@ above is therefore checked again:
 
 The veto only turns confident suggestions into uncertain ones. It does not
 change segment boundaries, indices or the public transcript artifacts, and it
-does not split the segment. Uncertain segments are not checked, so the extra
-cost is a few embeddings per confident segment.
+does not split the segment. Only segments that would otherwise be accepted are
+checked (by the rule above or by turn corroboration), so the extra cost is a
+few embeddings per such segment.
+
+### Turn corroboration
+
+`min_top_similarity` rejects many single-speaker segments whose embedding is
+merely weak (short phrases, laughter in the voice, a different microphone
+distance) although the margin to the other speakers is clear. The anonymous
+pyannote run is independent evidence for those. A segment that fails only the
+similarity threshold is accepted anyway when all of this holds:
+
+- `duration >= min_segment_duration`, `margin >= auto_accept_margin` and
+  `turn_corroborated_min_similarity <= top_similarity < min_top_similarity`.
+- The diarization puts one speaker on the segment: other diarization labels
+  overlap it for less than 0.3 s in total.
+- That diarization label stands for the segment's top speaker in this job. A
+  label is tied to a known speaker when at least 5 confident segments with
+  only that label exist and at least 90% of them name the same speaker.
+  Segments the mixed-segment veto downgraded do not vote.
+- The mixed-segment veto finds no window for another speaker. If it does, the
+  segment stays uncertain and carries `speaker_uncertain_reason` and
+  `speaker_mixed_windows` like any vetoed segment, so `mixed_segment_count`
+  counts it as well.
+
+Such a segment gets its `speaker`, `speaker_uncertain=false` and
+`speaker_accept_reason="turn_corroborated"`. Without raw diarization turns, or
+with `turn_corroborated_min_similarity=0`, nothing is corroborated. The rule
+never settles a close call between two known speakers and never overrides the
+veto. The measurements are in `2026-10-12_mixed_speaker_segments.md`.
 
 ## Ownership
 

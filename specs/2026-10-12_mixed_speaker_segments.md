@@ -1,8 +1,9 @@
-# Mixed-speaker transcript segments (plan, step 1b deployed)
+# Mixed-speaker transcript segments (plan, step 1b deployed, turn corroboration implemented)
 
 Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
 voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
-plan. Revised after a fresh-context review by gpt-6.1-sol (high
+plan. Turn corroboration (see "Uncertain segments without a veto") is
+implemented but not deployed. Revised after a fresh-context review by gpt-6.1-sol (high
 effort) on the same day; the main findings were checked against the source and
 are folded in below. The open question is settled, see "Findings" below:
 pyannote emitted no turn for the greeting, the sub-window classification does
@@ -289,6 +290,56 @@ would address; how many of them are backchannels was not examined.
 
 Still open for 1b: no speaker-labelled reference exists, so the false-veto
 rate is estimated by the proxy only.
+
+#### Uncertain segments without a veto
+
+The veto only removes names. After it, 115 of 454 segments on episode 206 and
+215 of 710 on episode 205 are uncertain for another reason (2026-10-12, same
+runs as above; "pyannote-mixed" as defined above):
+
+| Reason | Ep. 206 segments / seconds | pyannote-mixed | Ep. 205 segments / seconds | pyannote-mixed |
+| --- | --- | --- | --- | --- |
+| shorter than 1.5 s | 46 / 33 | 4 | 110 / 98 | 8 |
+| only similarity < 0.55 | 45 / 238 | 22 | 69 / 202 | 11 |
+| similarity < 0.55 and margin < 0.15 | 20 / 100 | 15 | 28 / 125 | 18 |
+| only margin < 0.15 | 4 / 22 | 4 | 8 / 56 | 8 |
+
+"Only similarity" is the largest block by speech time and the one where the
+embedding already picks a speaker with a clear margin. The diarization label
+of each such segment was mapped to a known speaker through the confident
+segments of the same job (episode 206: one label 114 Will / 1 Carlton, the
+other 199 Carlton / 2 Will; episode 205: 237 / 1 and 229 / 0). Where pyannote
+sees a single speaker on the segment, that mapped speaker equals the embedding
+top speaker in 23 of 23 segments on episode 206 and 57 of 58 on episode 205.
+The one disagreement is 12.30-15.26 on episode 205 ("Hello, Will. What are we
+doing in summer? ..."), a greeting pyannote attributed to one speaker; the rule
+below leaves it uncertain. Agreement does not depend visibly on the similarity
+between 0.35 and 0.55, but only 11 single-speaker segments lie below 0.40.
+
+**Turn corroboration as implemented** (`classify_segments`, contract in
+`known-speaker-diarization.md`): a segment failing only `min_top_similarity`
+is accepted when its similarity is at least `turn_corroborated_min_similarity`
+(0.35), pyannote puts one speaker on it, that label maps to the same known
+speaker, and the mixed-segment veto finds nothing. Run with the worker
+dependencies on both episodes:
+
+| | Episode 206 | Episode 205 |
+| --- | --- | --- |
+| confident before / after | 316 / 337 | 467 / 520 |
+| uncertain before / after | 138 / 117 | 243 / 190 |
+| corroborated | 21 | 53 |
+| `mixed_segment_count` before / after | 23 / 25 | 28 / 28 |
+| distribution after | Will 130 / Carlton 207 | Will 255 / Carlton 265 |
+
+On episode 206 two candidates were stopped by the veto; they were uncertain
+before and now also carry the `mixed_speakers` reason, which is why the mixed
+count rises without any segment losing a name.
+
+The accepted segments were read as text only: they sit inside longer runs of
+the same speaker. They were not checked against the audio, and both episodes
+have the same two speakers, so the rule is untested on episodes with guests
+or more than two voices. Runtime is unchanged within noise (one extra veto
+pass per corroborated candidate).
 
 The change is not classifier-only. It also needs:
 

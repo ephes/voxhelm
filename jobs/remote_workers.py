@@ -103,6 +103,7 @@ KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS: set[str] = {
     "confident_segment_count",
     "uncertain_segment_count",
     "mixed_segment_count",
+    "turn_corroborated_segment_count",
 }
 KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
     "min_segment_duration",
@@ -112,6 +113,7 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
     "mixed_window_hop",
     "mixed_window_margin",
     "mixed_window_min_similarity",
+    "turn_corroborated_min_similarity",
     "margin_median",
 }
 SUMMARY_STRING_MAX_LENGTH = 256

@@ -75,6 +75,20 @@ MIN_MIXED_WINDOW_HOP = 0.1
 # few milliseconds, and well under half a second it has no speaker evidence.
 MIN_MIXED_WINDOW_DURATION = 0.5
 MIXED_SPEAKERS_REASON = "mixed_speakers"
+# Turn corroboration. A segment that misses only ``min_top_similarity`` is still
+# accepted when the anonymous diarization independently puts one speaker on it
+# and that diarization label belongs to the same known speaker in this job.
+# Measured on Django Chat episodes 205 and 206 (see
+# specs/2026-10-12_mixed_speaker_segments.md).
+DEFAULT_TURN_CORROBORATED_MIN_SIMILARITY = 0.35
+# A second diarization label overlapping the segment this long means the
+# diarization does not see one speaker, so it corroborates nothing.
+TURN_CORROBORATION_MAX_OTHER_SECONDS = 0.3
+# A diarization label stands for a known speaker only when enough confident
+# single-speaker segments agree on it.
+TURN_CORROBORATION_MIN_VOTES = 5
+TURN_CORROBORATION_MIN_SHARE = 0.9
+TURN_CORROBORATED_REASON = "turn_corroborated"
 
 KNOWN_SPEAKER_NUMBER_OPTIONS = (
     "min_segment_duration",
@@ -84,6 +98,7 @@ KNOWN_SPEAKER_NUMBER_OPTIONS = (
     "mixed_window_hop",
     "mixed_window_margin",
     "mixed_window_min_similarity",
+    "turn_corroborated_min_similarity",
 )
 
 # Reference centroids are built from a handful of clean, spaced windows rather
@@ -116,7 +131,9 @@ class KnownSpeakerConfig:
     >=0.55 was the recommended conservative auto-accept policy.
 
     The ``mixed_window_*`` options drive the mixed-segment veto;
-    ``mixed_window_duration=0`` turns it off.
+    ``mixed_window_duration=0`` turns it off. ``turn_corroborated_min_similarity``
+    is the lower similarity floor for segments the anonymous diarization
+    corroborates; ``0`` turns that off.
     """
 
     embedding_model: str = DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL
@@ -127,6 +144,7 @@ class KnownSpeakerConfig:
     mixed_window_hop: float = DEFAULT_MIXED_WINDOW_HOP
     mixed_window_margin: float = DEFAULT_MIXED_WINDOW_MARGIN
     mixed_window_min_similarity: float = DEFAULT_MIXED_WINDOW_MIN_SIMILARITY
+    turn_corroborated_min_similarity: float = DEFAULT_TURN_CORROBORATED_MIN_SIMILARITY
 
 
 def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSpeakerConfig:
@@ -145,6 +163,7 @@ def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSp
         mixed_window_hop=number("mixed_window_hop"),
         mixed_window_margin=number("mixed_window_margin"),
         mixed_window_min_similarity=number("mixed_window_min_similarity"),
+        turn_corroborated_min_similarity=number("turn_corroborated_min_similarity"),
     )
 
 
@@ -205,6 +224,7 @@ class KnownSpeakerSegment:
     raw_diarization_speaker: str | None
     speaker_uncertain_reason: str | None = None
     speaker_mixed_windows: list[MixedWindow] = field(default_factory=list)
+    speaker_accept_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -529,6 +549,64 @@ def build_speaker_centroids(
     return centroids
 
 
+def raw_turn_overlaps(start: float, end: float, turns: list[SpeakerTurn]) -> dict[str, float]:
+    """Seconds of each diarization label inside ``start``-``end``."""
+    overlaps: dict[str, float] = {}
+    for turn in turns:
+        overlap = min(end, turn.end) - max(start, turn.start)
+        if overlap > 0:
+            overlaps[turn.speaker] = overlaps.get(turn.speaker, 0.0) + overlap
+    return overlaps
+
+
+def single_raw_label(overlaps: Mapping[str, float]) -> str | None:
+    """The diarization label of a segment, or None unless it is the only one.
+
+    Other labels may overlap for less than ``TURN_CORROBORATION_MAX_OTHER_SECONDS``
+    in total; more than that and the diarization sees a second speaker.
+    """
+    if not overlaps:
+        return None
+    # Stable: longest overlap first, then label for deterministic ties.
+    label, seconds = min(overlaps.items(), key=lambda item: (-item[1], item[0]))
+    if sum(overlaps.values()) - seconds >= TURN_CORROBORATION_MAX_OTHER_SECONDS:
+        return None
+    return label
+
+
+def map_raw_labels_to_speakers(votes: Mapping[str, Mapping[str, int]]) -> dict[str, str]:
+    """Map diarization labels to known speakers from confident-segment votes.
+
+    A label is mapped only when at least ``TURN_CORROBORATION_MIN_VOTES``
+    confident single-speaker segments carry it and
+    ``TURN_CORROBORATION_MIN_SHARE`` of them name the same known speaker.
+    """
+    mapping: dict[str, str] = {}
+    for label, speaker_votes in votes.items():
+        total = sum(speaker_votes.values())
+        speaker, count = min(speaker_votes.items(), key=lambda item: (-item[1], item[0]))
+        if total >= TURN_CORROBORATION_MIN_VOTES and count >= TURN_CORROBORATION_MIN_SHARE * total:
+            mapping[label] = speaker
+    return mapping
+
+
+def is_turn_corroboration_candidate(
+    classification: SegmentClassification,
+    *,
+    duration: float,
+    config: KnownSpeakerConfig,
+) -> bool:
+    """True when the segment misses only ``min_top_similarity``, above the floor."""
+    return (
+        config.turn_corroborated_min_similarity > 0
+        and duration >= config.min_segment_duration
+        and classification.margin >= config.auto_accept_margin
+        and config.turn_corroborated_min_similarity
+        <= classification.top_similarity
+        < config.min_top_similarity
+    )
+
+
 def classify_segments(
     result: TranscriptionResult,
     *,
@@ -540,8 +618,24 @@ def classify_segments(
 ) -> list[KnownSpeakerSegment]:
     """Classify every transcript segment against the known-speaker centroids."""
     normalized_raw_turns = normalize_speaker_turns(raw_turns) if raw_turns else []
-    segments: list[KnownSpeakerSegment] = []
-    for index, segment in enumerate(result.segments):
+
+    def mixed_windows_for(segment: Any, speaker: str) -> list[MixedWindow]:
+        return find_mixed_windows(
+            segment_start=segment.start,
+            segment_end=segment.end,
+            segment_speaker=speaker,
+            job_audio_samples=job_audio_samples,
+            centroids=centroids,
+            config=config,
+            backend=backend,
+        )
+
+    classifications: list[SegmentClassification] = []
+    confident_flags: list[bool] = []
+    mixed_by_index: list[list[MixedWindow]] = []
+    single_labels: list[str | None] = []
+    label_votes: dict[str, dict[str, int]] = {}
+    for segment in result.segments:
         duration = max(segment.end - segment.start, 0.0)
         window = slice_samples(job_audio_samples, SAMPLE_RATE, segment.start, segment.end)
         window = pad_to_min_duration(window, SAMPLE_RATE, config.min_segment_duration)
@@ -551,16 +645,43 @@ def classify_segments(
         mixed_windows: list[MixedWindow] = []
         if confident:
             # Only segments that would be auto-accepted need the extra embeddings.
-            mixed_windows = find_mixed_windows(
-                segment_start=segment.start,
-                segment_end=segment.end,
-                segment_speaker=classification.top_speaker,
-                job_audio_samples=job_audio_samples,
-                centroids=centroids,
-                config=config,
-                backend=backend,
-            )
+            mixed_windows = mixed_windows_for(segment, classification.top_speaker)
             confident = not mixed_windows
+        single_label = single_raw_label(
+            raw_turn_overlaps(segment.start, segment.end, normalized_raw_turns)
+        )
+        if confident and single_label is not None:
+            speaker_votes = label_votes.setdefault(single_label, {})
+            speaker_votes[classification.top_speaker] = (
+                speaker_votes.get(classification.top_speaker, 0) + 1
+            )
+        classifications.append(classification)
+        confident_flags.append(confident)
+        mixed_by_index.append(mixed_windows)
+        single_labels.append(single_label)
+
+    label_speakers = map_raw_labels_to_speakers(label_votes)
+    segments: list[KnownSpeakerSegment] = []
+    for index, segment in enumerate(result.segments):
+        classification = classifications[index]
+        confident = confident_flags[index]
+        mixed_windows = mixed_by_index[index]
+        single_label = single_labels[index]
+        corroborated = False
+        if (
+            not confident
+            and single_label is not None
+            and label_speakers.get(single_label) == classification.top_speaker
+            and is_turn_corroboration_candidate(
+                classification,
+                duration=max(segment.end - segment.start, 0.0),
+                config=config,
+            )
+        ):
+            # The mixed-segment veto applies to these as to any accepted segment.
+            mixed_windows = mixed_windows_for(segment, classification.top_speaker)
+            corroborated = not mixed_windows
+            confident = corroborated
         raw_label = None
         if normalized_raw_turns:
             raw_label = choose_speaker_for_segment(
@@ -582,6 +703,7 @@ def classify_segments(
                 raw_diarization_speaker=raw_label,
                 speaker_uncertain_reason=MIXED_SPEAKERS_REASON if mixed_windows else None,
                 speaker_mixed_windows=mixed_windows,
+                speaker_accept_reason=TURN_CORROBORATED_REASON if corroborated else None,
             )
         )
     return segments
@@ -598,6 +720,7 @@ def summarize_known_speaker(
     total = len(segments)
     confident = sum(1 for segment in segments if not segment.speaker_uncertain)
     mixed = sum(1 for segment in segments if segment.speaker_mixed_windows)
+    corroborated = sum(1 for segment in segments if segment.speaker_accept_reason)
     per_speaker: dict[str, int] = {}
     for segment in segments:
         if segment.speaker:
@@ -615,10 +738,12 @@ def summarize_known_speaker(
         "mixed_window_hop": config.mixed_window_hop,
         "mixed_window_margin": config.mixed_window_margin,
         "mixed_window_min_similarity": config.mixed_window_min_similarity,
+        "turn_corroborated_min_similarity": config.turn_corroborated_min_similarity,
         "segment_count": total,
         "confident_segment_count": confident,
         "uncertain_segment_count": total - confident,
         "mixed_segment_count": mixed,
+        "turn_corroborated_segment_count": corroborated,
         "confident_speaker_distribution": per_speaker,
         "margin_median": _median(margins),
         "raw_diarization_available": bool(raw_turns),
@@ -667,6 +792,9 @@ def _serialize_known_speaker_segment(segment: KnownSpeakerSegment) -> dict[str, 
             }
             for window in segment.speaker_mixed_windows
         ]
+    # Also additive: only present on segments accepted below ``min_top_similarity``.
+    if segment.speaker_accept_reason:
+        payload["speaker_accept_reason"] = segment.speaker_accept_reason
     return payload
 
 
