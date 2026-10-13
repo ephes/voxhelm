@@ -1,9 +1,9 @@
-# Mixed-speaker transcript segments (plan, step 1b deployed, turn corroboration implemented)
+# Mixed-speaker transcript segments (plan, step 1b and turn corroboration deployed)
 
 Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
 voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
 plan. Turn corroboration (see "Uncertain segments without a veto") is
-implemented but not deployed. Revised after a fresh-context review by gpt-6.1-sol (high
+deployed with voxhelm 0.1.4. Revised after a fresh-context review by gpt-6.1-sol (high
 effort) on the same day; the main findings were checked against the source and
 are folded in below. The open question is settled, see "Findings" below:
 pyannote emitted no turn for the greeting, the sub-window classification does
@@ -334,6 +334,13 @@ dependencies on both episodes:
 On episode 206 two candidates were stopped by the veto; they were uncertain
 before and now also carry the `mixed_speakers` reason, which is why the mixed
 count rises without any segment losing a name.
+
+Verified in production on 2026-10-13: job
+`ba30a7c0-e1c5-4edb-8756-7f22da27aea9` re-ran episode 206 on worker `atlas`
+with voxhelm 0.1.4 and reproduced the episode 206 column exactly (337 / 117,
+21 corroborated, 25 mixed, Will 130 / Carlton 207); django-cast consumed the
+sidecar unchanged. The opening of the episode is unchanged, as expected: 7 of
+the first 12 lines carry no name.
 
 The accepted segments were read as text only: they sit inside longer runs of
 the same speaker. They were not checked against the audio, and both episodes
