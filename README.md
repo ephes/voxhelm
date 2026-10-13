@@ -222,6 +222,19 @@ Bootstrap the initial operator account after migrations:
 uv run python manage.py bootstrap_operator --username jochen --password "replace-me"
 ```
 
+Passwords supplied through `--password` or `VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD`
+are preserved exactly, including leading and trailing whitespace, when creating
+or updating an account. An empty password is rejected; whitespace-only passwords
+are preserved. Use shell quoting for intentional spaces, for example
+`--password ' passphrase '`. Usernames and email addresses still have surrounding
+whitespace removed.
+
+The operator login form also preserves password whitespace. Earlier versions
+trimmed bootstrap passwords: rerunning bootstrap now replaces that trimmed
+credential with the exact supplied value. Remove unintended whitespace (such as
+a trailing newline from a secret file) before bootstrapping. For browser sign-in,
+avoid passwords containing line breaks, which password inputs remove.
+
 Deploy-time note: the deployment layer should call the same in-app command with the real secret rather than creating the operator directly in a separate repo.
 
 ### Operator UI security
