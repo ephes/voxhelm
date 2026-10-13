@@ -460,10 +460,37 @@ What this shows:
   under `min_segment_duration`: in the first 77 s, 11 of 19 lines stay unnamed,
   among them the 1.24 s greeting.
 
-Open after this experiment: a prompt that cannot be echoed as content (or
-filtering the echo), chunking below 30 s at pauses as an alternative lever, and
-a rule for short single-speaker segments, without which better segmentation
-does not show up as names.
+#### Follow-up (2026-10-13): no decoder setting fixes it reliably
+
+- **The carried prompt is destructive, not just noisy.** At `--max-context 32`
+  about 15 whole 30 s windows of episode 206 contain only the prompt text (for
+  example 329.5-449.3 and 844.2-904.2), so roughly 7 minutes of speech are
+  missing; that is the 25% word loss. Per 5-minute bin the deployed run has
+  950-1070 words, this variant 590-900. The variant is rejected.
+  `--max-context 64` loses up to 27% of the words in single bins as well.
+- **VAD** (`--vad`, `ggml-silero-v5.1.2.bin`, `-p 1`): the first seconds become
+  sentence segments with tight times ("Hello, Will. Welcome back."
+  10.75-11.97), but over the episode only 12% of 406 segments are punctuated;
+  7458 words, nothing lost. `--vad-max-speech-duration-s 20` changes nothing.
+- **Model**: `ggml-large-v3-turbo.bin` behaves the same (13% punctuated at
+  `-p 4`, 22% at `-p 1`), about four times faster.
+- **Fixed chunks** of the first 600 s as separate files: 68% / 35% / 69% / 56%
+  punctuated segments for 10 / 15 / 20 / 25 s chunks, against 8% as one file.
+  Chunks shorter than a window help, but each chunk still flips a coin, and
+  fixed cuts split words (about 4% fewer words).
+- **Word timestamps are available regardless of the style**: `-ojf` returns
+  token offsets in the lowercase output too (greeting: `hello@10.07 will@10.53
+  welcome@10.85 back@11.37 yeah@11.70`, against 10.72-11.96 for the punctuated
+  segment, so individual words are up to about 0.6 s early). `--dtw large.v3`
+  did not change these offsets in this build.
+
+Conclusion: sentence-shaped segments cannot be forced through whisper.cpp
+options on this audio without losing speech. The remaining route to correct
+speaker lines is to stop depending on Whisper's segment boundaries: take word
+timestamps and re-cut segments at speaker changes (step 2, extended to the
+sub-window evidence of step 1b for changes pyannote misses), plus a rule for
+the short single-speaker segments this produces. Punctuation and casing would
+then be a separate text-restoration question.
 
 ## Order and verification
 
