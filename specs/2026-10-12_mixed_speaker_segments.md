@@ -596,7 +596,8 @@ all 519 sidecar segments to the Podlove, VTT and DOTe artifacts by start time
 without changes on its side. `processing_seconds` was 250.3, against 142.1
 for the 0.1.4 job; the local 190 s estimate left out the anonymous pyannote
 run. Not yet checked against the audio by ear. 41 segments are shorter than
-1 s, 14 shorter than 0.5 s; these are Whisper's own short segments.
+1 s, 14 shorter than 0.5 s. The four under 0.3 s are Whisper's own segments;
+the others include pieces of a split, such as "hey carlton" (0.86 s).
 
 ## Order and verification
 
