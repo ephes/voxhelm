@@ -72,6 +72,13 @@ normalization keep very large or very small finite embeddings usable without
 avoidable overflow/underflow. Zero vectors remain valid: their cosine score is
 zero and they cannot clear the default auto-accept similarity threshold.
 
+Known-speaker jobs re-cut transcript segments at speaker changes by default:
+whisper.cpp then runs with per-word timings on one processor (slower than the
+configured `VOXHELM_WHISPERCPP_PROCESSORS`), and the transcript artifacts and
+the speaker sidecar carry the re-cut segments. `resegment_hop: 0` in
+`diarization.known_speaker` turns this off. See
+`specs/known-speaker-diarization.md`.
+
 ## WebVTT Output
 
 The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)

@@ -5,31 +5,36 @@ import math
 import numpy
 import pytest
 
-from jobs.remote_worker_cli import known_speaker_config_from_claim
+from jobs.models import Job
+from jobs.remote_worker_cli import claim_wants_word_timestamps, known_speaker_config_from_claim
 from jobs.remote_workers import (
     KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS,
     KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS,
     KNOWN_SPEAKER_SUMMARY_STRING_KEYS,
 )
-from jobs.services import parse_diarization_option
+from jobs.services import job_wants_word_timestamps, parse_diarization_option
 from transcriptions.diarization import SpeakerTurn
 from transcriptions.errors import ApiError
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     KNOWN_SPEAKER_STRATEGY,
     MIXED_SPEAKERS_REASON,
+    SPEAKER_TRACK_REASON,
     TURN_CORROBORATED_REASON,
     KnownSpeakerBackendUnavailableError,
     KnownSpeakerConfig,
     KnownSpeakerConfigurationError,
+    KnownSpeakerSegment,
     PyannoteEmbeddingBackend,
     ReferenceAudio,
     SegmentClassification,
     SpeakerCandidate,
+    TrackFrame,
     UnavailableKnownSpeakerEmbeddingBackend,
     average_vectors,
     build_centroid,
     build_known_speaker_backend,
+    build_speaker_track,
     build_speakers_artifact,
     classify_embedding,
     classify_segments,
@@ -41,13 +46,18 @@ from transcriptions.known_speaker import (
     l2_normalize,
     mixed_window_bounds,
     pad_to_min_duration,
+    resegment_result,
+    resegmentation_enabled,
     run_known_speaker_postprocess,
     select_reference_window_bounds,
     serialize_known_speaker_segments,
     slice_samples,
+    split_segment_at_turns,
     summarize_known_speaker,
+    track_speaker_for_segment,
+    track_turns,
 )
-from transcriptions.service import TranscriptionResult, TranscriptionSegment
+from transcriptions.service import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 
 # --------------------------------------------------------------------------- #
 # Pure embedding math
@@ -787,6 +797,7 @@ def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None
             "mixed_window_margin": 0.25,
             "mixed_window_min_similarity": 0.4,
             "turn_corroborated_min_similarity": 0.45,
+            "resegment_hop": 0.5,
         }
     )
     assert config == KnownSpeakerConfig(
@@ -799,6 +810,7 @@ def test_known_speaker_config_from_mapping_uses_defaults_and_overrides() -> None
         mixed_window_margin=0.25,
         mixed_window_min_similarity=0.4,
         turn_corroborated_min_similarity=0.45,
+        resegment_hop=0.5,
     )
 
 
@@ -836,6 +848,538 @@ def test_remote_summary_allowlist_covers_every_local_summary_key() -> None:
     )
     assert set(summary) == allowlisted
     assert all(isinstance(summary[key], int) for key in KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS)
+
+
+# --------------------------------------------------------------------------- #
+# Re-cut at speaker changes
+# --------------------------------------------------------------------------- #
+
+
+def frame(center: float, speaker: str, *, clear: bool = True) -> TrackFrame:
+    return TrackFrame(center=center, speaker=speaker, similarity=0.6, margin=0.4, clear=clear)
+
+
+def words_at(*items: tuple[float, float, str]) -> tuple[TranscriptionWord, ...]:
+    return tuple(TranscriptionWord(start=start, end=end, text=text) for start, end, text in items)
+
+
+def two_speaker_audio(sample_rate: int = 16000):
+    # 5s of Johannes (0.1) followed by 5s of Dominik (0.2).
+    return numpy.concatenate(
+        [
+            numpy.full(5 * sample_rate, 0.1, dtype="float32"),
+            numpy.full(5 * sample_rate, 0.2, dtype="float32"),
+        ]
+    )
+
+
+def test_resegmentation_needs_a_hop_and_the_veto_window() -> None:
+    assert resegmentation_enabled(KnownSpeakerConfig()) is True
+    assert resegmentation_enabled(KnownSpeakerConfig(resegment_hop=0)) is False
+    assert resegmentation_enabled(KnownSpeakerConfig(mixed_window_duration=0)) is False
+
+
+def test_build_speaker_track_slides_over_the_whole_file() -> None:
+    frames = build_speaker_track(
+        job_audio_samples=two_speaker_audio(),
+        centroids={
+            "Johannes": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            "Dominik": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        },
+        config=KnownSpeakerConfig(resegment_hop=0.5),
+        backend=StubEmbeddingBackend(),
+    )
+
+    # 1.5s windows every 0.5s over 10s: starts 0.0 .. 8.5.
+    assert len(frames) == 18
+    assert frames[0].center == 0.75
+    assert frames[-1].center == 9.25
+    assert frames[0].speaker == "Johannes" and frames[0].clear
+    assert frames[-1].speaker == "Dominik" and frames[-1].clear
+
+
+def test_build_speaker_track_clamps_a_tiny_hop() -> None:
+    frames = build_speaker_track(
+        job_audio_samples=numpy.full(2 * 16000, 0.1, dtype="float32"),
+        centroids={"Johannes": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]},
+        config=KnownSpeakerConfig(resegment_hop=0.0001),
+        backend=StubEmbeddingBackend(),
+    )
+
+    # Hop raised to 0.1s: starts 0.0 .. 0.5.
+    assert len(frames) == 6
+
+
+def test_track_turns_cut_where_the_top_speaker_flips() -> None:
+    frames = [
+        frame(1.0, "Johannes"),
+        frame(1.25, "Johannes"),
+        frame(1.5, "Johannes", clear=False),
+        frame(1.75, "Dominik", clear=False),
+        frame(2.0, "Dominik"),
+        frame(2.25, "Dominik"),
+    ]
+
+    turns = track_turns(frames)
+
+    assert [(turn.start, turn.speaker) for turn in turns] == [(0.0, "Johannes"), (1.625, "Dominik")]
+    assert turns[0].end == 1.625
+    assert turns[-1].end == math.inf
+
+
+def test_track_turns_use_the_gap_middle_without_a_flip() -> None:
+    frames = [
+        frame(1.0, "Johannes"),
+        frame(1.25, "Johannes"),
+        frame(1.5, "Other", clear=False),
+        frame(1.75, "Dominik"),
+        frame(2.0, "Dominik"),
+    ]
+
+    assert track_turns(frames)[0].end == 1.5
+
+
+def test_track_turns_ignore_a_single_clear_frame_of_another_speaker() -> None:
+    frames = [
+        frame(1.0, "Johannes"),
+        frame(1.25, "Johannes"),
+        frame(1.5, "Dominik"),
+        frame(1.75, "Johannes"),
+        frame(2.0, "Johannes"),
+    ]
+
+    turns = track_turns(frames)
+
+    assert [turn.speaker for turn in turns] == ["Johannes"]
+
+
+def test_track_turns_empty_without_clear_frames() -> None:
+    assert track_turns([frame(1.0, "Johannes", clear=False)]) == []
+    assert track_turns([]) == []
+
+
+TWO_TURNS = [
+    SpeakerTurn(start=0.0, end=5.0, speaker="Johannes"),
+    SpeakerTurn(start=5.0, end=math.inf, speaker="Dominik"),
+]
+
+
+def split(segment: TranscriptionSegment) -> list[TranscriptionSegment]:
+    return split_segment_at_turns(segment, TWO_TURNS, [turn.start for turn in TWO_TURNS])
+
+
+def test_split_segment_cuts_at_the_first_word_of_the_next_speaker() -> None:
+    segment = TranscriptionSegment(
+        id=7,
+        start=2.0,
+        end=8.0,
+        text="hey carlton hello will",
+        words=words_at(
+            (2.1, 3.0, "hey"), (3.0, 4.6, "carlton"), (5.2, 6.0, "hello"), (6.0, 7.5, "will")
+        ),
+    )
+
+    pieces = split(segment)
+
+    assert [(piece.start, piece.end, piece.text) for piece in pieces] == [
+        (2.0, 5.2, "hey carlton"),
+        (5.2, 8.0, "hello will"),
+    ]
+    assert [len(piece.words) for piece in pieces] == [2, 2]
+
+
+def test_split_segment_folds_a_single_word_into_its_neighbour() -> None:
+    segment = TranscriptionSegment(
+        id=0,
+        start=2.0,
+        end=8.0,
+        text="one two three yeah",
+        words=words_at(
+            (2.1, 3.0, "one"), (3.0, 4.0, "two"), (4.0, 4.8, "three"), (5.2, 6.0, "yeah")
+        ),
+    )
+
+    assert split(segment) == [segment]
+
+
+def test_split_segment_folds_a_sliver_of_time() -> None:
+    segment = TranscriptionSegment(
+        id=0,
+        start=2.0,
+        end=8.0,
+        text="one two oh no",
+        words=words_at((2.1, 3.0, "one"), (3.0, 4.0, "two"), (5.2, 5.3, "oh"), (5.3, 5.4, "no")),
+    )
+
+    assert split(segment) == [segment]
+
+
+def test_split_segment_never_emits_empty_or_duplicate_start_pieces() -> None:
+    # Word timings the parser accepts: equal starts and long overlaps.
+    segment = TranscriptionSegment(
+        id=0,
+        start=1.0,
+        end=10.0,
+        text="a b c d",
+        words=words_at((1.0, 10.0, "a"), (1.0, 10.0, "b"), (1.0, 2.0, "c"), (1.0, 2.0, "d")),
+    )
+
+    pieces = split(segment)
+
+    assert pieces == [segment]
+
+
+def test_split_pieces_have_increasing_starts_and_positive_durations() -> None:
+    segment = TranscriptionSegment(
+        id=0,
+        start=2.0,
+        end=9.0,
+        text="a b c d e f",
+        words=words_at(
+            (2.1, 3.0, "a"),
+            (3.0, 4.5, "b"),
+            (5.1, 6.0, "c"),
+            (6.0, 7.0, "d"),
+            (7.0, 8.0, "e"),
+            (8.0, 8.9, "f"),
+        ),
+    )
+
+    pieces = split(segment)
+
+    assert [(piece.start, piece.end) for piece in pieces] == [(2.0, 5.1), (5.1, 9.0)]
+    assert all(piece.end - piece.start >= 0.3 for piece in pieces)
+
+
+def test_track_acceptance_runs_the_mixed_veto_first() -> None:
+    # The whole segment is too weak for the whole-segment rules, the track
+    # supports Johannes, but the end-aligned veto window is clearly Dominik.
+    segment = classify_segments(
+        TranscriptionResult(
+            text="a",
+            language="de",
+            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
+        ),
+        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+        raw_turns=[],
+        config=KnownSpeakerConfig(),
+        backend=ScriptedEmbeddingBackend([[0.3, 0.0, 0.954], JOHANNES, DOMINIK]),
+        track_frames=[frame(1.0, "Johannes")],
+    )[0]
+
+    assert segment.speaker is None
+    assert segment.speaker_uncertain is True
+    assert segment.speaker_accept_reason is None
+    assert segment.speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert [window.speaker for window in segment.speaker_mixed_windows] == ["Dominik"]
+
+
+def test_split_segment_keeps_segments_without_words_or_within_one_turn() -> None:
+    no_words = TranscriptionSegment(id=0, start=2.0, end=8.0, text="a b")
+    one_turn = TranscriptionSegment(
+        id=1, start=0.0, end=4.0, text="a b", words=words_at((0.5, 1.0, "a"), (1.0, 2.0, "b"))
+    )
+
+    assert split(no_words) == [no_words]
+    assert split(one_turn) == [one_turn]
+    assert split_segment_at_turns(no_words, TWO_TURNS[:1], [0.0]) == [no_words]
+
+
+def test_resegment_result_renumbers_and_counts_split_segments() -> None:
+    result = TranscriptionResult(
+        text="a b c d e f",
+        language="en",
+        segments=[
+            TranscriptionSegment(
+                id=0,
+                start=0.0,
+                end=4.0,
+                text="a b",
+                words=words_at((0.5, 1.0, "a"), (1.0, 2.0, "b")),
+            ),
+            TranscriptionSegment(
+                id=1,
+                start=4.0,
+                end=8.0,
+                text="c d e f",
+                words=words_at((4.0, 4.4, "c"), (4.4, 4.8, "d"), (5.2, 6.0, "e"), (6.0, 7.0, "f")),
+            ),
+        ],
+        backend_name="whisper.cpp",
+        model_name="model",
+    )
+
+    resegmented, from_split = resegment_result(result, TWO_TURNS)
+
+    assert from_split == 2
+    assert [(s.id, s.start, s.end, s.text) for s in resegmented.segments] == [
+        (0, 0.0, 4.0, "a b"),
+        (1, 4.0, 5.2, "c d"),
+        (2, 5.2, 8.0, "e f"),
+    ]
+    assert resegmented.text == result.text
+    assert (resegmented.language, resegmented.backend_name, resegmented.model_name) == (
+        "en",
+        "whisper.cpp",
+        "model",
+    )
+
+
+def track_speaker(start: float, end: float, frames: list[TrackFrame]) -> str | None:
+    return track_speaker_for_segment(start, end, frames, [item.center for item in frames])
+
+
+def test_track_speaker_ignores_frames_near_the_segment_edges() -> None:
+    frames = [frame(10.2, "Dominik"), frame(11.0, "Johannes"), frame(11.9, "Dominik")]
+
+    assert track_speaker(10.0, 12.0, frames) == "Johannes"
+
+
+def test_track_speaker_needs_one_clear_speaker() -> None:
+    assert track_speaker(10.0, 12.0, [frame(11.0, "Johannes", clear=False)]) is None
+    assert track_speaker(10.0, 12.0, [frame(10.8, "Johannes"), frame(11.2, "Dominik")]) is None
+    assert track_speaker(10.0, 12.0, []) is None
+    assert track_speaker(12.0, 12.0, [frame(12.0, "Johannes")]) is None
+
+
+def test_track_speaker_needs_a_share_of_clear_frames_on_long_segments() -> None:
+    unclear = [frame(10.5 + 0.25 * index, "Johannes", clear=False) for index in range(9)]
+    one_clear = [frame(13.0, "Johannes")]
+
+    # 1 of 10 frames is clear: enough for nobody on a 4s segment ...
+    assert track_speaker(10.0, 14.0, unclear + one_clear) is None
+    # ... but 4 of 10 are.
+    mostly = unclear[:6] + [frame(12.0 + 0.25 * index, "Johannes") for index in range(4)]
+    assert track_speaker(10.0, 14.0, mostly) == "Johannes"
+    # A short segment needs a single clear frame.
+    assert track_speaker(12.5, 13.5, one_clear) == "Johannes"
+
+
+def test_track_speaker_is_rejected_when_the_embedding_clearly_names_another() -> None:
+    # Similarity 0.3 to Johannes: below every whole-segment rule.
+    segments = classify_scripted(
+        [[0.3, 0.0, 0.954]],
+        raw_turns=[],
+        config=KnownSpeakerConfig(mixed_window_duration=0),
+    )
+    assert segments[0].speaker is None
+
+    tracked = classify_segments(
+        TranscriptionResult(
+            text="a",
+            language="de",
+            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
+        ),
+        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+        raw_turns=[],
+        config=KnownSpeakerConfig(mixed_window_duration=0),
+        backend=ScriptedEmbeddingBackend([[0.3, 0.0, 0.954]]),
+        track_frames=[frame(1.0, "Dominik")],
+    )[0]
+
+    # The whole-segment margin is clear and names Johannes: a contradiction.
+    assert tracked.speaker is None
+    assert tracked.speaker_accept_reason is None
+
+
+def test_track_speaker_is_accepted_without_a_contradicting_embedding() -> None:
+    def classify(vector: list[float], seconds: float) -> KnownSpeakerSegment:
+        return classify_segments(
+            TranscriptionResult(
+                text="a",
+                language="de",
+                segments=[TranscriptionSegment(id=0, start=0.0, end=seconds, text="a")],
+            ),
+            job_audio_samples=numpy.zeros(int(seconds * 16000), dtype="float32"),
+            centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+            raw_turns=[],
+            config=KnownSpeakerConfig(mixed_window_duration=0),
+            backend=ScriptedEmbeddingBackend([vector]),
+            track_frames=[frame(seconds / 2, "Dominik")],
+        )[0]
+
+    # Same speaker as the weak embedding.
+    agreeing = classify([0.0, 0.3, 0.954], 2.0)
+    assert agreeing.speaker == "Dominik"
+    assert agreeing.speaker_uncertain is False
+    assert agreeing.speaker_accept_reason == SPEAKER_TRACK_REASON
+    # Embedding undecided (margin 0.05): the track settles it.
+    undecided = classify([0.35, 0.3, 0.9], 2.0)
+    assert undecided.speaker == "Dominik"
+    assert undecided.speaker_candidates[0].speaker == "Johannes"
+    # Too short for the embedding to count as a contradiction.
+    short = classify([0.6, 0.0, 0.8], 1.0)
+    assert short.speaker == "Dominik"
+    assert short.speaker_accept_reason == SPEAKER_TRACK_REASON
+
+
+def test_track_does_not_override_the_mixed_veto() -> None:
+    outcome_segments = classify_segments(
+        TranscriptionResult(
+            text="a",
+            language="de",
+            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
+        ),
+        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+        raw_turns=[],
+        config=KnownSpeakerConfig(),
+        # Whole segment Johannes, first sub-window Johannes, second Dominik.
+        backend=ScriptedEmbeddingBackend([JOHANNES, JOHANNES, DOMINIK]),
+        track_frames=[frame(1.0, "Johannes")],
+    )
+
+    assert outcome_segments[0].speaker is None
+    assert outcome_segments[0].speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+    assert outcome_segments[0].speaker_accept_reason is None
+
+
+def run_two_speaker_segment(config: KnownSpeakerConfig, *, with_words: bool = True):
+    references = [make_reference("Johannes", 0.1), make_reference("Dominik", 0.2)]
+    words = words_at(
+        (0.5, 1.5, "eins"),
+        (1.5, 3.0, "zwei"),
+        (3.0, 4.2, "drei"),
+        (5.6, 6.5, "vier"),
+        (6.5, 8.0, "fuenf"),
+        (8.0, 9.5, "sechs"),
+    )
+    result = TranscriptionResult(
+        text="eins zwei drei vier fuenf sechs",
+        language="de",
+        segments=[
+            TranscriptionSegment(
+                id=0,
+                start=0.0,
+                end=10.0,
+                text="eins zwei drei vier fuenf sechs",
+                words=words if with_words else (),
+            )
+        ],
+    )
+    return run_known_speaker_postprocess(
+        result,
+        references=references,
+        job_audio_samples=two_speaker_audio(),
+        raw_turns=[],
+        config=config,
+        backend=StubEmbeddingBackend(),
+    )
+
+
+def test_postprocess_recuts_a_two_speaker_segment_and_names_both_parts() -> None:
+    outcome = run_two_speaker_segment(KnownSpeakerConfig())
+
+    assert [(s.start, s.end, s.text) for s in outcome.result.segments] == [
+        (0.0, 5.6, "eins zwei drei"),
+        (5.6, 10.0, "vier fuenf sechs"),
+    ]
+    assert [(s.index, s.start, s.end, s.speaker) for s in outcome.segments] == [
+        (0, 0.0, 5.6, "Johannes"),
+        (1, 5.6, 10.0, "Dominik"),
+    ]
+    assert outcome.result.text == "eins zwei drei vier fuenf sechs"
+    assert outcome.summary["segment_count"] == 2
+    assert outcome.summary["resegmented_segment_count"] == 2
+    assert outcome.summary["resegment_hop"] == 0.25
+    assert outcome.summary["confident_speaker_distribution"] == {"Johannes": 1, "Dominik": 1}
+    assert outcome.summary["mixed_segment_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "with_words"),
+    [
+        (KnownSpeakerConfig(resegment_hop=0), True),
+        (KnownSpeakerConfig(), False),
+    ],
+)
+def test_postprocess_leaves_segments_alone_without_recut_or_words(config, with_words) -> None:
+    outcome = run_two_speaker_segment(config, with_words=with_words)
+
+    assert [(s.start, s.end) for s in outcome.result.segments] == [(0.0, 10.0)]
+    assert outcome.summary["segment_count"] == 1
+    assert outcome.summary["resegmented_segment_count"] == 0
+    assert outcome.summary["speaker_track_segment_count"] == 0
+    # The mixed segment is still caught by the veto.
+    assert outcome.segments[0].speaker is None
+    assert outcome.segments[0].speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+
+
+def test_track_accepted_segments_are_serialized_and_summarized() -> None:
+    centroids = {"Johannes": JOHANNES, "Dominik": DOMINIK}
+    classified = classify_segments(
+        TranscriptionResult(
+            text="a",
+            language="de",
+            segments=[TranscriptionSegment(id=0, start=0.0, end=2.0, text="a")],
+        ),
+        job_audio_samples=numpy.zeros(2 * 16000, dtype="float32"),
+        centroids=centroids,
+        raw_turns=[],
+        config=KnownSpeakerConfig(mixed_window_duration=0),
+        backend=ScriptedEmbeddingBackend([[0.0, 0.3, 0.954]]),
+        track_frames=[frame(1.0, "Dominik")],
+    )
+
+    serialized = serialize_known_speaker_segments(classified)[0]
+    summary = summarize_known_speaker(
+        classified,
+        centroids=centroids,
+        config=KnownSpeakerConfig(),
+        embedding_version="scripted-v1",
+        raw_turns=[],
+        resegmented_segment_count=3,
+    )
+
+    assert serialized["speaker"] == "Dominik"
+    assert serialized["speaker_accept_reason"] == "speaker_track"
+    assert summary["speaker_track_segment_count"] == 1
+    assert summary["turn_corroborated_segment_count"] == 0
+    assert summary["resegmented_segment_count"] == 3
+
+
+def known_speaker_claim(**known_speaker) -> dict:
+    return {
+        "output": {
+            "diarization": {
+                "enabled": True,
+                "strategy": KNOWN_SPEAKER_STRATEGY,
+                "known_speaker": known_speaker,
+            }
+        }
+    }
+
+
+def test_known_speaker_claims_ask_for_word_timestamps() -> None:
+    assert claim_wants_word_timestamps(known_speaker_claim()) is True
+    assert claim_wants_word_timestamps(known_speaker_claim(resegment_hop=0)) is False
+    assert claim_wants_word_timestamps(known_speaker_claim(mixed_window_duration=0)) is False
+    assert claim_wants_word_timestamps({"output": {"diarization": {"enabled": True}}}) is False
+    assert claim_wants_word_timestamps({}) is False
+    disabled = known_speaker_claim()
+    disabled["output"]["diarization"]["enabled"] = False
+    assert claim_wants_word_timestamps(disabled) is False
+
+
+def test_known_speaker_jobs_ask_for_word_timestamps() -> None:
+    def job(diarization: object) -> Job:
+        return Job(output_data={"diarization": diarization})
+
+    known = {"enabled": True, "strategy": KNOWN_SPEAKER_STRATEGY}
+    assert job_wants_word_timestamps(job(known)) is True
+    assert job_wants_word_timestamps(job({**known, "known_speaker": {"resegment_hop": 0}})) is False
+    assert job_wants_word_timestamps(job({**known, "enabled": False})) is False
+    assert job_wants_word_timestamps(job({"enabled": True})) is False
+    assert job_wants_word_timestamps(job(None)) is False
+
+
+def test_parse_known_speaker_config_validates_the_resegment_hop() -> None:
+    parsed = parse_diarization_option(known_speaker_payload(known_speaker={"resegment_hop": 0}))
+    assert parsed["known_speaker"]["resegment_hop"] == 0.0
+    with pytest.raises(ApiError, match="resegment_hop"):
+        parse_diarization_option(known_speaker_payload(known_speaker={"resegment_hop": 0.05}))
 
 
 # --------------------------------------------------------------------------- #

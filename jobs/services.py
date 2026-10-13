@@ -71,6 +71,7 @@ from transcriptions.known_speaker import (
     extract_reference_windows,
     get_known_speaker_backend,
     known_speaker_config_from_mapping,
+    resegmentation_enabled,
     run_known_speaker_postprocess,
     slice_samples,
 )
@@ -762,6 +763,12 @@ def parse_known_speaker_config(value: object) -> dict[str, Any]:
             "diarization.known_speaker.mixed_window_duration must be 0 (off) or at least "
             f"{MIN_MIXED_WINDOW_DURATION}."
         )
+    resegment_hop = normalized.get("resegment_hop")
+    if resegment_hop is not None and 0 < resegment_hop < MIN_MIXED_WINDOW_HOP:
+        raise ApiError(
+            "diarization.known_speaker.resegment_hop must be 0 (off) or at least "
+            f"{MIN_MIXED_WINDOW_HOP}."
+        )
     hop = normalized.get("mixed_window_hop")
     if hop is not None and hop < MIN_MIXED_WINDOW_HOP:
         raise ApiError(
@@ -897,6 +904,7 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
                 request_model=job.model or "auto",
                 prompt=None,
                 language=job.language or None,
+                word_timestamps=job_wants_word_timestamps(job),
             ),
         )
         speakers_artifact: dict[str, Any] | None = None
@@ -1150,6 +1158,15 @@ def _positive_int_or_none(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return None
+
+
+def job_wants_word_timestamps(job: Job) -> bool:
+    """Known-speaker jobs re-cut segments at speaker changes, which needs words."""
+    return (
+        transcription_diarization_enabled(job)
+        and transcription_diarization_strategy(job) == KNOWN_SPEAKER_STRATEGY
+        and resegmentation_enabled(known_speaker_config_for_job(job))
+    )
 
 
 def known_speaker_config_for_job(job: Job) -> KnownSpeakerConfig:

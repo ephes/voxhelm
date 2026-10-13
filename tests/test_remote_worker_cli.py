@@ -106,6 +106,35 @@ def test_transcribe_claim_audio_sanitizes_repeated_loop(monkeypatch: Any) -> Non
     assert result.text == "Das ist auch sehr subjektiv."
 
 
+class RecordingSttService:
+    def __init__(self) -> None:
+        self.params: list[Any] = []
+
+    def transcribe(self, audio_path: Path, params: object) -> TranscriptionResult:
+        del audio_path
+        self.params.append(params)
+        return sample_transcription_result()
+
+
+def test_transcribe_claim_audio_requests_word_timestamps_for_known_speaker_claims(
+    monkeypatch: Any,
+) -> None:
+    service = RecordingSttService()
+    monkeypatch.setattr(worker_cli, "build_backend_service", lambda **_: service)
+    known_speaker_claim = base_claim()
+    known_speaker_claim["output"]["diarization"] = {
+        "enabled": True,
+        "strategy": "pyannote_known_speaker",
+    }
+
+    worker_cli.transcribe_claim_audio(claim=base_claim(), audio_path=Path("/tmp/episode.wav"))
+    worker_cli.transcribe_claim_audio(
+        claim=known_speaker_claim, audio_path=Path("/tmp/episode.wav")
+    )
+
+    assert [params.word_timestamps for params in service.params] == [False, True]
+
+
 def test_worker_version_reports_installed_package_version() -> None:
     try:
         expected = importlib.metadata.version("voxhelm")

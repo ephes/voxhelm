@@ -33,6 +33,7 @@ import math
 import subprocess
 import tempfile
 import wave
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -48,7 +49,11 @@ from transcriptions.diarization import (
     normalize_speaker_turns,
     resolve_pyannote_device,
 )
-from transcriptions.service import TranscriptionResult
+from transcriptions.service import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    TranscriptionWord,
+)
 
 KNOWN_SPEAKER_STRATEGY = "pyannote_known_speaker"
 ANONYMOUS_STRATEGY = "pyannote"
@@ -89,6 +94,27 @@ TURN_CORROBORATION_MAX_OTHER_SECONDS = 0.3
 TURN_CORROBORATION_MIN_VOTES = 5
 TURN_CORROBORATION_MIN_SHARE = 0.9
 TURN_CORROBORATED_REASON = "turn_corroborated"
+# Re-cutting at speaker changes. Whisper cuts long, unpunctuated segments by
+# time, so one segment often holds two speakers. A sliding-window speaker track
+# over the whole file (windows of ``mixed_window_duration`` every
+# ``resegment_hop`` seconds, judged by the veto's thresholds) locates the
+# changes, and segments with word timings are split there. Measured on Django
+# Chat episodes 205 and 206 (see specs/2026-10-12_mixed_speaker_segments.md).
+DEFAULT_RESEGMENT_HOP = 0.25
+# A speaker run needs this many clear frames before it counts as a turn.
+RESEGMENT_MIN_RUN_FRAMES = 2
+# Pieces smaller than this are folded into a neighbour: word timings are too
+# coarse to trust a single word or a sliver of time.
+RESEGMENT_MIN_PIECE_WORDS = 2
+RESEGMENT_MIN_PIECE_SECONDS = 0.3
+# Windows centred this close to a segment edge overlap the neighbouring
+# speaker, so they are not held against the segment.
+TRACK_EDGE_SECONDS = 0.4
+# Segments of ``TRACK_SHARE_MIN_SECONDS`` and more need this share of clear
+# frames for their speaker; shorter ones need a single clear frame.
+TRACK_MIN_CLEAR_SHARE = 0.3
+TRACK_SHARE_MIN_SECONDS = 2.5
+SPEAKER_TRACK_REASON = "speaker_track"
 
 KNOWN_SPEAKER_NUMBER_OPTIONS = (
     "min_segment_duration",
@@ -99,6 +125,7 @@ KNOWN_SPEAKER_NUMBER_OPTIONS = (
     "mixed_window_margin",
     "mixed_window_min_similarity",
     "turn_corroborated_min_similarity",
+    "resegment_hop",
 )
 
 # Reference centroids are built from a handful of clean, spaced windows rather
@@ -133,7 +160,9 @@ class KnownSpeakerConfig:
     The ``mixed_window_*`` options drive the mixed-segment veto;
     ``mixed_window_duration=0`` turns it off. ``turn_corroborated_min_similarity``
     is the lower similarity floor for segments the anonymous diarization
-    corroborates; ``0`` turns that off.
+    corroborates; ``0`` turns that off. ``resegment_hop`` is the step of the
+    speaker track used to re-cut segments at speaker changes; ``0`` turns the
+    re-cut off, and it is also off while the veto is off.
     """
 
     embedding_model: str = DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL
@@ -145,6 +174,7 @@ class KnownSpeakerConfig:
     mixed_window_margin: float = DEFAULT_MIXED_WINDOW_MARGIN
     mixed_window_min_similarity: float = DEFAULT_MIXED_WINDOW_MIN_SIMILARITY
     turn_corroborated_min_similarity: float = DEFAULT_TURN_CORROBORATED_MIN_SIMILARITY
+    resegment_hop: float = DEFAULT_RESEGMENT_HOP
 
 
 def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSpeakerConfig:
@@ -164,7 +194,13 @@ def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSp
         mixed_window_margin=number("mixed_window_margin"),
         mixed_window_min_similarity=number("mixed_window_min_similarity"),
         turn_corroborated_min_similarity=number("turn_corroborated_min_similarity"),
+        resegment_hop=number("resegment_hop"),
     )
+
+
+def resegmentation_enabled(config: KnownSpeakerConfig) -> bool:
+    """True when segments should be re-cut at speaker changes."""
+    return config.resegment_hop > 0 and config.mixed_window_duration > 0
 
 
 @dataclass(frozen=True)
@@ -206,6 +242,17 @@ class MixedWindow:
     speaker: str
     similarity: float
     margin: float
+
+
+@dataclass(frozen=True)
+class TrackFrame:
+    """One window of the sliding speaker track, located by its centre."""
+
+    center: float
+    speaker: str
+    similarity: float
+    margin: float
+    clear: bool
 
 
 @dataclass(frozen=True)
@@ -554,6 +601,227 @@ def build_speaker_centroids(
     return centroids
 
 
+def build_speaker_track(
+    *,
+    job_audio_samples: Any,
+    centroids: Mapping[str, Sequence[float]],
+    config: KnownSpeakerConfig,
+    backend: KnownSpeakerEmbeddingBackendProtocol,
+) -> list[TrackFrame]:
+    """Classify a sliding window over the whole file against the centroids.
+
+    A frame is clear when it meets the mixed-segment veto's margin and
+    similarity thresholds; music, silence and overlapping speech are not.
+    """
+    size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
+    hop = max(config.resegment_hop, MIN_MIXED_WINDOW_HOP)
+    total = len(job_audio_samples) / SAMPLE_RATE
+    frames: list[TrackFrame] = []
+    index = 0
+    while index * hop + size <= total:
+        start = index * hop
+        window = slice_samples(job_audio_samples, SAMPLE_RATE, start, start + size)
+        classification = classify_embedding(backend.embed(window, SAMPLE_RATE), centroids)
+        frames.append(
+            TrackFrame(
+                center=start + size / 2,
+                speaker=classification.top_speaker,
+                similarity=classification.top_similarity,
+                margin=classification.margin,
+                clear=(
+                    classification.margin >= config.mixed_window_margin
+                    and classification.top_similarity >= config.mixed_window_min_similarity
+                ),
+            )
+        )
+        index += 1
+    return frames
+
+
+def track_turns(frames: Sequence[TrackFrame]) -> list[SpeakerTurn]:
+    """Turn the speaker track into contiguous turns covering the whole file.
+
+    Clear frames of one speaker form a run; runs of fewer than
+    ``RESEGMENT_MIN_RUN_FRAMES`` clear frames are dropped. Between two runs of
+    different speakers the boundary is the last place where the top speaker
+    flips from the earlier to the later one, or the middle of the gap. The
+    first turn starts at 0 and the last one never ends.
+    """
+    runs: list[list[Any]] = []  # [first index, last index, speaker, clear frames]
+    for index, frame in enumerate(frames):
+        if not frame.clear:
+            continue
+        if runs and runs[-1][2] == frame.speaker:
+            runs[-1][1] = index
+            runs[-1][3] += 1
+        else:
+            runs.append([index, index, frame.speaker, 1])
+    merged: list[list[Any]] = []
+    for run in runs:
+        if run[3] < RESEGMENT_MIN_RUN_FRAMES:
+            continue
+        if merged and merged[-1][2] == run[2]:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+    turns: list[SpeakerTurn] = []
+    start = 0.0
+    for position, run in enumerate(merged):
+        if position + 1 == len(merged):
+            turns.append(SpeakerTurn(start=start, end=math.inf, speaker=run[2]))
+            break
+        following = merged[position + 1]
+        cut = (frames[run[1]].center + frames[following[0]].center) / 2
+        for index in range(run[1], following[0]):
+            if frames[index].speaker == run[2] and frames[index + 1].speaker == following[2]:
+                cut = (frames[index].center + frames[index + 1].center) / 2
+        turns.append(SpeakerTurn(start=start, end=cut, speaker=run[2]))
+        start = cut
+    return turns
+
+
+def _turn_speaker_at(time: float, turns: Sequence[SpeakerTurn], starts: Sequence[float]) -> str:
+    return turns[max(bisect_right(starts, time) - 1, 0)].speaker
+
+
+def split_segment_at_turns(
+    segment: TranscriptionSegment,
+    turns: Sequence[SpeakerTurn],
+    turn_starts: Sequence[float],
+) -> list[TranscriptionSegment]:
+    """Split one segment where its words fall into different speaker turns.
+
+    Returns the segment itself when it has no word timings or stays in one
+    turn. Pieces of fewer than ``RESEGMENT_MIN_PIECE_WORDS`` words or shorter
+    than ``RESEGMENT_MIN_PIECE_SECONDS`` are folded into a neighbour. A piece
+    starts at its first word, except the first, which keeps the segment start;
+    it ends where the next piece starts, and the last keeps the segment end.
+    """
+    if not segment.words or len(turns) < 2:
+        return [segment]
+    pieces: list[tuple[str, list[TranscriptionWord]]] = []
+    for word in segment.words:
+        speaker = _turn_speaker_at((word.start + word.end) / 2, turns, turn_starts)
+        if pieces and pieces[-1][0] == speaker:
+            pieces[-1][1].append(word)
+        else:
+            pieces.append((speaker, [word]))
+
+    def bounds(position: int) -> tuple[float, float]:
+        start = segment.start if position == 0 else pieces[position][1][0].start
+        end = segment.end if position + 1 == len(pieces) else pieces[position + 1][1][0].start
+        return start, end
+
+    def too_small(position: int) -> bool:
+        # Judged on the boundaries the piece would be emitted with, so no piece
+        # can come out empty, reversed or sharing its start with the next one.
+        start, end = bounds(position)
+        words = pieces[position][1]
+        return (
+            len(words) < RESEGMENT_MIN_PIECE_WORDS
+            or words[-1].end - words[0].start < RESEGMENT_MIN_PIECE_SECONDS
+            or end - start < RESEGMENT_MIN_PIECE_SECONDS
+        )
+
+    while len(pieces) > 1:
+        small = next((i for i in range(len(pieces)) if too_small(i)), None)
+        if small is None:
+            break
+        target = small - 1 if small > 0 else 1
+        speaker = pieces[target][0]
+        first, second = sorted((small, target))
+        pieces[first : second + 1] = [(speaker, pieces[first][1] + pieces[second][1])]
+        # Folding can leave two neighbours with the same speaker.
+        joined: list[tuple[str, list[TranscriptionWord]]] = []
+        for piece in pieces:
+            if joined and joined[-1][0] == piece[0]:
+                joined[-1][1].extend(piece[1])
+            else:
+                joined.append(piece)
+        pieces = joined
+    if len(pieces) < 2:
+        return [segment]
+    split: list[TranscriptionSegment] = []
+    for position, (_speaker, words) in enumerate(pieces):
+        start, end = bounds(position)
+        split.append(
+            TranscriptionSegment(
+                id=segment.id,
+                start=start,
+                end=end,
+                text=" ".join(word.text for word in words),
+                speaker=segment.speaker,
+                words=tuple(words),
+            )
+        )
+    return split
+
+
+def resegment_result(
+    result: TranscriptionResult,
+    turns: Sequence[SpeakerTurn],
+) -> tuple[TranscriptionResult, int]:
+    """Re-cut every segment at speaker changes and renumber the segments.
+
+    Returns the new result and the number of segments that came out of a
+    split. The transcript text is unchanged.
+    """
+    turn_starts = [turn.start for turn in turns]
+    segments: list[TranscriptionSegment] = []
+    from_split = 0
+    for segment in result.segments:
+        pieces = split_segment_at_turns(segment, turns, turn_starts)
+        if len(pieces) > 1:
+            from_split += len(pieces)
+        for piece in pieces:
+            segments.append(
+                TranscriptionSegment(
+                    id=len(segments),
+                    start=piece.start,
+                    end=piece.end,
+                    text=piece.text,
+                    speaker=piece.speaker,
+                    words=piece.words,
+                )
+            )
+    resegmented = TranscriptionResult(
+        text=result.text,
+        language=result.language,
+        segments=segments,
+        backend_name=result.backend_name,
+        model_name=result.model_name,
+    )
+    return resegmented, from_split
+
+
+def track_speaker_for_segment(
+    start: float,
+    end: float,
+    frames: Sequence[TrackFrame],
+    centers: Sequence[float],
+) -> str | None:
+    """The speaker the track supports for ``start``-``end``, or None.
+
+    Only frames centred inside the segment count, without those closer than
+    ``TRACK_EDGE_SECONDS`` to an edge when the segment is long enough. All
+    clear frames must name the same speaker, and there must be at least one;
+    segments of ``TRACK_SHARE_MIN_SECONDS`` and more also need
+    ``TRACK_MIN_CLEAR_SHARE`` of their frames to be clear.
+    """
+    duration = end - start
+    if duration <= 0 or not frames:
+        return None
+    if duration > 2 * TRACK_EDGE_SECONDS:
+        start, end = start + TRACK_EDGE_SECONDS, end - TRACK_EDGE_SECONDS
+    inside = frames[bisect_left(centers, start) : bisect_right(centers, end)]
+    clear = [frame for frame in inside if frame.clear]
+    if not clear or any(frame.speaker != clear[0].speaker for frame in clear):
+        return None
+    if duration >= TRACK_SHARE_MIN_SECONDS and len(clear) < TRACK_MIN_CLEAR_SHARE * len(inside):
+        return None
+    return clear[0].speaker
+
+
 def raw_turn_overlaps(start: float, end: float, turns: list[SpeakerTurn]) -> dict[str, float]:
     """Seconds of each diarization label inside ``start``-``end``."""
     overlaps: dict[str, float] = {}
@@ -620,8 +888,15 @@ def classify_segments(
     raw_turns: list[SpeakerTurn],
     config: KnownSpeakerConfig,
     backend: KnownSpeakerEmbeddingBackendProtocol,
+    track_frames: Sequence[TrackFrame] = (),
 ) -> list[KnownSpeakerSegment]:
-    """Classify every transcript segment against the known-speaker centroids."""
+    """Classify every transcript segment against the known-speaker centroids.
+
+    ``track_frames`` is the speaker track of the re-cut, when it ran. A segment
+    that is still uncertain after the whole-segment rules, and that the veto
+    did not flag, takes the speaker the track supports for it.
+    """
+    track_centers = [frame.center for frame in track_frames]
     normalized_raw_turns = normalize_speaker_turns(raw_turns) if raw_turns else []
 
     def mixed_windows_for(segment: Any, speaker: str) -> list[MixedWindow]:
@@ -687,6 +962,28 @@ def classify_segments(
             mixed_windows = mixed_windows_for(segment, classification.top_speaker)
             corroborated = not mixed_windows
             confident = corroborated
+        speaker = classification.top_speaker
+        accept_reason = TURN_CORROBORATED_REASON if corroborated else None
+        if not confident and not mixed_windows:
+            duration = max(segment.end - segment.start, 0.0)
+            track_speaker = track_speaker_for_segment(
+                segment.start, segment.end, track_frames, track_centers
+            )
+            # A long enough segment whose own embedding clearly names someone
+            # else is a contradiction the track does not get to settle.
+            contradicted = (
+                track_speaker != classification.top_speaker
+                and duration >= config.min_segment_duration
+                and classification.margin >= config.auto_accept_margin
+            )
+            if track_speaker is not None and not contradicted:
+                # The veto was only run for segments the whole-segment rules
+                # accepted; it applies to a track acceptance just the same.
+                mixed_windows = mixed_windows_for(segment, track_speaker)
+                if not mixed_windows:
+                    speaker = track_speaker
+                    accept_reason = SPEAKER_TRACK_REASON
+                    confident = True
         raw_label = None
         if normalized_raw_turns:
             raw_label = choose_speaker_for_segment(
@@ -699,7 +996,7 @@ def classify_segments(
                 index=index,
                 start=segment.start,
                 end=segment.end,
-                speaker=classification.top_speaker if confident else None,
+                speaker=speaker if confident else None,
                 speaker_source=KNOWN_SPEAKER_SOURCE,
                 speaker_confidence=round(classification.top_similarity, 6),
                 speaker_margin=round(classification.margin, 6),
@@ -708,7 +1005,7 @@ def classify_segments(
                 raw_diarization_speaker=raw_label,
                 speaker_uncertain_reason=MIXED_SPEAKERS_REASON if mixed_windows else None,
                 speaker_mixed_windows=mixed_windows,
-                speaker_accept_reason=TURN_CORROBORATED_REASON if corroborated else None,
+                speaker_accept_reason=accept_reason,
             )
         )
     return segments
@@ -721,11 +1018,17 @@ def summarize_known_speaker(
     config: KnownSpeakerConfig,
     embedding_version: str,
     raw_turns: list[SpeakerTurn],
+    resegmented_segment_count: int = 0,
 ) -> dict[str, Any]:
     total = len(segments)
     confident = sum(1 for segment in segments if not segment.speaker_uncertain)
     mixed = sum(1 for segment in segments if segment.speaker_mixed_windows)
-    corroborated = sum(1 for segment in segments if segment.speaker_accept_reason)
+    corroborated = sum(
+        1 for segment in segments if segment.speaker_accept_reason == TURN_CORROBORATED_REASON
+    )
+    tracked = sum(
+        1 for segment in segments if segment.speaker_accept_reason == SPEAKER_TRACK_REASON
+    )
     per_speaker: dict[str, int] = {}
     for segment in segments:
         if segment.speaker:
@@ -744,11 +1047,14 @@ def summarize_known_speaker(
         "mixed_window_margin": config.mixed_window_margin,
         "mixed_window_min_similarity": config.mixed_window_min_similarity,
         "turn_corroborated_min_similarity": config.turn_corroborated_min_similarity,
+        "resegment_hop": config.resegment_hop,
         "segment_count": total,
         "confident_segment_count": confident,
         "uncertain_segment_count": total - confident,
         "mixed_segment_count": mixed,
         "turn_corroborated_segment_count": corroborated,
+        "resegmented_segment_count": resegmented_segment_count,
+        "speaker_track_segment_count": tracked,
         "confident_speaker_distribution": per_speaker,
         "margin_median": _median(margins),
         "raw_diarization_available": bool(raw_turns),
@@ -797,7 +1103,8 @@ def _serialize_known_speaker_segment(segment: KnownSpeakerSegment) -> dict[str, 
             }
             for window in segment.speaker_mixed_windows
         ]
-    # Also additive: only present on segments accepted below ``min_top_similarity``.
+    # Also additive: only present on segments accepted by turn corroboration or
+    # by the speaker track.
     if segment.speaker_accept_reason:
         payload["speaker_accept_reason"] = segment.speaker_accept_reason
     return payload
@@ -836,6 +1143,18 @@ def run_known_speaker_postprocess(
             "Known-speaker diarization requires at least one speaker reference."
         )
     centroids = build_speaker_centroids(references, backend)
+    track_frames: list[TrackFrame] = []
+    resegmented_segment_count = 0
+    # Without word timings nothing can be re-cut, and the track would only be
+    # a second opinion on Whisper's own segments, so it is skipped as well.
+    if resegmentation_enabled(config) and any(segment.words for segment in result.segments):
+        track_frames = build_speaker_track(
+            job_audio_samples=job_audio_samples,
+            centroids=centroids,
+            config=config,
+            backend=backend,
+        )
+        result, resegmented_segment_count = resegment_result(result, track_turns(track_frames))
     segments = classify_segments(
         result,
         job_audio_samples=job_audio_samples,
@@ -843,6 +1162,7 @@ def run_known_speaker_postprocess(
         raw_turns=raw_turns,
         config=config,
         backend=backend,
+        track_frames=track_frames,
     )
     summary = summarize_known_speaker(
         segments,
@@ -850,8 +1170,10 @@ def run_known_speaker_postprocess(
         config=config,
         embedding_version=backend.embedding_version,
         raw_turns=raw_turns,
+        resegmented_segment_count=resegmented_segment_count,
     )
     # Public transcript artifacts stay unlabeled; suggestions ride the sidecar.
+    # They carry the re-cut segments, so sidecar and transcript stay aligned.
     return KnownSpeakerOutcome(result=result, segments=segments, summary=summary)
 
 

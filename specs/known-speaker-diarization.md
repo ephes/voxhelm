@@ -49,7 +49,8 @@ contract is unchanged; known-speaker mode is opt-in through
       "mixed_window_hop": 0.75,
       "mixed_window_margin": 0.15,
       "mixed_window_min_similarity": 0.3,
-      "turn_corroborated_min_similarity": 0.35
+      "turn_corroborated_min_similarity": 0.35,
+      "resegment_hop": 0.25
     }
   }
 }
@@ -84,6 +85,10 @@ Rules:
 - `turn_corroborated_min_similarity=0.35` is the lower similarity floor for
   segments the anonymous diarization corroborates (see "Turn corroboration").
   Optional, finite and non-negative; `0` turns it off.
+- `resegment_hop=0.25` is the step in seconds of the speaker track used to
+  re-cut segments at speaker changes (see "Re-cut at speaker changes"). `0`
+  turns the re-cut off; otherwise it must be at least 0.1. The re-cut is also
+  off while `mixed_window_duration` is 0.
 - `num_speakers`/`min_speakers`/`max_speakers` may still be sent; they drive the
   anonymous pyannote run kept as a fallback/debug signal whose raw label is
   recorded per segment.
@@ -112,11 +117,14 @@ segment still carries the confident speaker name (or `null` when uncertain).
     "mixed_window_margin": 0.15,
     "mixed_window_min_similarity": 0.3,
     "turn_corroborated_min_similarity": 0.35,
+    "resegment_hop": 0.25,
     "segment_count": 1249,
     "confident_segment_count": 1175,
     "uncertain_segment_count": 74,
     "mixed_segment_count": 12,
     "turn_corroborated_segment_count": 40,
+    "resegmented_segment_count": 130,
+    "speaker_track_segment_count": 80,
     "confident_speaker_distribution": {"Johannes": 390, "Dominik": 191},
     "margin_median": 0.372,
     "raw_diarization_available": true
@@ -170,6 +178,13 @@ A segment accepted by turn corroboration carries
 other segment. Its `speaker_confidence` is below `min_top_similarity` by
 construction. `confident_segment_count` and `confident_speaker_distribution`
 include the `turn_corroborated_segment_count` segments.
+
+A segment named by the speaker track carries
+`"speaker_accept_reason": "speaker_track"` and is counted in
+`speaker_track_segment_count`. Its `speaker` can differ from the first entry
+of `speaker_candidates`, which still describes the whole-segment embedding.
+`resegmented_segment_count` is the number of segments that came out of a
+split. `segment_count` and the segment `index` refer to the re-cut segments.
 
 The job `result.metadata.diarization` also carries a `known_speaker_summary`
 (the summary block above) and a non-sensitive `known_speakers` list of
@@ -241,6 +256,50 @@ Such a segment gets its `speaker`, `speaker_uncertain=false` and
 with `turn_corroborated_min_similarity=0`, nothing is corroborated. The rule
 never settles a close call between two known speakers and never overrides the
 veto. The measurements are in `2026-10-12_mixed_speaker_segments.md`.
+
+### Re-cut at speaker changes
+
+Whisper often emits long, unpunctuated segments cut by time, so a segment can
+start with one speaker and end with another. Naming or blanking such a segment
+is wrong either way. When word timings are available, Voxhelm therefore
+re-cuts the segments before classifying them:
+
+- Word timings come from whisper.cpp. Known-speaker jobs with the re-cut on
+  run whisper.cpp with full JSON output on one processor (token offsets are
+  chunk-relative with several). Other backends return no word timings; their
+  segments are left as they are and no track is built.
+- The speaker track classifies a window of `mixed_window_duration` seconds
+  every `resegment_hop` seconds over the whole file against the centroids. A
+  frame is clear when it reaches `mixed_window_margin` and
+  `mixed_window_min_similarity`.
+- Clear frames of one speaker form a run of at least two frames. Between runs
+  of different speakers the turn boundary is the last place where the top
+  speaker flips, or the middle of the gap.
+- A segment is split where its words fall into different turns. Pieces of a
+  single word, or whose words or emitted boundaries span under 0.3 s, are
+  folded into a neighbour, so no piece is empty or shares its start with the
+  next one. A piece starts at its
+  first word (the first keeps the segment start) and ends where the next one
+  starts (the last keeps the segment end); its text is its words.
+- The transcript artifacts and the sidecar are both written from the re-cut
+  segments, so their start times match. The full transcript text is unchanged.
+
+After the whole-segment rules, a segment that is still uncertain and was not
+flagged by the veto takes the speaker the track supports for it: every clear
+frame centred inside the segment (0.4 s in from each edge when it is longer
+than 0.8 s) names the same speaker, there is at least one such frame, and for
+segments of 2.5 s and more at least 30% of the frames are clear. This is not
+applied when the segment is at least `min_segment_duration` long and its own
+embedding names another speaker with `margin >= auto_accept_margin`. The
+mixed-segment veto runs against the track's speaker first; if it finds a
+window for another speaker, the segment stays uncertain with
+`speaker_uncertain_reason="mixed_speakers"`.
+
+The re-cut changes the number and the boundaries of segments compared with
+0.1.4; consumers that match sidecar and transcript by start time are not
+affected. Word boundaries can be off by a word, because word timings are
+approximate. Cost: one embedding per `resegment_hop` of audio and a slower
+whisper.cpp run (see `2026-10-12_mixed_speaker_segments.md`).
 
 ## Ownership
 

@@ -49,6 +49,7 @@ from transcriptions.known_speaker import (
     extract_reference_windows,
     get_known_speaker_backend,
     known_speaker_config_from_mapping,
+    resegmentation_enabled,
     run_known_speaker_postprocess,
     slice_samples,
 )
@@ -537,6 +538,7 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
             request_model=model_name,
             prompt=None,
             language=optional_string(claim.get("language")),
+            word_timestamps=claim_wants_word_timestamps(claim),
         ),
     )
     # Mirror the local transcribe_audio path: sanitize before diarization and
@@ -545,6 +547,16 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
         result,
         enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
         repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
+    )
+
+
+def claim_wants_word_timestamps(claim: dict[str, Any]) -> bool:
+    """Known-speaker jobs re-cut segments at speaker changes, which needs words."""
+    diarization = claim_diarization(claim)
+    return (
+        diarization.get("enabled") is True
+        and diarization.get("strategy") == KNOWN_SPEAKER_STRATEGY
+        and resegmentation_enabled(known_speaker_config_from_claim(diarization))
     )
 
 

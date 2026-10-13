@@ -1,4 +1,4 @@
-# Mixed-speaker transcript segments (plan, step 1b and turn corroboration deployed)
+# Mixed-speaker transcript segments (step 1b and turn corroboration deployed, re-cut implemented)
 
 Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
 voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
@@ -558,6 +558,34 @@ at 11.93 belongs to Will's next sentence). A piece can collapse to near-zero
 length (episode 205, 12.30-12.33 "Hello, Will."). Both episodes have the same
 two speakers. The naming rule is far more permissive than the deployed
 acceptance policy and was not tuned. Text stays lowercase and unpunctuated.
+
+#### Re-cut as implemented (2026-10-13, not deployed)
+
+The prototype is now `build_speaker_track`, `track_turns`, `resegment_result`
+and the track acceptance in `classify_segments`
+(`transcriptions/known_speaker.py`); the contract is in
+`known-speaker-diarization.md`, "Re-cut at speaker changes". Word timings come
+from `TranscribeParams.word_timestamps` (whisper.cpp `-ojf -p 1`). Run with the
+worker dependencies on the `-p 1` transcripts, veto and turn corroboration on:
+
+| | Episode 206 | Episode 205 |
+| --- | --- | --- |
+| segments without / with re-cut | 446 / 519 | 737 / 808 |
+| confident without / with | 351 / 490 | 488 / 746 |
+| uncertain without / with | 95 / 29 | 249 / 62 |
+| segments from a split | 138 | 139 |
+| named by: whole-segment rule / turn corroboration / speaker track | 365 / 44 / 81 | 493 / 71 / 182 |
+| agreeing with a single pyannote speaker, same three groups | 315 of 317 / 44 of 44 / 30 of 37 | 431 of 431 / 71 of 71 / 142 of 146 |
+| `mixed_segment_count` without / with | 16 / 0 | 35 / 4 |
+| postprocess time on `atlas` without / with | 30 s / 71 s | 41 s / 97 s |
+
+The opening of episode 206 is the same as in the prototype listing above; the
+track names "hey carlton", the greeting, "long the long stretch until
+christmas" and "the technology so". The speaker-track group is where pyannote
+agreement is lowest on episode 206 (30 of 37): it contains the interjections
+pyannote attributes to the surrounding speaker, such as the greeting, so the
+disagreements are not all errors, but none of them was checked by ear.
+Transcription with `-p 1` took 108 s instead of 69 s for episode 206.
 
 ## Order and verification
 
