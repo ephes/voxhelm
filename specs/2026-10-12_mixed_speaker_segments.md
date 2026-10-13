@@ -644,7 +644,8 @@ cut that are assigned like pyannote does not improve:
 | DTW midpoint | 71.0% / 78.0% | 71.4% / 81.1% |
 
 Disabling flash attention also changes the transcript itself (episode 206: 459
-instead of 446 segments, almost no segment text identical) and costs time
+instead of 446 segments and 7446 instead of 7475 words, so the segment
+boundaries shift; the wording was not compared) and costs time
 (124 s instead of 108 s for episode 206, 167 s for episode 205).
 
 Neither is adopted. Limit of this evaluation: pyannote misses short
