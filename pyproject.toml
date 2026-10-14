@@ -68,6 +68,8 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 strict_equality = true
 check_untyped_defs = true
+# var/ holds git-ignored local scratch (handoffs, measurement scripts).
+exclude = ["^var/"]
 plugins = ["mypy_django_plugin.main"]
 
 [tool.django-stubs]
