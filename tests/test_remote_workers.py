@@ -1664,6 +1664,13 @@ def test_known_speaker_completion_strips_private_worker_metadata(client, setting
                                 private_reference_url: 1,
                             },
                             "raw_diarization_available": True,
+                            "raw_diarization_labels": {
+                                "Speaker 1": {"speaker": "Johannes", "seconds": 812.5},
+                                "Speaker 2": {"speaker": None, "seconds": 2415.0},
+                                "Speaker 3": {"speaker": private_reference_url, "seconds": 3.0},
+                                "Speaker 4": {"speaker": None, "seconds": float("nan")},
+                                private_reference_url: {"speaker": None, "seconds": 1.0},
+                            },
                             "claim": claim,
                             "embedding_version": "cdn.example.com/private-embedding?token=abc",
                             "reference_url": private_reference_url,
@@ -1703,6 +1710,10 @@ def test_known_speaker_completion_strips_private_worker_metadata(client, setting
         "known_speakers": ["Johannes"],
         "confident_speaker_distribution": {"Johannes": 1},
         "raw_diarization_available": True,
+        "raw_diarization_labels": {
+            "Speaker 1": {"speaker": "Johannes", "seconds": 812.5},
+            "Speaker 2": {"speaker": None, "seconds": 2415.0},
+        },
     }
     assert "min_top_similarity" not in metadata["diarization"]["known_speaker_summary"]
     assert "margin_median" not in metadata["diarization"]["known_speaker_summary"]

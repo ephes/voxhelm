@@ -840,6 +840,7 @@ def test_remote_summary_allowlist_covers_every_local_summary_key() -> None:
         "known_speakers",
         "confident_speaker_distribution",
         "raw_diarization_available",
+        "raw_diarization_labels",
     }
     allowlisted = (
         KNOWN_SPEAKER_SUMMARY_STRING_KEYS
@@ -1229,6 +1230,51 @@ def test_track_speaker_ignores_a_brief_unknown_diarization_label() -> None:
     )
 
     assert tracked.speaker == "Dominik"
+
+
+def test_summary_ties_host_labels_and_leaves_a_guest_label_open() -> None:
+    # Five confident segments per host; the guest matches neither reference.
+    guest = [0.0, 0.0, 1.0]
+    raw_turns = [
+        SpeakerTurn(start=0.0, end=10.0, speaker="SPEAKER_00"),
+        SpeakerTurn(start=10.0, end=20.0, speaker="SPEAKER_01"),
+        SpeakerTurn(start=20.0, end=24.0, speaker="SPEAKER_02"),
+    ]
+    segments = classify_scripted([JOHANNES] * 5 + [DOMINIK] * 5 + [guest] * 2, raw_turns=raw_turns)
+
+    summary = summarize_known_speaker(
+        segments,
+        centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+        config=KnownSpeakerConfig(mixed_window_duration=0),
+        embedding_version="scripted-v1",
+        raw_turns=raw_turns,
+    )
+
+    assert [segment.speaker for segment in segments[-2:]] == [None, None]
+    assert summary["raw_diarization_labels"] == {
+        "Speaker 1": {"speaker": "Johannes", "seconds": 10.0},
+        "Speaker 2": {"speaker": "Dominik", "seconds": 10.0},
+        "Speaker 3": {"speaker": None, "seconds": 4.0},
+    }
+
+
+def test_summary_labels_need_enough_whole_segment_votes() -> None:
+    # Four votes are below TURN_CORROBORATION_MIN_VOTES, and without
+    # diarization there are no labels at all.
+    raw_turns = [SpeakerTurn(start=0.0, end=8.0, speaker="SPEAKER_00")]
+    segments = classify_scripted([JOHANNES] * 4, raw_turns=raw_turns)
+
+    def labels(turns):
+        return summarize_known_speaker(
+            segments,
+            centroids={"Johannes": JOHANNES, "Dominik": DOMINIK},
+            config=KnownSpeakerConfig(mixed_window_duration=0),
+            embedding_version="scripted-v1",
+            raw_turns=turns,
+        )["raw_diarization_labels"]
+
+    assert labels(raw_turns) == {"Speaker 1": {"speaker": None, "seconds": 8.0}}
+    assert labels([]) == {}
 
 
 def test_raw_labels_are_known_uses_the_longest_label_when_all_are_brief() -> None:

@@ -127,7 +127,12 @@ segment still carries the confident speaker name (or `null` when uncertain).
     "speaker_track_segment_count": 80,
     "confident_speaker_distribution": {"Johannes": 390, "Dominik": 191},
     "margin_median": 0.372,
-    "raw_diarization_available": true
+    "raw_diarization_available": true,
+    "raw_diarization_labels": {
+      "Speaker 1": {"speaker": "Johannes", "seconds": 1630.2},
+      "Speaker 2": {"speaker": "Dominik", "seconds": 1188.7},
+      "Speaker 3": {"speaker": null, "seconds": 912.4}
+    }
   },
   "segments": [
     {
@@ -185,6 +190,19 @@ A segment named by the speaker track carries
 of `speaker_candidates`, which still describes the whole-segment embedding.
 `resegmented_segment_count` is the number of segments that came out of a
 split. `segment_count` and the segment `index` refer to the re-cut segments.
+
+`raw_diarization_labels` lists every label of the anonymous diarization run
+(the `raw_diarization_speaker` values) with its seconds of speech and the
+known speaker it is tied to by the vote described under "Turn corroboration",
+or `null` when it is tied to nobody. It is `{}` without diarization turns.
+Voxhelm only names speakers it has a reference for; a consumer that knows the
+episode's other participants can use the untied labels to name them. For
+example, with exactly one participant without a reference and exactly one
+untied label, the uncertain segments whose `raw_diarization_speaker` is that
+label are most likely that participant (the "Speaker N" mapping such a
+consumer keeps for anonymous transcripts does not survive a known-speaker
+run, because the public artifacts are unlabeled). Labels are numbered per
+job, so they cannot be matched to the labels of another run.
 
 The job `result.metadata.diarization` also carries a `known_speaker_summary`
 (the summary block above) and a non-sensitive `known_speakers` list of

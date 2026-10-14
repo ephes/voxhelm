@@ -1088,6 +1088,39 @@ def summarize_known_speaker(
         "confident_speaker_distribution": per_speaker,
         "margin_median": _median(margins),
         "raw_diarization_available": bool(raw_turns),
+        "raw_diarization_labels": summarize_raw_labels(segments, raw_turns),
+    }
+
+
+def summarize_raw_labels(
+    segments: Sequence[KnownSpeakerSegment],
+    raw_turns: list[SpeakerTurn],
+) -> dict[str, dict[str, Any]]:
+    """Each diarization label with its seconds of speech and its known speaker.
+
+    The speaker is the one the label is tied to by the vote described under
+    "Turn corroboration" (``None`` when it is tied to nobody). The vote counts
+    the segments the whole-segment rules accepted with a single label, which
+    are exactly the confident segments without an accept reason. A consumer
+    can use this to name a label no known speaker is tied to, such as a guest
+    without a reference.
+    """
+    turns = normalize_speaker_turns(raw_turns) if raw_turns else []
+    seconds: dict[str, float] = {}
+    for turn in turns:
+        seconds[turn.speaker] = seconds.get(turn.speaker, 0.0) + turn.end - turn.start
+    votes: dict[str, dict[str, int]] = {}
+    for segment in segments:
+        if segment.speaker_uncertain or segment.speaker_accept_reason or not segment.speaker:
+            continue
+        label = single_raw_label(raw_turn_overlaps(segment.start, segment.end, turns))
+        if label is not None:
+            speaker_votes = votes.setdefault(label, {})
+            speaker_votes[segment.speaker] = speaker_votes.get(segment.speaker, 0) + 1
+    label_speakers = map_raw_labels_to_speakers(votes)
+    return {
+        label: {"speaker": label_speakers.get(label), "seconds": round(total, 3)}
+        for label, total in seconds.items()
     }
 
 

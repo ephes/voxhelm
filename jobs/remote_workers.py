@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -1087,6 +1088,9 @@ def safe_worker_metadata_number(value: object) -> int | float | None:
     return value
 
 
+RAW_DIARIZATION_LABEL_RE = re.compile(r"Speaker [1-9][0-9]{0,2}")
+
+
 def sanitize_known_speaker_summary(value: dict[str, Any], *, job: Job) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for key in KNOWN_SPEAKER_SUMMARY_STRING_KEYS:
@@ -1138,7 +1142,43 @@ def sanitize_known_speaker_summary(value: dict[str, Any], *, job: Job) -> dict[s
     raw_turns_available = value.get("raw_diarization_available")
     if isinstance(raw_turns_available, bool):
         summary["raw_diarization_available"] = raw_turns_available
+
+    raw_labels = sanitize_raw_diarization_labels(
+        value.get("raw_diarization_labels"), allowed_speaker_names=allowed_speaker_names
+    )
+    if raw_labels is not None:
+        summary["raw_diarization_labels"] = raw_labels
     return summary
+
+
+def sanitize_raw_diarization_labels(
+    value: object, *, allowed_speaker_names: set[str]
+) -> dict[str, dict[str, Any]] | None:
+    """Keep ``"Speaker N"`` labels with finite seconds and a configured speaker or null.
+
+    A label tied to a name that is not a configured known speaker is dropped
+    as a whole, so a consumer never mistakes it for a label nobody is tied to.
+    """
+    if not isinstance(value, dict):
+        return None
+    labels: dict[str, dict[str, Any]] = {}
+    for label, entry in value.items():
+        if not (
+            isinstance(label, str)
+            and RAW_DIARIZATION_LABEL_RE.fullmatch(label)
+            and isinstance(entry, dict)
+        ):
+            continue
+        seconds = safe_worker_metadata_number(entry.get("seconds"))
+        speaker = entry.get("speaker")
+        if seconds is None:
+            continue
+        if speaker is not None:
+            if not isinstance(speaker, str) or speaker.strip() not in allowed_speaker_names:
+                continue
+            speaker = speaker.strip()
+        labels[label] = {"speaker": speaker, "seconds": seconds}
+    return labels
 
 
 def configured_known_speaker_names(job: Job) -> set[str]:
