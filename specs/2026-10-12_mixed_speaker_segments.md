@@ -743,7 +743,7 @@ splits there. pyannote does see it: "thank you for having me" (words
 is different (Carlton has a reference); probably too short for a track run
 (two clear frames at a 0.25 s hop with 1.5 s windows). Not examined yet.
 
-#### Re-cut at the turns of unmapped labels (2026-10-14, implemented, not released)
+#### Re-cut at the turns of unmapped labels (2026-10-14, deployed with voxhelm 0.1.8)
 
 A first pass runs the postprocess as deployed and reads which diarization
 labels the confident segments tie to known speakers. A second pass overlays
@@ -783,6 +783,24 @@ thinking of you recently ..." (31.46-36.12). With the django-cast rule the
 first piece is named after the guest. Wall times in this run did not show the
 extra pass clearly (model warm-up falls into the first pass); on staging
 `processing_seconds` of the post 24 re-run will show it.
+
+Verified in production on 2026-10-14: job
+`25f1753f-453f-4a1a-9c4b-e3284ac40507` re-ran post 24 on worker `studio` with
+voxhelm 0.1.8: 1132 segments, 297 confident (Carlton 154 / Will 143), 835
+uncertain, 0 mixed, 356 from a split, 47 by track, 18 corroborated, close to
+the local 1107. `raw_diarization_labels`: Speaker 1 → Carlton (627 s),
+Speaker 2 → Will (706 s), Speaker 3 → null (2459 s). Per pyannote label, the
+guest's label has 2403 s unnamed and 4 s named Will; Will's label has 704 s
+Will, 2 s Carlton and 32 s unnamed. After django-cast applied the
+suggestions with the guest rule, the public transcript names Eric 768 lines,
+Carlton 154, Will 143, and leaves 67 blank (0.1.6 sidecar re-applied: 625 / 138 / 128 /
+38). The opening now reads: 20.00-29.70 Will ("... welcome back, Eric"),
+30.00-31.46 Eric ("thank you for having me"), 31.46-36.12 Will ("so i was
+thinking of you recently ..."). From 30 s on the text is still lowercase and
+unpunctuated (see step 3). `processing_seconds` was 675.9 for 4079 s of
+audio. The 0.1.6 run of the same post took about 562 s wall time on the same
+worker, which is a different measure, so the cost of the second pass is not
+isolated. Not yet checked by ear.
 
 ## Order and verification
 
