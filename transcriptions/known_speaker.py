@@ -787,7 +787,7 @@ def resolve_overlapping_turns(turns: Sequence[SpeakerTurn]) -> list[SpeakerTurn]
     resolved: list[SpeakerTurn] = []
     active: list[SpeakerTurn] = []
     position = 0
-    for left, right in zip(bounds, bounds[1:]):
+    for left, right in zip(bounds, bounds[1:], strict=False):
         while position < len(ordered) and ordered[position].start <= left:
             active.append(ordered[position])
             position += 1
