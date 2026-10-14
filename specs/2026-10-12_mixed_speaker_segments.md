@@ -3,7 +3,9 @@
 Status: 2026-10-12. Step 1b (sub-window veto) is implemented and deployed with
 voxhelm 0.1.3 (control plane and both workers); steps 1a, 2 and 3 are still
 plan. Turn corroboration (see "Uncertain segments without a veto") is
-deployed with voxhelm 0.1.4. Revised after a fresh-context review by gpt-6.1-sol (high
+deployed with voxhelm 0.1.4, the re-cut at speaker changes with 0.1.5, the
+guest guard with 0.1.6 and the diarization label summary with 0.1.7 (see
+"Guest without a reference" and the sections after it). Revised after a fresh-context review by gpt-6.1-sol (high
 effort) on the same day; the main findings were checked against the source and
 are folded in below. The open question is settled, see "Findings" below:
 pyannote emitted no turn for the greeting, the sub-window classification does
@@ -675,6 +677,99 @@ name comes from the whole-segment rule and predates the re-cut. Not examined:
 guests with their own reference, more than three speakers, and whether the
 re-cut places sensible boundaries inside guest speech (the track cannot tell
 a guest from the host they resemble).
+
+#### Guest guard in production and the lost guest names (2026-10-14)
+
+voxhelm 0.1.6 (the guard above) was verified on staging on 2026-10-14:
+
+| Post / audio | Job, worker | Result |
+| --- | --- | --- |
+| 24 / 22 "Django Deployments in 2025", Eric Matthes, no guest reference | `52d97f63-16bc-4258-a104-a20c7597a6de`, studio, ~562 s | 929 segments, 266 confident (Carlton 138 / Will 128), 663 uncertain, 0 mixed, 40 from a split, 34 by track, 13 corroborated, margin median 0.157. The guest's diarization label (2415 s) gets no name; the 2 s named Will on it are Will. |
+| 209 / 203 Calvin Hendryx-Parker, reference from the same episode | `12af0897-f8c2-4aeb-bb81-8fd57ccb8e03`, atlas, ~349 s | 734 segments, 692 confident, 42 uncertain, 1 mixed, 96 by track. Guard not exercised; optimistic. |
+| 210 / 204 Mia Bajic, reference from the same episode | `dd4ef443-4562-4bf0-bc2d-c6fc2cbb0e50`, studio, 191.6 s | 447 segments, 424 confident (Mia 260 / Carlton 138 / Will 26), 23 uncertain, 0 mixed, 42 from a split, 103 by track. No cross-assignments; optimistic. |
+
+The guard worked as designed, but the maintainer judged post 24 broken: the
+guest is listed on the episode and none of his lines carried a name. Before
+the re-run they had. The earlier transcript was anonymous pyannote output
+("Speaker N" in the Podlove/VTT/DOTe speaker fields), and django-cast named
+the guest through an approved "Speaker 3 → Eric Matthes" mapping applied at
+render time. A known-speaker run writes the public artifacts unlabeled, so
+the artifact fingerprint changed, the approved mappings went stale, and
+nothing named the guest any more. On staging 182 of 207 transcripts have
+such approved mappings (520 rows), so every known-speaker re-run of one of
+them would have lost a reviewed guest name the same way. The guard did not
+cause this; 0.1.5 named the guest as a host instead.
+
+Fix, fully automatic (maintainer decision, 2026-10-14: no hand-seeded guest
+references):
+
+- voxhelm 0.1.7 adds `raw_diarization_labels` to the known-speaker summary:
+  every diarization label with its seconds of speech and the known speaker
+  the confident-segment vote ties it to, or null (contract:
+  `known-speaker-diarization.md`, "Response"). The control plane allowlists
+  it for remote workers. Classification is unchanged. Deployed to the
+  control plane and both workers on 2026-10-14.
+- django-cast (develop `1f03c4c3`) names the guest at apply time when it is
+  unambiguous: exactly one label tied to no known speaker, every known
+  speaker tied to a label, the audio in exactly one episode, and exactly one
+  visible assigned contributor without a reference. The uncertain segments on
+  that label get the contributor's name; segments flagged `mixed_speakers`
+  do not, and editor decisions win. For sidecars from 0.1.6 and earlier it
+  falls back to the same vote over the segments.
+
+Re-applied to the existing 0.1.6 sidecar of post 24, without a re-run:
+Speaker 3 is named "Eric Matthes", 625 lines carry his name, Carlton 138,
+Will 128, 38 stay blank. Episodes where everyone has a reference are not
+changed by the rule.
+
+Boundary errors seen in the text on staging, not checked by ear:
+
+- Post 24, 30.00 s: Will's segment starts with Eric's "thank you for having
+  me". 01:28: Eric's trailing "nice." in Will's segment (one word; one-word
+  pieces are folded on purpose, `RESEGMENT_MIN_PIECE_WORDS = 2`).
+- Post 210, 24.96 s: Carlton's "hello will" inside Will's segment; unclear
+  "oh yes" (end of Mia's 31.69 segment) and "uh i'll be there" (end of Will's
+  37.74 segment).
+
+Both 30.00 s and 24.96 s sit where the ASR text flips to lowercase and
+unpunctuated, at a whisper 30 s window boundary. The 30.00 s error was
+reproduced locally with the production settings (whisper.cpp `-ojf -p 1 -l
+en -np --max-context 0 --suppress-nst`, pyannote `num=3`; 919 segments, 280
+confident, 639 uncertain, close to staging). Cause: the speaker track only
+compares against the references, so a guest without one produces no run of
+its own; Eric → Will is not a change for the track and the re-cut never
+splits there. pyannote does see it: "thank you for having me" (words
+30.27-31.46) lies on the guest's label (turn 30.73-31.35). The 24.96 s case
+is different (Carlton has a reference); probably too short for a track run
+(two clear frames at a 0.25 s hop with 1.5 s windows). Not examined yet.
+
+#### Prototype: re-cut at the turns of unmapped labels (2026-10-14, not adopted yet)
+
+A first pass runs the postprocess as deployed and reads which diarization
+labels the confident segments tie to known speakers. A second pass overlays
+the pyannote turns of the other labels on the speaker-track turns before the
+re-cut, so a segment is also split where speech moves to or from a label
+nobody is tied to. Measured locally with the host references; the metric is
+the seconds of speech on unmapped labels (per pyannote) inside segments that
+carry a host's name:
+
+| Episode (pyannote) | guest speech in named segments, 0.1.6 → prototype | named s | known-speaker speech left unnamed | segments |
+| --- | --- | --- | --- | --- |
+| Post 24, Eric (`num=3`) | 30.3 s / 20 segments → 11.7 s / 5 | 1243 → 1266 | 117 → 96 s | 919 → 1107 |
+| "Deploy on Day One", Calvin (`num=3`) | 76.4 s / 45 → 26.2 s / 11 | 903 → 850 | 118 → 151 s | 700 → 781 |
+| "EuroPython 2026", Mia, no Mia reference (`num=3`) | 14.9 s / 10 → 2.7 s / 1 | 417 → 437 | 41 → 14 s | 375 → 408 |
+| Episode 206 (`num=2`) | 0 → 0, identical | | | |
+| Episode 205 (`num=2`) | 0 → 0, identical | | | |
+
+The 30.00 s case is fixed ("thank you for having me" becomes its own
+segment, which the django-cast rule now names after the guest). Caveats: the
+metric is circular, because it is measured against pyannote and the
+prototype cuts at pyannote turns; on "Deploy on Day One" 33 s of host speech
+lose their name; segments grow by 10-20 %; and the first pass costs roughly
+40-60 s per job. A cheaper label map (for example from the track frames,
+which exist before the re-cut) is untested and could map a guest who
+resembles a host to that host. With guest naming in place this is the next
+candidate; it would be judged on the re-run staging transcript of post 24.
 
 ## Order and verification
 
