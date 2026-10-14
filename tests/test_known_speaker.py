@@ -45,6 +45,7 @@ from transcriptions.known_speaker import (
     known_speaker_config_from_mapping,
     l2_normalize,
     mixed_window_bounds,
+    overlay_unmapped_turns,
     pad_to_min_duration,
     raw_labels_are_known,
     resegment_result,
@@ -1385,6 +1386,166 @@ def test_postprocess_leaves_segments_alone_without_recut_or_words(config, with_w
     # The mixed segment is still caught by the veto.
     assert outcome.segments[0].speaker is None
     assert outcome.segments[0].speaker_uncertain_reason == MIXED_SPEAKERS_REASON
+
+
+class CountingStubBackend(StubEmbeddingBackend):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, samples, sample_rate):
+        self.calls += 1
+        return super().embed(samples, sample_rate)
+
+
+def run_guest_episode(*, guest_label: str, backend=None):
+    """Six Johannes segments, then one segment whose last 4 s are a guest.
+
+    The guest (amplitude 0.04, stub tag 0) matches no reference, and no window
+    across the change averages to another speaker's tag, so the track sees
+    only Johannes and cannot cut there; the diarization gives the guest a label.
+    """
+    sample_rate = 16000
+    references = [make_reference("Johannes", 0.1), make_reference("Dominik", 0.2)]
+    audio = numpy.concatenate(
+        [
+            numpy.full(16 * sample_rate, 0.1, dtype="float32"),
+            numpy.full(4 * sample_rate, 0.04, dtype="float32"),
+        ]
+    )
+    segments = [
+        TranscriptionSegment(
+            id=index,
+            start=index * 2.0,
+            end=index * 2.0 + 2.0,
+            text=f"a{index} b{index}",
+            words=words_at(
+                (index * 2.0 + 0.2, index * 2.0 + 0.9, f"a{index}"),
+                (index * 2.0 + 0.9, index * 2.0 + 1.8, f"b{index}"),
+            ),
+        )
+        for index in range(6)
+    ]
+    segments.append(
+        TranscriptionSegment(
+            id=6,
+            start=12.0,
+            end=20.0,
+            text="so welcome thank you for having me",
+            words=words_at(
+                (12.5, 13.5, "so"),
+                (13.5, 15.5, "welcome"),
+                (16.3, 17.0, "thank"),
+                (17.0, 17.5, "you"),
+                (17.5, 18.5, "for"),
+                (18.5, 19.0, "having"),
+                (19.0, 19.5, "me"),
+            ),
+        )
+    )
+    result = TranscriptionResult(
+        text=" ".join(segment.text for segment in segments), language="en", segments=segments
+    )
+    return run_known_speaker_postprocess(
+        result,
+        references=references,
+        job_audio_samples=audio,
+        raw_turns=[
+            SpeakerTurn(start=0.0, end=16.0, speaker="SPEAKER_00"),
+            SpeakerTurn(start=16.0, end=20.0, speaker=guest_label),
+        ],
+        config=KnownSpeakerConfig(),
+        backend=backend or StubEmbeddingBackend(),
+    )
+
+
+def test_postprocess_also_cuts_where_an_unmapped_diarization_label_starts() -> None:
+    outcome = run_guest_episode(guest_label="SPEAKER_01")
+
+    last_two = [(s.start, s.end, s.text) for s in outcome.result.segments[-2:]]
+    assert last_two == [
+        (12.0, 16.3, "so welcome"),
+        (16.3, 20.0, "thank you for having me"),
+    ]
+    host, guest = outcome.segments[-2:]
+    assert host.speaker == "Johannes"
+    assert guest.speaker is None
+    assert guest.raw_diarization_speaker == "Speaker 2"
+    assert outcome.summary["raw_diarization_labels"] == {
+        "Speaker 1": {"speaker": "Johannes", "seconds": 16.0},
+        "Speaker 2": {"speaker": None, "seconds": 4.0},
+    }
+    assert outcome.summary["resegmented_segment_count"] == 2
+    assert outcome.result.text.endswith("so welcome thank you for having me")
+
+
+def test_postprocess_classifies_once_when_every_label_is_mapped() -> None:
+    # The same audio with the guest stretch on the host's label: nothing is
+    # unmapped, so there is no second pass and no extra cut.
+    single = CountingStubBackend()
+    outcome = run_guest_episode(guest_label="SPEAKER_00", backend=single)
+    double = CountingStubBackend()
+    run_guest_episode(guest_label="SPEAKER_01", backend=double)
+
+    assert [(s.start, s.end) for s in outcome.result.segments][-1] == (12.0, 20.0)
+    assert outcome.summary["resegmented_segment_count"] == 0
+    assert double.calls > single.calls
+
+
+def test_overlay_unmapped_turns_cuts_the_track_around_each_turn() -> None:
+    track = [
+        SpeakerTurn(start=0.0, end=10.0, speaker="Johannes"),
+        SpeakerTurn(start=10.0, end=math.inf, speaker="Dominik"),
+    ]
+    unmapped = [
+        SpeakerTurn(start=9.0, end=11.0, speaker="Speaker 3"),
+        SpeakerTurn(start=2.0, end=3.0, speaker="Speaker 3"),
+    ]
+
+    assert [(t.start, t.end, t.speaker) for t in overlay_unmapped_turns(track, unmapped)] == [
+        (0.0, 2.0, "Johannes"),
+        (2.0, 3.0, "unmapped:Speaker 3"),
+        (3.0, 9.0, "Johannes"),
+        (9.0, 11.0, "unmapped:Speaker 3"),
+        (11.0, math.inf, "Dominik"),
+    ]
+
+
+def test_overlay_resolves_nested_unmapped_turns() -> None:
+    track = [SpeakerTurn(start=0.0, end=math.inf, speaker="Johannes")]
+    unmapped = [
+        SpeakerTurn(start=2.0, end=8.0, speaker="Speaker 3"),
+        SpeakerTurn(start=3.0, end=4.0, speaker="Speaker 4"),
+    ]
+
+    assert [(t.start, t.end, t.speaker) for t in overlay_unmapped_turns(track, unmapped)] == [
+        (0.0, 2.0, "Johannes"),
+        (2.0, 3.0, "unmapped:Speaker 3"),
+        (3.0, 4.0, "unmapped:Speaker 4"),
+        (4.0, 8.0, "unmapped:Speaker 3"),
+        (8.0, math.inf, "Johannes"),
+    ]
+
+
+def test_overlay_without_track_turns_keeps_the_rest_neutral() -> None:
+    unmapped = [SpeakerTurn(start=2.0, end=3.0, speaker="Speaker 3")]
+
+    assert [(t.start, t.end, t.speaker) for t in overlay_unmapped_turns([], unmapped)] == [
+        (0.0, 2.0, ""),
+        (2.0, 3.0, "unmapped:Speaker 3"),
+        (3.0, math.inf, ""),
+    ]
+
+
+def test_postprocess_cuts_at_an_unmapped_label_without_track_runs(monkeypatch) -> None:
+    # No clear track run anywhere: the whole-segment vote still ties the host
+    # label, so the guest turn alone splits the segment.
+    monkeypatch.setattr("transcriptions.known_speaker.track_turns", lambda frames: [])
+    outcome = run_guest_episode(guest_label="SPEAKER_01")
+
+    assert [(s.start, s.end, s.text) for s in outcome.result.segments[-2:]] == [
+        (12.0, 16.3, "so welcome"),
+        (16.3, 20.0, "thank you for having me"),
+    ]
 
 
 def test_track_accepted_segments_are_serialized_and_summarized() -> None:

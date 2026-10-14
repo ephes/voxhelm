@@ -299,6 +299,15 @@ re-cuts the segments before classifying them:
   next one. A piece starts at its
   first word (the first keeps the segment start) and ends where the next one
   starts (the last keeps the segment end); its text is its words.
+- The track only compares against the references, so it sees no change to
+  someone without one, such as a guest. When the anonymous diarization has
+  labels nobody is tied to (by the vote described under "Turn
+  corroboration") and at least one label that is tied, the segments are
+  classified once, and then the re-cut is repeated from Whisper's segments
+  with the diarization turns of the untied labels cut into the track turns,
+  each as a speaker of its own, and the segments are classified again. This
+  costs a second classification pass on those jobs only; jobs where every
+  label is tied, or none is, are re-cut once as before.
 - The transcript artifacts and the sidecar are both written from the re-cut
   segments, so their start times match. The full transcript text is unchanged.
 

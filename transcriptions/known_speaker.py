@@ -115,6 +115,8 @@ TRACK_EDGE_SECONDS = 0.4
 TRACK_MIN_CLEAR_SHARE = 0.3
 TRACK_SHARE_MIN_SECONDS = 2.5
 SPEAKER_TRACK_REASON = "speaker_track"
+# Track turn label for a diarization turn no known speaker is tied to.
+UNMAPPED_TURN_PREFIX = "unmapped:"
 
 KNOWN_SPEAKER_NUMBER_OPTIONS = (
     "min_segment_duration",
@@ -757,6 +759,81 @@ def split_segment_at_turns(
     return split
 
 
+def unmapped_label_turns(
+    segments: Sequence[KnownSpeakerSegment],
+    raw_turns: list[SpeakerTurn],
+) -> list[SpeakerTurn]:
+    """Diarization turns of the labels no known speaker is tied to.
+
+    Empty when no label is tied to a known speaker at all, because then
+    nothing tells a guest apart from a known speaker the vote missed.
+    """
+    labels = summarize_raw_labels(segments, raw_turns)
+    unmapped = {label for label, entry in labels.items() if entry["speaker"] is None}
+    if not unmapped or len(unmapped) == len(labels):
+        return []
+    return [turn for turn in normalize_speaker_turns(raw_turns) if turn.speaker in unmapped]
+
+
+def resolve_overlapping_turns(turns: Sequence[SpeakerTurn]) -> list[SpeakerTurn]:
+    """Contiguous, non-overlapping turns from turns that may overlap.
+
+    Where turns overlap, the one that started last holds the time until it
+    ends; then the one it interrupted holds it again. Adjacent pieces of the
+    same speaker are joined.
+    """
+    ordered = sorted(turns, key=lambda turn: (turn.start, turn.end, turn.speaker))
+    bounds = sorted({turn.start for turn in ordered} | {turn.end for turn in ordered})
+    resolved: list[SpeakerTurn] = []
+    active: list[SpeakerTurn] = []
+    position = 0
+    for left, right in zip(bounds, bounds[1:]):
+        while position < len(ordered) and ordered[position].start <= left:
+            active.append(ordered[position])
+            position += 1
+        active = [turn for turn in active if turn.end > left]
+        if not active:
+            continue
+        speaker = max(active, key=lambda turn: (turn.start, turn.speaker)).speaker
+        if resolved and resolved[-1].speaker == speaker and resolved[-1].end == left:
+            resolved[-1] = SpeakerTurn(start=resolved[-1].start, end=right, speaker=speaker)
+        else:
+            resolved.append(SpeakerTurn(start=left, end=right, speaker=speaker))
+    return resolved
+
+
+def overlay_unmapped_turns(
+    turns: Sequence[SpeakerTurn],
+    unmapped: Sequence[SpeakerTurn],
+) -> list[SpeakerTurn]:
+    """The track turns with the unmapped diarization turns cut in.
+
+    Each unmapped turn replaces the track over its span and keeps its own
+    label, so ``split_segment_at_turns`` treats it as a speaker of its own.
+    Overlapping unmapped turns are resolved first, and without track turns
+    the rest of the file is one neutral turn.
+    """
+    unmapped = resolve_overlapping_turns(unmapped)
+    if not turns:
+        turns = [SpeakerTurn(start=0.0, end=math.inf, speaker="")]
+    pieces: list[SpeakerTurn] = []
+    for turn in turns:
+        start = turn.start
+        for other in unmapped:
+            if other.end <= start or other.start >= turn.end:
+                continue
+            if other.start > start:
+                pieces.append(SpeakerTurn(start=start, end=other.start, speaker=turn.speaker))
+            start = max(start, other.end)
+        if start < turn.end:
+            pieces.append(SpeakerTurn(start=start, end=turn.end, speaker=turn.speaker))
+    pieces.extend(
+        SpeakerTurn(start=turn.start, end=turn.end, speaker=UNMAPPED_TURN_PREFIX + turn.speaker)
+        for turn in unmapped
+    )
+    return sorted(pieces, key=lambda turn: turn.start)
+
+
 def resegment_result(
     result: TranscriptionResult,
     turns: Sequence[SpeakerTurn],
@@ -1207,7 +1284,9 @@ def run_known_speaker_postprocess(
         )
     centroids = build_speaker_centroids(references, backend)
     track_frames: list[TrackFrame] = []
+    turns: list[SpeakerTurn] = []
     resegmented_segment_count = 0
+    transcribed = result
     # Without word timings nothing can be re-cut, and the track would only be
     # a second opinion on Whisper's own segments, so it is skipped as well.
     if resegmentation_enabled(config) and any(segment.words for segment in result.segments):
@@ -1217,7 +1296,8 @@ def run_known_speaker_postprocess(
             config=config,
             backend=backend,
         )
-        result, resegmented_segment_count = resegment_result(result, track_turns(track_frames))
+        turns = track_turns(track_frames)
+        result, resegmented_segment_count = resegment_result(transcribed, turns)
     segments = classify_segments(
         result,
         job_audio_samples=job_audio_samples,
@@ -1227,6 +1307,22 @@ def run_known_speaker_postprocess(
         backend=backend,
         track_frames=track_frames,
     )
+    unmapped = unmapped_label_turns(segments, raw_turns) if track_frames else []
+    if unmapped:
+        # The track cannot see a change to someone without a reference, so the
+        # re-cut is repeated with the diarization turns of those labels cut in.
+        result, resegmented_segment_count = resegment_result(
+            transcribed, overlay_unmapped_turns(turns, unmapped)
+        )
+        segments = classify_segments(
+            result,
+            job_audio_samples=job_audio_samples,
+            centroids=centroids,
+            raw_turns=raw_turns,
+            config=config,
+            backend=backend,
+            track_frames=track_frames,
+        )
     summary = summarize_known_speaker(
         segments,
         centroids=centroids,

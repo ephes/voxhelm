@@ -743,7 +743,7 @@ splits there. pyannote does see it: "thank you for having me" (words
 is different (Carlton has a reference); probably too short for a track run
 (two clear frames at a 0.25 s hop with 1.5 s windows). Not examined yet.
 
-#### Prototype: re-cut at the turns of unmapped labels (2026-10-14, not adopted yet)
+#### Re-cut at the turns of unmapped labels (2026-10-14, implemented, not released)
 
 A first pass runs the postprocess as deployed and reads which diarization
 labels the confident segments tie to known speakers. A second pass overlays
@@ -770,6 +770,19 @@ lose their name; segments grow by 10-20 %; and the first pass costs roughly
 which exist before the re-cut) is untested and could map a guest who
 resembles a host to that host. With guest naming in place this is the next
 candidate; it would be judged on the re-run staging transcript of post 24.
+
+Implemented in `run_known_speaker_postprocess` (`unmapped_label_turns`,
+`overlay_unmapped_turns`; contract: "Re-cut at speaker changes"). The label
+map is the same vote as `raw_diarization_labels`; the second pass runs only
+when at least one label is tied to a known speaker and at least one is not.
+Re-measured with the implementation on the same data: all five rows of the
+table above are reproduced exactly, episodes 205 and 206 classify once and are
+identical to 0.1.7, and on post 24 the 30.00 s segment becomes "thank you for
+having me" (30.00-31.46, unnamed, Speaker 3) followed by Will's "so i was
+thinking of you recently ..." (31.46-36.12). With the django-cast rule the
+first piece is named after the guest. Wall times in this run did not show the
+extra pass clearly (model warm-up falls into the first pass); on staging
+`processing_seconds` of the post 24 re-run will show it.
 
 ## Order and verification
 
