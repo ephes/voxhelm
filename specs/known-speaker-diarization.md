@@ -67,12 +67,12 @@ Rules:
   `references` list.
 - A reference is `clip_artifact` (whole referenced audio) or `source_range`
   (a `start`/`end` window, `start` < `end`).
-- Reference `audio` reuses the job-input descriptor shape: `{kind: "url", url}`
-  or `{kind: "upload", upload_id}`. URL hosts must be on
-  `VOXHELM_ALLOWED_URL_HOSTS`. Execution currently fetches `url` references
-  (the production path is source ranges into already-public mastered audio);
-  `upload` references are accepted by the contract but not yet fetched at
-  execution time.
+- Reference `audio` is `{kind: "url", url}`. URL hosts must be on
+  `VOXHELM_ALLOWED_URL_HOSTS` (the production path is source ranges into
+  already-public mastered audio). `{kind: "upload", upload_id}` references are
+  rejected with 400 at submission: fetching them would need signed private
+  delivery, which neither local execution nor remote workers implement, and
+  accepting them only to fail after the full STT run wasted GPU time.
 - `known_speaker` thresholds default to the research recommendation: WeSpeaker
   embeddings, `min_segment_duration=1.5`, `auto_accept_margin=0.15`,
   `min_top_similarity=0.55`.

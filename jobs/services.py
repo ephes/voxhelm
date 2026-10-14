@@ -710,11 +710,14 @@ def parse_reference_audio(value: object) -> dict[str, Any]:
             raise ApiError("reference audio.url must be an absolute URL.")
         return {"kind": "url", "url": url}
     if kind == "upload":
-        upload_id = optional_string(audio.get("upload_id"))
-        if not upload_id:
-            raise ApiError("An upload reference audio requires audio.upload_id.")
-        return {"kind": "upload", "upload_id": ensure_uuid_string(upload_id, "audio.upload_id")}
-    raise ApiError("reference audio.kind must be 'url' or 'upload'.")
+        # Uploaded reference clips would need signed private delivery that neither the
+        # local executor nor remote workers implement. Reject them at submission so a
+        # job never spends its STT run before failing on the reference.
+        raise ApiError(
+            "Uploaded known-speaker reference audio is not supported; use url reference "
+            "audio, e.g. source ranges into allowlisted audio."
+        )
+    raise ApiError("reference audio.kind must be 'url'.")
 
 
 def validate_known_speaker_reference_urls(diarization: object) -> None:
@@ -1209,9 +1212,8 @@ def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
     audio = reference.get("audio", {})
     audio_kind = audio.get("kind")
     if audio_kind != "url":
-        # Uploaded-clip references are accepted by the contract but require signed
-        # private delivery; production references use source ranges into already
-        # public mastered audio. Document this as a follow-up rather than guess.
+        # Submission rejects non-url reference audio; this guards jobs stored before
+        # that check existed.
         raise ApiError(
             "Only url-based known-speaker reference audio is supported for execution; "
             "deliver reference clips as source ranges into allowlisted audio."

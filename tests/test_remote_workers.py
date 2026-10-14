@@ -682,34 +682,45 @@ def test_worker_claim_fails_job_when_known_speaker_reference_url_is_disallowed(
 
 
 @pytest.mark.django_db
-def test_worker_claim_fails_job_with_uploaded_known_speaker_reference_audio(
+@pytest.mark.parametrize("execution_mode", ["django_tasks", "remote_pull"])
+def test_known_speaker_job_with_uploaded_reference_audio_is_rejected_at_submission(
+    client,
+    settings,
+    execution_mode,
+):
+    enable_remote_workers(settings)
+    settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE = execution_mode
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(
+                task_ref="uploaded-known-speaker-reference",
+                diarization=uploaded_reference_diarization(),
+            )
+        ),
+        content_type="application/json",
+        **producer_headers(),
+    )
+
+    assert response.status_code == 400
+    assert "Uploaded known-speaker reference audio" in response.json()["error"]["message"]
+    assert not Job.objects.exists()
+
+
+@pytest.mark.django_db
+def test_worker_claim_fails_stored_job_with_uploaded_known_speaker_reference_audio(
     client,
     settings,
 ):
+    # Jobs stored before submission rejected uploaded reference audio still fail
+    # before a remote claim is handed out.
     job = submit_remote_job(
         client,
         settings,
-        task_ref="remote-uploaded-known-speaker-reference",
-        diarization={
-            "enabled": True,
-            "strategy": "pyannote_known_speaker",
-            "known_speakers": [
-                {
-                    "id": "12",
-                    "name": "Johannes",
-                    "references": [
-                        {
-                            "kind": "clip_artifact",
-                            "audio": {
-                                "kind": "upload",
-                                "upload_id": "00000000-0000-0000-0000-000000000123",
-                            },
-                        }
-                    ],
-                }
-            ],
-        },
+        task_ref="remote-stale-uploaded-known-speaker-reference",
     )
+    job.output_data["diarization"] = uploaded_reference_diarization()
+    job.save(update_fields=["output_data"])
 
     response = claim_one(client, capabilities=known_speaker_capabilities())
 
@@ -718,6 +729,28 @@ def test_worker_claim_fails_job_with_uploaded_known_speaker_reference_audio(
     assert job.state == Job.State.FAILED
     assert "Uploaded known-speaker reference audio" in job.error_detail
     assert job.worker_progress == {}
+
+
+def uploaded_reference_diarization() -> dict:
+    return {
+        "enabled": True,
+        "strategy": "pyannote_known_speaker",
+        "known_speakers": [
+            {
+                "id": "12",
+                "name": "Johannes",
+                "references": [
+                    {
+                        "kind": "clip_artifact",
+                        "audio": {
+                            "kind": "upload",
+                            "upload_id": "00000000-0000-0000-0000-000000000123",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
 
 
 @pytest.mark.django_db

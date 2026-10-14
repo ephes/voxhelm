@@ -640,9 +640,10 @@ artifacts must use the exact expected MIME types before Voxhelm exposes them.
 Known-speaker jobs are claimable only by workers advertising the required
 pyannote/wespeaker speaker-sidecar capability. Known-speaker reference URLs are
 checked against `VOXHELM_ALLOWED_URL_HOSTS` at submission and again before a
-remote claim is handed out. Uploaded known-speaker reference clips are rejected
-before remote claim in this slice; use URL reference audio for remote-worker
-jobs. Completion metadata stores only type-checked scalar worker fields plus
+remote claim is handed out. Uploaded known-speaker reference clips
+(`audio.kind=upload`) are rejected with 400 at submission in every execution
+mode; use URL reference audio. Jobs stored before that check still fail before
+remote claim. Completion metadata stores only type-checked scalar worker fields plus
 server-derived source, worker, attempt, and request metadata. URL completions
 keep the server-owned job input URL as `source_url` and ignore worker-supplied
 redirect URLs. URL-shaped strings, nested values, negative or non-finite

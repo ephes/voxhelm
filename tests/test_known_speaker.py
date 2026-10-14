@@ -1706,7 +1706,7 @@ def test_parse_reference_audio_requires_absolute_url() -> None:
         parse_diarization_option(known_speaker_payload(known_speakers=speakers))
 
 
-def test_parse_reference_audio_accepts_upload_kind() -> None:
+def test_parse_reference_audio_rejects_upload_kind() -> None:
     speakers = [
         {
             "id": "1",
@@ -1722,8 +1722,8 @@ def test_parse_reference_audio_accepts_upload_kind() -> None:
             ],
         }
     ]
-    parsed = parse_diarization_option(known_speaker_payload(known_speakers=speakers))
-    assert parsed["known_speakers"][0]["references"][0]["audio"]["kind"] == "upload"
+    with pytest.raises(ApiError, match="Uploaded known-speaker reference audio is not supported"):
+        parse_diarization_option(known_speaker_payload(known_speakers=speakers))
 
 
 def test_parse_reference_audio_rejects_unknown_audio_kind() -> None:
