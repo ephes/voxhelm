@@ -22,9 +22,9 @@ from transcriptions.service import (
     TranscriptionWord,
     WhisperCppBackend,
     WhisperKitBackend,
-    _normalize_audio_for_whispercpp,
     build_backend_service,
     get_backend_services_for_model,
+    normalize_audio_to_wav_16k_mono,
     normalize_interactive_transcript,
     normalize_transcription_payload,
     normalize_whispercpp_payload,
@@ -838,7 +838,7 @@ def test_whispercpp_audio_normalization_handles_non_utf8_ffmpeg_stderr(
     settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
 
     try:
-        _normalize_audio_for_whispercpp(input_path=input_path, output_path=output_path)
+        normalize_audio_to_wav_16k_mono(input_path=input_path, output_path=output_path)
     except RuntimeError as exc:
         assert str(exc) == "ffmpeg audio normalization failed: bad byte: �"
     else:  # pragma: no cover

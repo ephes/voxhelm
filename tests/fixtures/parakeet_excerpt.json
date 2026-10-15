@@ -1,0 +1,761 @@
+{
+ "text": " Hi, welcome to another episode of Django Chat. I'm Will Vincent with Carlton Gibson. Hey Carlton. Hello, Will. Um, so maybe I put it back. Uh for a hobby, for a hobby at our days, at our age. No, it's a nice hobby, it's good fun.",
+ "sentences": [
+  {
+   "text": " Hi, welcome to another episode of Django Chat.",
+   "start": 5.84,
+   "end": 8.32,
+   "duration": 2.48,
+   "confidence": 0.994,
+   "tokens": [
+    {
+     "text": " Hi",
+     "start": 5.84,
+     "end": 6.16,
+     "duration": 0.32,
+     "confidence": 0.987
+    },
+    {
+     "text": ",",
+     "start": 6.16,
+     "end": 6.24,
+     "duration": 0.08,
+     "confidence": 0.959
+    },
+    {
+     "text": " wel",
+     "start": 6.24,
+     "end": 6.4,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": "c",
+     "start": 6.4,
+     "end": 6.48,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ome",
+     "start": 6.48,
+     "end": 6.56,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " to",
+     "start": 6.56,
+     "end": 6.72,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " an",
+     "start": 6.72,
+     "end": 6.8,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ot",
+     "start": 6.8,
+     "end": 6.88,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "her",
+     "start": 6.88,
+     "end": 6.96,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " e",
+     "start": 6.96,
+     "end": 7.04,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "pis",
+     "start": 7.04,
+     "end": 7.2,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": "ode",
+     "start": 7.2,
+     "end": 7.28,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " of",
+     "start": 7.28,
+     "end": 7.44,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " D",
+     "start": 7.44,
+     "end": 7.6,
+     "duration": 0.16,
+     "confidence": 0.994
+    },
+    {
+     "text": "j",
+     "start": 7.6,
+     "end": 7.68,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ang",
+     "start": 7.68,
+     "end": 7.84,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": "o",
+     "start": 7.84,
+     "end": 8.0,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " Ch",
+     "start": 8.0,
+     "end": 8.16,
+     "duration": 0.16,
+     "confidence": 0.968
+    },
+    {
+     "text": "at",
+     "start": 8.16,
+     "end": 8.24,
+     "duration": 0.08,
+     "confidence": 0.992
+    },
+    {
+     "text": ".",
+     "start": 8.24,
+     "end": 8.32,
+     "duration": 0.08,
+     "confidence": 0.991
+    }
+   ]
+  },
+  {
+   "text": " I'm Will Vincent with Carlton Gibson.",
+   "start": 8.32,
+   "end": 10.32,
+   "duration": 2.0,
+   "confidence": 0.997,
+   "tokens": [
+    {
+     "text": " I",
+     "start": 8.32,
+     "end": 8.4,
+     "duration": 0.08,
+     "confidence": 0.996
+    },
+    {
+     "text": "'",
+     "start": 8.4,
+     "end": 8.48,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "m",
+     "start": 8.48,
+     "end": 8.48,
+     "duration": 0.0,
+     "confidence": 0.999
+    },
+    {
+     "text": " W",
+     "start": 8.48,
+     "end": 8.56,
+     "duration": 0.08,
+     "confidence": 0.996
+    },
+    {
+     "text": "ill",
+     "start": 8.56,
+     "end": 8.72,
+     "duration": 0.16,
+     "confidence": 0.999
+    },
+    {
+     "text": " V",
+     "start": 8.72,
+     "end": 8.8,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "in",
+     "start": 8.8,
+     "end": 8.96,
+     "duration": 0.16,
+     "confidence": 0.999
+    },
+    {
+     "text": "cent",
+     "start": 8.96,
+     "end": 9.12,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " with",
+     "start": 9.12,
+     "end": 9.28,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " Car",
+     "start": 9.28,
+     "end": 9.52,
+     "duration": 0.24,
+     "confidence": 0.999
+    },
+    {
+     "text": "l",
+     "start": 9.52,
+     "end": 9.6,
+     "duration": 0.08,
+     "confidence": 0.978
+    },
+    {
+     "text": "ton",
+     "start": 9.6,
+     "end": 9.76,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " G",
+     "start": 9.76,
+     "end": 9.84,
+     "duration": 0.08,
+     "confidence": 0.999
+    },
+    {
+     "text": "ib",
+     "start": 9.84,
+     "end": 10.0,
+     "duration": 0.16,
+     "confidence": 0.999
+    },
+    {
+     "text": "son",
+     "start": 10.0,
+     "end": 10.16,
+     "duration": 0.16,
+     "confidence": 0.999
+    },
+    {
+     "text": ".",
+     "start": 10.24,
+     "end": 10.32,
+     "duration": 0.08,
+     "confidence": 0.992
+    }
+   ]
+  },
+  {
+   "text": " Hey Carlton.",
+   "start": 10.32,
+   "end": 11.52,
+   "duration": 1.2,
+   "confidence": 0.992,
+   "tokens": [
+    {
+     "text": " He",
+     "start": 10.32,
+     "end": 10.4,
+     "duration": 0.08,
+     "confidence": 0.986
+    },
+    {
+     "text": "y",
+     "start": 10.4,
+     "end": 10.48,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " Car",
+     "start": 10.56,
+     "end": 10.8,
+     "duration": 0.24,
+     "confidence": 0.999
+    },
+    {
+     "text": "l",
+     "start": 10.8,
+     "end": 11.04,
+     "duration": 0.24,
+     "confidence": 0.992
+    },
+    {
+     "text": "ton",
+     "start": 11.04,
+     "end": 11.28,
+     "duration": 0.24,
+     "confidence": 1.0
+    },
+    {
+     "text": ".",
+     "start": 11.28,
+     "end": 11.52,
+     "duration": 0.24,
+     "confidence": 0.973
+    }
+   ]
+  },
+  {
+   "text": " Hello, Will.",
+   "start": 11.52,
+   "end": 12.96,
+   "duration": 1.44,
+   "confidence": 0.978,
+   "tokens": [
+    {
+     "text": " H",
+     "start": 11.52,
+     "end": 11.76,
+     "duration": 0.24,
+     "confidence": 0.958
+    },
+    {
+     "text": "ello",
+     "start": 11.76,
+     "end": 12.0,
+     "duration": 0.24,
+     "confidence": 1.0
+    },
+    {
+     "text": ",",
+     "start": 12.0,
+     "end": 12.16,
+     "duration": 0.16,
+     "confidence": 0.934
+    },
+    {
+     "text": " W",
+     "start": 12.16,
+     "end": 12.32,
+     "duration": 0.16,
+     "confidence": 0.997
+    },
+    {
+     "text": "ill",
+     "start": 12.32,
+     "end": 12.64,
+     "duration": 0.32,
+     "confidence": 0.999
+    },
+    {
+     "text": ".",
+     "start": 12.64,
+     "end": 12.96,
+     "duration": 0.32,
+     "confidence": 0.985
+    }
+   ]
+  },
+  {
+   "text": " Um, so maybe I put it back.",
+   "start": 598.48,
+   "end": 600.8,
+   "duration": 2.32,
+   "confidence": 0.975,
+   "tokens": [
+    {
+     "text": " Um",
+     "start": 598.48,
+     "end": 598.64,
+     "duration": 0.16,
+     "confidence": 0.987
+    },
+    {
+     "text": ",",
+     "start": 598.64,
+     "end": 598.72,
+     "duration": 0.08,
+     "confidence": 0.92
+    },
+    {
+     "text": " so",
+     "start": 598.72,
+     "end": 598.96,
+     "duration": 0.24,
+     "confidence": 1.0
+    },
+    {
+     "text": " may",
+     "start": 599.04,
+     "end": 599.2,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": "be",
+     "start": 599.2,
+     "end": 599.36,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " I",
+     "start": 599.36,
+     "end": 599.52,
+     "duration": 0.16,
+     "confidence": 0.999
+    },
+    {
+     "text": " put",
+     "start": 599.76,
+     "end": 600.0,
+     "duration": 0.24,
+     "confidence": 0.922
+    },
+    {
+     "text": " it",
+     "start": 600.0,
+     "end": 600.32,
+     "duration": 0.32,
+     "confidence": 0.999
+    },
+    {
+     "text": " back",
+     "start": 600.32,
+     "end": 600.56,
+     "duration": 0.24,
+     "confidence": 1.0
+    },
+    {
+     "text": ".",
+     "start": 600.56,
+     "end": 600.8,
+     "duration": 0.24,
+     "confidence": 0.93
+    }
+   ]
+  },
+  {
+   "text": " Uh for a hobby, for a hobby at our days, at our age.",
+   "start": 600.8,
+   "end": 605.28,
+   "duration": 4.48,
+   "confidence": 0.969,
+   "tokens": [
+    {
+     "text": " U",
+     "start": 600.8,
+     "end": 601.12,
+     "duration": 0.32,
+     "confidence": 0.967
+    },
+    {
+     "text": "h",
+     "start": 601.12,
+     "end": 601.44,
+     "duration": 0.32,
+     "confidence": 1.0
+    },
+    {
+     "text": " for",
+     "start": 603.12,
+     "end": 603.2,
+     "duration": 0.08,
+     "confidence": 0.841
+    },
+    {
+     "text": " a",
+     "start": 603.28,
+     "end": 603.36,
+     "duration": 0.08,
+     "confidence": 0.955
+    },
+    {
+     "text": " h",
+     "start": 603.36,
+     "end": 603.44,
+     "duration": 0.08,
+     "confidence": 0.996
+    },
+    {
+     "text": "ob",
+     "start": 603.44,
+     "end": 603.52,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "by",
+     "start": 603.52,
+     "end": 603.6,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": ",",
+     "start": 603.6,
+     "end": 603.76,
+     "duration": 0.16,
+     "confidence": 0.892
+    },
+    {
+     "text": " for",
+     "start": 603.76,
+     "end": 603.92,
+     "duration": 0.16,
+     "confidence": 0.993
+    },
+    {
+     "text": " a",
+     "start": 603.92,
+     "end": 604.0,
+     "duration": 0.08,
+     "confidence": 0.998
+    },
+    {
+     "text": " h",
+     "start": 604.0,
+     "end": 604.08,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ob",
+     "start": 604.08,
+     "end": 604.08,
+     "duration": 0.0,
+     "confidence": 1.0
+    },
+    {
+     "text": "by",
+     "start": 604.08,
+     "end": 604.16,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " at",
+     "start": 604.24,
+     "end": 604.4,
+     "duration": 0.16,
+     "confidence": 0.926
+    },
+    {
+     "text": " our",
+     "start": 604.4,
+     "end": 604.48,
+     "duration": 0.08,
+     "confidence": 0.998
+    },
+    {
+     "text": " da",
+     "start": 604.48,
+     "end": 604.56,
+     "duration": 0.08,
+     "confidence": 0.998
+    },
+    {
+     "text": "ys",
+     "start": 604.56,
+     "end": 604.64,
+     "duration": 0.08,
+     "confidence": 0.996
+    },
+    {
+     "text": ",",
+     "start": 604.64,
+     "end": 604.8,
+     "duration": 0.16,
+     "confidence": 0.893
+    },
+    {
+     "text": " at",
+     "start": 604.8,
+     "end": 604.88,
+     "duration": 0.08,
+     "confidence": 0.958
+    },
+    {
+     "text": " our",
+     "start": 604.88,
+     "end": 605.04,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " a",
+     "start": 605.04,
+     "end": 605.12,
+     "duration": 0.08,
+     "confidence": 0.999
+    },
+    {
+     "text": "ge",
+     "start": 605.12,
+     "end": 605.2,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": ".",
+     "start": 605.2,
+     "end": 605.28,
+     "duration": 0.08,
+     "confidence": 0.901
+    }
+   ]
+  },
+  {
+   "text": " No, it's a nice hobby, it's good fun.",
+   "start": 605.52,
+   "end": 606.8,
+   "duration": 1.28,
+   "confidence": 0.988,
+   "tokens": [
+    {
+     "text": " No",
+     "start": 605.52,
+     "end": 605.6,
+     "duration": 0.08,
+     "confidence": 0.957
+    },
+    {
+     "text": ",",
+     "start": 605.6,
+     "end": 605.68,
+     "duration": 0.08,
+     "confidence": 0.968
+    },
+    {
+     "text": " it",
+     "start": 605.68,
+     "end": 605.76,
+     "duration": 0.08,
+     "confidence": 0.99
+    },
+    {
+     "text": "'",
+     "start": 605.76,
+     "end": 605.84,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "s",
+     "start": 605.84,
+     "end": 605.84,
+     "duration": 0.0,
+     "confidence": 1.0
+    },
+    {
+     "text": " a",
+     "start": 605.84,
+     "end": 605.92,
+     "duration": 0.08,
+     "confidence": 0.999
+    },
+    {
+     "text": " n",
+     "start": 605.92,
+     "end": 606.0,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ice",
+     "start": 606.0,
+     "end": 606.08,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": " h",
+     "start": 606.08,
+     "end": 606.16,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "ob",
+     "start": 606.16,
+     "end": 606.16,
+     "duration": 0.0,
+     "confidence": 1.0
+    },
+    {
+     "text": "by",
+     "start": 606.16,
+     "end": 606.24,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": ",",
+     "start": 606.24,
+     "end": 606.32,
+     "duration": 0.08,
+     "confidence": 0.918
+    },
+    {
+     "text": " it",
+     "start": 606.32,
+     "end": 606.4,
+     "duration": 0.08,
+     "confidence": 0.999
+    },
+    {
+     "text": "'",
+     "start": 606.4,
+     "end": 606.48,
+     "duration": 0.08,
+     "confidence": 1.0
+    },
+    {
+     "text": "s",
+     "start": 606.48,
+     "end": 606.48,
+     "duration": 0.0,
+     "confidence": 1.0
+    },
+    {
+     "text": " good",
+     "start": 606.48,
+     "end": 606.64,
+     "duration": 0.16,
+     "confidence": 1.0
+    },
+    {
+     "text": " fun",
+     "start": 606.64,
+     "end": 606.72,
+     "duration": 0.08,
+     "confidence": 0.997
+    },
+    {
+     "text": ".",
+     "start": 606.72,
+     "end": 606.8,
+     "duration": 0.08,
+     "confidence": 0.968
+    }
+   ]
+  }
+ ]
+}

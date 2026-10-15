@@ -1,6 +1,7 @@
 # Parakeet ASR backend for known-speaker jobs
 
-Status: 2026-10-15, proposed. Nothing implemented. Evidence:
+Status: 2026-10-15, in progress: backend and output adapter implemented;
+routing and deployment pending. Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
 
 ## Why
@@ -63,7 +64,8 @@ a child process, the same way the whisper.cpp backend runs `whisper-cli`:
 - The child runs through `run_cancellable_process`, so cancellation and
   cleanup behave as for whisper.cpp.
 - Audio is first normalized to 16 kHz mono WAV with the existing ffmpeg
-  helper (`_normalize_audio_for_whispercpp`, renamed to a neutral name), so
+  helper (`normalize_audio_to_wav_16k_mono`, formerly
+  `_normalize_audio_for_whispercpp`), so
   both backends decode identically.
 
 ### Invocation

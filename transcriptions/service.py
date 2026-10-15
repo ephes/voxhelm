@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import math
 import mimetypes
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -24,6 +28,13 @@ from transcriptions.sanitizer import sanitize_result
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
+PARAKEET_BACKEND_NAME = "parakeet"
+# Parakeet TDT 0.6B v3 detects the language itself; these are the 25 it supports.
+PARAKEET_LANGUAGES = frozenset(
+    "bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk".split()
+)
+PARAKEET_MODEL_FILES = ("config.json", "model.safetensors")
+_LOGGER = logging.getLogger(__name__)
 LEADING_FILLER_WORDS = {
     "de": ("okay", "ok", "und", "also", "äh", "ah", "hm", "hmm"),
     "en": ("okay", "ok", "and", "so", "well"),
@@ -198,7 +209,7 @@ class WhisperCppBackend:
         with tempfile.TemporaryDirectory(prefix="voxhelm-whispercpp-") as temp_dir:
             temp_root = Path(temp_dir)
             normalized_audio_path = temp_root / "input.wav"
-            _normalize_audio_for_whispercpp(
+            normalize_audio_to_wav_16k_mono(
                 input_path=audio_path,
                 output_path=normalized_audio_path,
             )
@@ -255,7 +266,7 @@ class WhisperCppBackend:
         return normalize_whispercpp_payload(payload, model_name=self.model_name)
 
 
-def _normalize_audio_for_whispercpp(*, input_path: Path, output_path: Path) -> None:
+def normalize_audio_to_wav_16k_mono(*, input_path: Path, output_path: Path) -> None:
     try:
         completed = subprocess.run(
             [
@@ -295,6 +306,231 @@ def _normalize_audio_for_whispercpp(*, input_path: Path, output_path: Path) -> N
     if detail:
         raise RuntimeError(f"ffmpeg audio normalization failed: {detail}")
     raise RuntimeError("ffmpeg audio normalization failed.")
+
+
+class ParakeetBackend:
+    """NVIDIA Parakeet TDT through the ``parakeet-mlx`` command line.
+
+    The CLI lives in its own Python 3.13 tool environment, so Voxhelm runs it
+    as a child process instead of importing it. The model is a local
+    directory deployed at a pinned commit, and the child runs with
+    ``HF_HUB_OFFLINE=1`` so it can never fetch other weights.
+    """
+
+    def __init__(
+        self,
+        *,
+        binary_path: str,
+        model_dir: str,
+        model_name: str,
+        chunk_seconds: int,
+        overlap_seconds: int,
+        max_sentence_seconds: float | None,
+        timeout_seconds: int,
+    ) -> None:
+        self.binary_path = binary_path
+        self.model_dir = model_dir
+        self.model_name = model_name
+        self.chunk_seconds = chunk_seconds
+        self.overlap_seconds = overlap_seconds
+        self.max_sentence_seconds = max_sentence_seconds
+        self.timeout_seconds = timeout_seconds
+
+    def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        language = normalize_language_code(params.language)
+        if language and language not in PARAKEET_LANGUAGES:
+            raise BackendUnavailableError(
+                f"Parakeet does not support language '{params.language}'."
+            )
+        executable, model_dir = resolve_parakeet_runtime(
+            binary_path=self.binary_path, model_dir=self.model_dir
+        )
+
+        with tempfile.TemporaryDirectory(prefix="voxhelm-parakeet-") as temp_dir:
+            temp_root = Path(temp_dir)
+            normalized_audio_path = temp_root / "input.wav"
+            normalize_audio_to_wav_16k_mono(
+                input_path=audio_path,
+                output_path=normalized_audio_path,
+            )
+            output_dir = temp_root / "out"
+            args = [
+                executable,
+                "--model",
+                str(model_dir),
+                "--output-format",
+                "json",
+                "--output-dir",
+                str(output_dir),
+                "--output-template",
+                "transcript",
+                "--chunk-duration",
+                str(self.chunk_seconds),
+                "--overlap-duration",
+                str(self.overlap_seconds),
+                "--local-attention",
+            ]
+            if self.max_sentence_seconds:
+                args.extend(["--max-duration", f"{self.max_sentence_seconds:g}"])
+            args.append(str(normalized_audio_path))
+
+            _raise_if_cancelled(params)
+            started = monotonic()
+            completed = run_cancellable_process(
+                args,
+                cancel_event=params.cancel_event,
+                timeout_seconds=self.timeout_seconds,
+                env=parakeet_child_env(),
+            )
+            if completed.returncode != 0:
+                detail = "\n".join(
+                    part.strip()
+                    for part in (completed.stderr, completed.stdout)
+                    if isinstance(part, str) and part.strip()
+                )
+                if detail:
+                    raise RuntimeError(f"Parakeet transcription failed: {detail}")
+                raise RuntimeError("Parakeet transcription failed.")
+
+            json_path = output_dir / "transcript.json"
+            if not json_path.exists():
+                raise RuntimeError(
+                    "Parakeet transcription failed: transcript.json was not produced."
+                )
+            try:
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Parakeet transcription produced invalid JSON.") from exc
+        _LOGGER.info(
+            "parakeet transcription finished model=%s seconds=%.1f",
+            self.model_name,
+            monotonic() - started,
+        )
+        return normalize_parakeet_payload(payload, model_name=self.model_name)
+
+
+def parakeet_child_env() -> dict[str, str]:
+    """The child's environment: offline, and no ``PARAKEET_*`` overrides.
+
+    The CLI reads most options from ``PARAKEET_*`` variables as well; dropping
+    them keeps the invocation fully determined by the arguments.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PARAKEET_")}
+    env["HF_HUB_OFFLINE"] = "1"
+    return env
+
+
+def resolve_parakeet_runtime(*, binary_path: str, model_dir: str) -> tuple[str, Path]:
+    """Return the CLI path and model directory, or raise ``BackendUnavailableError``."""
+    if not model_dir:
+        raise BackendUnavailableError(
+            "Parakeet is not configured. Set VOXHELM_PARAKEET_MODEL_DIR to the deployed model."
+        )
+    # Always absolute: parakeet-mlx tries the Hugging Face Hub first, so a
+    # relative path shaped like a repo id could load cached unpinned weights.
+    directory = Path(model_dir).expanduser().resolve()
+    missing = [name for name in PARAKEET_MODEL_FILES if not (directory / name).is_file()]
+    if missing:
+        raise BackendUnavailableError(
+            f"Parakeet model directory '{directory}' is missing {', '.join(missing)}."
+        )
+    if "/" in binary_path:
+        if not Path(binary_path).is_file():
+            raise BackendUnavailableError(f"parakeet-mlx was not found at '{binary_path}'.")
+        return binary_path, directory
+    resolved = shutil.which(binary_path)
+    if resolved is None:
+        raise BackendUnavailableError(f"parakeet-mlx '{binary_path}' was not found in PATH.")
+    return resolved, directory
+
+
+def normalize_parakeet_payload(payload: object, *, model_name: str) -> TranscriptionResult:
+    """Turn ``parakeet-mlx --output-format json`` output into a result with words.
+
+    One segment per sentence. Words are built from the sentence's tokens: a
+    token starting with a space starts a word, any other token (sub-word
+    piece, punctuation) is appended to the current word. Words keep their
+    punctuation, because the speaker-change re-cut rebuilds text from words.
+    A malformed token list drops the words of that sentence only.
+    """
+    if not isinstance(payload, dict):
+        raise RuntimeError("Parakeet transcription produced an unexpected payload.")
+    raw_sentences = payload.get("sentences")
+    segments: list[TranscriptionSegment] = []
+    if isinstance(raw_sentences, list):
+        for raw_sentence in raw_sentences:
+            if not isinstance(raw_sentence, dict):
+                continue
+            segment_text = raw_sentence.get("text")
+            start = _finite_seconds(raw_sentence.get("start"))
+            end = _finite_seconds(raw_sentence.get("end"))
+            if not isinstance(segment_text, str) or not segment_text.strip():
+                continue
+            if start is None or end is None:
+                continue
+            end = max(end, start)
+            segments.append(
+                TranscriptionSegment(
+                    id=len(segments),
+                    start=start,
+                    end=end,
+                    text=segment_text.strip(),
+                    words=parakeet_sentence_words(
+                        raw_sentence.get("tokens"), segment_start=start, segment_end=end
+                    ),
+                )
+            )
+    raw_text = payload.get("text")
+    text = raw_text.strip() if isinstance(raw_text, str) else ""
+    if not text:
+        text = " ".join(segment.text for segment in segments)
+    return TranscriptionResult(
+        text=text,
+        language=None,
+        segments=segments,
+        backend_name="parakeet",
+        model_name=model_name,
+    )
+
+
+def parakeet_sentence_words(
+    raw_tokens: object,
+    *,
+    segment_start: float,
+    segment_end: float,
+) -> tuple[TranscriptionWord, ...]:
+    if not isinstance(raw_tokens, list):
+        return ()
+    words: list[tuple[float, float, str]] = []
+    for raw_token in raw_tokens:
+        if not isinstance(raw_token, dict):
+            return ()
+        token_text = raw_token.get("text")
+        token_start = _finite_seconds(raw_token.get("start"))
+        token_end = _finite_seconds(raw_token.get("end"))
+        if not isinstance(token_text, str) or token_start is None or token_end is None:
+            return ()
+        if not token_text:
+            continue
+        # Clamped into the sentence and kept non-decreasing, as for whisper.cpp.
+        floor = words[-1][0] if words else segment_start
+        token_start = min(max(token_start, floor), segment_end)
+        token_end = min(max(token_end, token_start), segment_end)
+        if words and not token_text.startswith(" "):
+            previous_start, previous_end, previous_text = words[-1]
+            words[-1] = (previous_start, max(previous_end, token_end), previous_text + token_text)
+        else:
+            words.append((token_start, token_end, token_text.strip()))
+    return tuple(
+        TranscriptionWord(start=start, end=end, text=text) for start, end, text in words if text
+    )
+
+
+def _finite_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    seconds = float(value)
+    return seconds if math.isfinite(seconds) else None
 
 
 class WhisperKitBackend:
@@ -350,20 +586,29 @@ def _raise_if_cancelled(params: TranscribeParams) -> None:
         raise InferenceCancelled("Local inference was cancelled by the caller.")
 
 
+class ChildProcessTimeout(RuntimeError):
+    """Raised when a child process outlives its ``timeout_seconds``."""
+
+
 def run_cancellable_process(
     args: list[str],
     *,
     cancel_event: threading.Event | None,
     poll_seconds: float = 0.25,
     terminate_grace_seconds: float = 5.0,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a child process, terminating it when ``cancel_event`` is set.
 
-    Without a cancel event this behaves like ``subprocess.run(capture_output=True)``.
-    On cancellation the child gets SIGTERM, then SIGKILL after
-    ``terminate_grace_seconds``, and is always reaped with its pipes drained
-    before ``InferenceCancelled`` propagates.
+    Without a cancel event or timeout this behaves like
+    ``subprocess.run(capture_output=True)``. On cancellation the child gets
+    SIGTERM, then SIGKILL after ``terminate_grace_seconds``, and is always
+    reaped with its pipes drained before ``InferenceCancelled`` propagates. A
+    child still running after ``timeout_seconds`` is stopped the same way and
+    ``ChildProcessTimeout`` is raised.
     """
+    deadline = None if timeout_seconds is None else monotonic() + timeout_seconds
     # The context manager closes both pipes and waits on every exit path, so a
     # failure anywhere below can leave neither an open descriptor nor a zombie.
     with subprocess.Popen(
@@ -373,21 +618,27 @@ def run_cancellable_process(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=None if env is None else dict(env),
     ) as process:
         try:
             while True:
-                if cancel_event is None:
+                if cancel_event is None and deadline is None:
                     stdout, stderr = process.communicate()
                     break
                 try:
                     stdout, stderr = process.communicate(timeout=poll_seconds)
                 except subprocess.TimeoutExpired:
-                    if not cancel_event.is_set():
-                        continue
-                    _terminate_process(process, grace_seconds=terminate_grace_seconds)
-                    raise InferenceCancelled(
-                        "Local inference was cancelled while the child process was running."
-                    ) from None
+                    if cancel_event is not None and cancel_event.is_set():
+                        _terminate_process(process, grace_seconds=terminate_grace_seconds)
+                        raise InferenceCancelled(
+                            "Local inference was cancelled while the child process was running."
+                        ) from None
+                    if deadline is not None and monotonic() >= deadline:
+                        _terminate_process(process, grace_seconds=terminate_grace_seconds)
+                        raise ChildProcessTimeout(
+                            f"Child process exceeded its {timeout_seconds:g} s time limit."
+                        ) from None
+                    continue
                 break
         except BaseException:
             # The child must never outlive this call, whatever went wrong.
@@ -728,6 +979,16 @@ def build_backend_service(*, backend_name: str, model_name: str) -> BackendProto
             model_name=model_name,
             timeout_seconds=settings.VOXHELM_WHISPERKIT_TIMEOUT_SECONDS,
         )
+    if backend_name == PARAKEET_BACKEND_NAME:
+        return ParakeetBackend(
+            binary_path=settings.VOXHELM_PARAKEET_BIN,
+            model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+            model_name=model_name,
+            chunk_seconds=settings.VOXHELM_PARAKEET_CHUNK_SECONDS,
+            overlap_seconds=settings.VOXHELM_PARAKEET_OVERLAP_SECONDS,
+            max_sentence_seconds=settings.VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS,
+            timeout_seconds=settings.VOXHELM_PARAKEET_TIMEOUT_SECONDS,
+        )
     raise RuntimeError(f"Unsupported STT backend '{backend_name}'.")
 
 
@@ -761,6 +1022,8 @@ def resolve_model_name_for_backend(*, request_model: str, backend_name: str) -> 
         return settings.VOXHELM_MLX_MODEL
     if backend_name == "whisperkit":
         return settings.VOXHELM_WHISPERKIT_MODEL
+    if backend_name == PARAKEET_BACKEND_NAME:
+        return settings.VOXHELM_PARAKEET_MODEL_NAME
     raise RuntimeError(f"Unsupported STT backend '{backend_name}'.")
 
 

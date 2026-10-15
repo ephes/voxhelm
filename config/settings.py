@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 
@@ -370,6 +371,37 @@ VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "
 # which curbs hallucinated text over music/silence (e.g. outro-music loops).
 VOXHELM_WHISPERCPP_MAX_CONTEXT = int(os.getenv("VOXHELM_WHISPERCPP_MAX_CONTEXT", "0"))
 VOXHELM_WHISPERCPP_SUPPRESS_NST = env_bool("VOXHELM_WHISPERCPP_SUPPRESS_NST", default=True)
+# Parakeet (NVIDIA Parakeet TDT through the parakeet-mlx CLI, run as a child
+# process from its own Python 3.13 tool environment). The model directory is
+# deployed at a pinned commit; empty means the backend is unavailable.
+VOXHELM_PARAKEET_BIN = os.getenv("VOXHELM_PARAKEET_BIN", "parakeet-mlx").strip()
+VOXHELM_PARAKEET_MODEL_DIR = os.getenv("VOXHELM_PARAKEET_MODEL_DIR", "").strip()
+VOXHELM_PARAKEET_MODEL_NAME = os.getenv(
+    "VOXHELM_PARAKEET_MODEL_NAME", "parakeet-tdt-0.6b-v3"
+).strip()
+# 600 s chunks with 30 s overlap and local attention keep a 2:16 h episode at
+# about 11.5 GB; the CLI default (120 s) loses punctuation near chunk seams.
+VOXHELM_PARAKEET_CHUNK_SECONDS = validate_positive_int(
+    "VOXHELM_PARAKEET_CHUNK_SECONDS", int(os.getenv("VOXHELM_PARAKEET_CHUNK_SECONDS", "600"))
+)
+VOXHELM_PARAKEET_OVERLAP_SECONDS = validate_non_negative_int(
+    "VOXHELM_PARAKEET_OVERLAP_SECONDS", int(os.getenv("VOXHELM_PARAKEET_OVERLAP_SECONDS", "30"))
+)
+if VOXHELM_PARAKEET_OVERLAP_SECONDS >= VOXHELM_PARAKEET_CHUNK_SECONDS:
+    # parakeet-mlx fails on equal values and silently drops text on a larger overlap.
+    raise ValueError(
+        "VOXHELM_PARAKEET_OVERLAP_SECONDS must be smaller than VOXHELM_PARAKEET_CHUNK_SECONDS."
+    )
+# Unset (or 0) leaves run-on sentences to the speaker-change re-cut.
+_parakeet_max_sentence_seconds = float(
+    os.getenv("VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS", "").strip() or 0
+)
+if _parakeet_max_sentence_seconds < 0 or not math.isfinite(_parakeet_max_sentence_seconds):
+    raise ValueError("VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS must be a non-negative number.")
+VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS = _parakeet_max_sentence_seconds or None
+VOXHELM_PARAKEET_TIMEOUT_SECONDS = validate_positive_int(
+    "VOXHELM_PARAKEET_TIMEOUT_SECONDS", int(os.getenv("VOXHELM_PARAKEET_TIMEOUT_SECONDS", "1800"))
+)
 # Post-decode transcript sanitizer. A deterministic backstop that runs after
 # every backend transcription (before format rendering) to collapse repeated-
 # sentence loops and drop subtitle-credit / punctuation-only hallucinations the

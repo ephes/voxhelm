@@ -145,6 +145,18 @@ export VOXHELM_WHISPERCPP_PROCESSORS="4"
 # default. suppress-nst drops non-speech tokens to curb hallucinations over music/silence.
 export VOXHELM_WHISPERCPP_MAX_CONTEXT="0"
 export VOXHELM_WHISPERCPP_SUPPRESS_NST="true"
+# Parakeet TDT through the parakeet-mlx CLI (defaults shown). The CLI runs as a
+# child process from its own Python 3.13 tool environment, offline, against a
+# model directory deployed at a pinned commit (config.json + model.safetensors);
+# an empty model directory leaves the backend unavailable. Supported languages:
+# bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk.
+export VOXHELM_PARAKEET_BIN="parakeet-mlx"
+export VOXHELM_PARAKEET_MODEL_DIR=""
+export VOXHELM_PARAKEET_MODEL_NAME="parakeet-tdt-0.6b-v3"
+export VOXHELM_PARAKEET_CHUNK_SECONDS="600"
+export VOXHELM_PARAKEET_OVERLAP_SECONDS="30"
+export VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS=""  # unset: no --max-duration
+export VOXHELM_PARAKEET_TIMEOUT_SECONDS="1800"
 # Post-decode transcript sanitizer (defaults shown). Deterministic backstop that
 # collapses repeated-sentence loops and drops subtitle-credit / punctuation-only
 # hallucinations from every produced transcript. Disable only to inspect raw

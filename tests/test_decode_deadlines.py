@@ -10,7 +10,7 @@ import pytest
 from synthesis.service import SynthesisResult, export_audio
 from transcriptions.diarization import DiarizationError, load_audio_for_pyannote
 from transcriptions.known_speaker import KnownSpeakerError, decode_mono_16k
-from transcriptions.service import _normalize_audio_for_whispercpp
+from transcriptions.service import normalize_audio_to_wav_16k_mono
 
 
 @pytest.mark.parametrize(
@@ -43,7 +43,7 @@ def test_decode_deadline_kills_ffmpeg(tmp_path, settings, monkeypatch, decoder, 
     started = time.monotonic()
     with pytest.raises(error, match=message) as caught:
         if decoder == "whispercpp":
-            _normalize_audio_for_whispercpp(input_path=source, output_path=tmp_path / "output.wav")
+            normalize_audio_to_wav_16k_mono(input_path=source, output_path=tmp_path / "output.wav")
         elif decoder == "diarization":
             load_audio_for_pyannote(source)
         else:
