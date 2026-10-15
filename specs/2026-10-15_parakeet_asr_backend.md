@@ -1,7 +1,7 @@
 # Parakeet ASR backend for known-speaker jobs
 
-Status: 2026-10-15, in progress: backend, output adapter and routing
-implemented; deployment pending. Evidence:
+Status: 2026-10-15, implemented (Voxhelm 0.1.9, ops-library 2.38.0) and
+verified locally; rollout in progress (see "Local verification"). Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
 
 ## Why
@@ -81,8 +81,8 @@ parakeet-mlx --model <VOXHELM_PARAKEET_MODEL_DIR> --output-format json \
   footprint for a 2:16 h episode. Without chunking the peak was 40-51 GB
   (too much next to pyannote on `atlas`, 64 GB); with the default 120 s
   chunks punctuation is lost near chunk seams.
-- `--max-duration` caps run-on sentences for readability; default unset
-  until measured (the re-cut already splits sentences at speaker changes).
+- `--max-duration` caps run-on sentences for readability. Voxhelm leaves it
+  unset by default; the deployment sets 30 s (see "Local verification").
 - Decoding stays greedy (the default); beam search was not measured.
 
 ### Settings
@@ -250,12 +250,55 @@ and the run time per job.
 4. Re-run the pilot episodes and compare blank share and agreement with the
    whisper.cpp results from 2026-10-15; listen to two openings.
 
+## Local verification (2026-10-15)
+
+Run on `atlas` through the worker code path (`transcribe_claim_audio` with
+the claimed backend `parakeet` and a whisper.cpp fallback), parakeet-mlx
+0.5.3 (mlx 0.32.4), model commit `ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15`,
+600 s chunks, 30 s overlap, local attention, then the checkout's
+known-speaker postprocess with the pilot's references and pyannote turns
+(no speaker count), scored against the maintainer's 157 gold sentences:
+
+| ASR | right | wrong | blank |
+| --- | --- | --- | --- |
+| whisper.cpp (pilot) | 95.4 % | 2.5 % | 2.0 % |
+| Parakeet, pilot files | 96.1 % | 1.1 % | 2.9 % |
+| Parakeet, implementation | 96.4 % | 1.0 % | 2.7 % |
+| Parakeet, implementation, `--max-duration 30` | 96.4 % | 1.0 % | 2.7 % |
+
+The ep219 opening comes out as specified: "Hello, Will." and "Welcome,
+John." are separate punctuated lines left unnamed, "Yeah, thanks very much,
+guys." is Jon's. ASR takes 11-30 s per episode (25-70 min), the child's peak
+memory footprint is 10.0-12.4 GB.
+
+**Correction to the pilot record.** The Parakeet pilot files were unchunked
+(ep206 reproduces exactly only with `--chunk-duration 0`), not 600 s chunks.
+With the deployed settings the model drops punctuation for stretches inside
+some chunks: on ep219, 14 "sentences" over 30 s (up to 208 s) cover 27 % of
+the episode; ep206, guest2 and ep205 have 5 each, eric and guest1 none. It
+also happens without chunking (ep219: 4 sentences, 158 s), and no tried
+setting removes it within the memory budget: 300 s or 1200 s chunks, a 512
+local-attention context or fp32 keep it on ep219; full attention with 600 s
+chunks needs 27-41 GB. Naming is unaffected (the table above), only the
+readability of long monologues. `--max-duration 30` caps every line at about
+30 s (cut at the first token past 30 s, without sentence end) and leaves the
+gold scores unchanged, so the deployment sets it.
+
+Memory budget: two consecutive 2:17 h episodes (python-podcast pp_55 and
+pp_56, German) as known-speaker jobs in one warmed process. The process holds
+9.0 GB before the second job's ASR (cached pyannote and embedding models) and
+peaks at 13.8 GB during diarization; the Parakeet child peaks at 11.7 and
+11.5 GB (62 s and 66 s). About 20.5 GB are in use during the second ASR, at
+most 25.5 GB, within `atlas`'s 64 GB (whisper.cpp: 5.8 GB, about 525 s).
+
 ## Risks
 
 - Misheard names stay ("John Gould" for "Jon Gould"); glossary correction is
   a separate step.
 - German and other non-English quality is less well measured than English.
 - Backchannels and very short interjections may be dropped by the ASR.
+- Punctuation drops out for stretches of some episodes (see "Local
+  verification"); `--max-duration` only bounds the line length.
 - `parakeet-mlx` is a community port; its version and the model commit are
   pinned by deployment, and whisper.cpp stays the fallback.
 - A second toolchain on every host (uv tool, Hugging Face cache) to deploy

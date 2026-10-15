@@ -853,7 +853,9 @@ about 8x faster than whisper.cpp `-p 1`. Names stay wrong ("John Gould",
 seams (run-on "sentences" of 30-115 s). Without chunking (local attention)
 peak memory footprint is 40-51 GB for 1:17-2:16 h episodes; with
 `--chunk-duration 600 --overlap-duration 30 --local-attention` it is 11.5 GB
-for 2:16 h (65 s) with no sentence over 30 s. whisper.cpp needs about 5.8 GB
+for 2:16 h (65 s). (Correction, 2026-10-15: the pilot's Parakeet files were
+unchunked; chunked runs have long unpunctuated stretches on some episodes,
+see "Local verification" in `2026-10-15_parakeet_asr_backend.md`.) whisper.cpp needs about 5.8 GB
 and 525 s for the same file. German (two python-podcast episodes): both are
 usable; Parakeet has consistent punctuation but occasional meaning-changing
 word errors, whisper.cpp is a bit more literal and 58 % of its segments start
