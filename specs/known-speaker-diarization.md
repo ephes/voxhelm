@@ -20,7 +20,6 @@ contract is unchanged; known-speaker mode is opt-in through
 {
   "diarization": {
     "enabled": true,
-    "num_speakers": 4,
     "strategy": "pyannote_known_speaker",
     "known_speakers": [
       {
@@ -90,8 +89,12 @@ Rules:
   turns the re-cut off; otherwise it must be at least 0.1. The re-cut is also
   off while `mixed_window_duration` is 0.
 - `num_speakers`/`min_speakers`/`max_speakers` may still be sent; they drive the
-  anonymous pyannote run kept as a fallback/debug signal whose raw label is
-  recorded per segment.
+  anonymous pyannote run. Its labels are recorded per segment and feed turn
+  corroboration, the speaker-track guard, the re-cut at unmapped labels and
+  `raw_diarization_labels`. Clients should not pin `num_speakers` to the number
+  of participants for known-speaker jobs: pyannote can then spend a label on
+  noise and merge two people (measured 2026-10-15 on Django Chat, see
+  `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot").
 
 ## Response
 

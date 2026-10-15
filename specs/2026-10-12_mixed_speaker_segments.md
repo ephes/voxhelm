@@ -802,6 +802,83 @@ audio. The 0.1.6 run of the same post took about 562 s wall time on the same
 worker, which is a different measure, so the cost of the second pass is not
 isolated. Not yet checked by ear.
 
+#### Speaker count and ASR pilot (2026-10-15)
+
+Trigger: on episode 219 ("Hiring in 2026 - Jon Gould", 55.8 min, Will,
+Carlton and Jon, references for all three) 61 % of segments were unnamed on
+staging and the first 20 s carried wrong names. Locally with the same
+references: pyannote with `num_speakers=3` gives labels of 895 s / 1988 s /
+45 s, so it spends one label on noise and merges Carlton and Jon. Without a
+count it gives Will 889 s, Jon 1378 s, Carlton 611 s and two noise labels
+(32 s, 18 s). Carlton's "hello will" (11.68-12.40) is on Will's label in
+every run, and the speaker track has no clear frame there.
+
+Gold standard: the maintainer labelled 166 sentences (Parakeet sentence
+boundaries, about 10 min) in eight excerpts of six episodes: 219 (opening and
+middle), Eric Matthes (opening and middle), Mia Bajic, Calvin Hendryx-Parker,
+205 and 206 (openings). 157 single-speaker sentences that lie fully inside
+their excerpt are scored per word, after django-cast's guest rule:
+
+| ASR / pyannote count | right | wrong name | unnamed |
+| --- | --- | --- | --- |
+| whisper.cpp, count pinned (production until 2026-10-15) | 92.2 % | 2.5 % | 5.2 % |
+| whisper.cpp, no count | 95.4 % | 2.5 % | 2.0 % |
+| Parakeet TDT 0.6B v3, count pinned | 93.4 % | 1.1 % | 5.5 % |
+| Parakeet TDT 0.6B v3, no count | 96.1 % | 1.1 % | 2.9 % |
+
+Without a count pyannote gives the same turns on the Eric, Mia, Calvin and
+205 episodes; on 206 it adds a 31 s label nobody is tied to (unnamed segments
+14 -> 32 with whisper; the scored opening is the same in both runs). Dropping the
+count added no wrong name anywhere. django-cast stopped sending
+`num_speakers` for known-speaker jobs on 2026-10-15 (`7205f730`).
+
+Most remaining wrong names are in Calvin's opening (9.7-10.6 % of its
+words): pyannote puts his "Thanks, Will." and "jumping right in ... Let's do
+this." on Will's label, and the track hears Will for the first 232 s (the
+guest resembles that host). The track names these pieces although their own
+embeddings are near zero for everyone.
+
+Short segments: segments under `min_segment_duration` are zero-padded before
+embedding (`pad_to_min_duration`). Unpadded, eight hand-picked short pieces
+of the 219 opening all score highest for the right person ("Hello, Will."
+Carlton 0.22 / Jon 0.15 / Will 0.09); padded, that one flips to Will 0.05 and
+margins fall to about 0.03. Not changed yet.
+
+Parakeet (parakeet-mlx 0.5.3, Python 3.13 venv, model
+`mlx-community/parakeet-tdt-0.6b-v3`): punctuation and casing throughout,
+sentences that end at speaker changes, "DjangoCon"/"PyCon" where whisper.cpp
+wrote "jenga con"/"pike on", word times closer to the pyannote turns, and
+about 8x faster than whisper.cpp `-p 1`. Names stay wrong ("John Gould",
+"Foxy Talent"). With the default 120 s chunks punctuation is lost near chunk
+seams (run-on "sentences" of 30-115 s). Without chunking (local attention)
+peak memory footprint is 40-51 GB for 1:17-2:16 h episodes; with
+`--chunk-duration 600 --overlap-duration 30 --local-attention` it is 11.5 GB
+for 2:16 h (65 s) with no sentence over 30 s. whisper.cpp needs about 5.8 GB
+and 525 s for the same file. German (two python-podcast episodes): both are
+usable; Parakeet has consistent punctuation but occasional meaning-changing
+word errors, whisper.cpp is a bit more literal and 58 % of its segments start
+lowercase. Word error rates were not measured.
+
+Glossary correction (episode title, summary and show notes as glossary): a
+local Qwen3.6-27B (4-bit MLX, 93 s for the episode) proposes replacements,
+and a filter keeps only those whose original and replacement are similar
+(ratio >= 0.6) and that do not merely extend a name. On 219 that kept 26
+fixes, 24 right ("John" -> "Jon", "Foxy Talent" -> "Foxley Talent", "Gilbert
+Rile" -> "Gilbert Ryle"); the two wrong ones came from a missing glossary
+entry. Qwen2.5-0.5B and Gemma 4 E2B were unusable.
+
+Four speakers, checked without gold labels (Parakeet, host references only):
+on "Django Fellows - Natalia Bidart & Sarah Boyce" and "PyCon US 2026 -
+Elaine Wong & Jon Banafato" pyannote gives the same four labels with
+`num_speakers=4` and without a count. Both hosts' labels are tied to them and
+named almost entirely (Fellows: 1255 of 1278 s; PyCon: 1041 of 1068 s); the
+two guests' labels carry a host name for 0 s and 7 s and are otherwise
+unnamed, because neither guest has a reference here and django-cast's guest
+rule needs exactly one untied label.
+
+Limits: one listener; the sentence boundaries come from Parakeet; ten
+minutes are a sample.
+
 ## Order and verification
 
 1. Done, see "Findings": full-episode diarization of episode 206 with
