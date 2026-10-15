@@ -1,7 +1,9 @@
 # Parakeet ASR backend for known-speaker jobs
 
 Status: 2026-10-15, implemented (Voxhelm 0.1.9, ops-library 2.38.0) and
-verified locally; rollout in progress (see "Local verification"). Evidence:
+verified locally (see "Local verification"); deployed and switched on the
+same day (verification steps 2 and 3's switch done, staging re-runs
+pending). Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
 
 ## Why
@@ -249,6 +251,12 @@ and the run time per job.
    punctuated lines, none of them under a wrong name.
 4. Re-run the pilot episodes and compare blank share and agreement with the
    whisper.cpp results from 2026-10-15; listen to two openings.
+
+Steps 2 and the switch in step 3 are done (2026-10-15): both workers run
+0.1.9 with `parakeet-mlx` 0.5.3 and the pinned model and advertise
+`["mlx","parakeet","whispercpp"]`; ops-control `8df1b9d` sets
+`VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet` on the control plane. The
+episode 219 and pilot re-runs on staging wait for the maintainer.
 
 ## Local verification (2026-10-15)
 
