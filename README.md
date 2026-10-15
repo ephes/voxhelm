@@ -79,6 +79,18 @@ the speaker sidecar carry the re-cut segments. `resegment_hop: 0` in
 `diarization.known_speaker` turns this off. See
 `specs/known-speaker-diarization.md`.
 
+With `VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet`, those jobs (when their model
+is `auto`, `whisper-1` or `gpt-4o-mini-transcribe`) are transcribed by Parakeet
+TDT instead: sentence-shaped, punctuated segments with word timings that end at
+speaker changes, and several times faster than whisper.cpp with one processor.
+When Parakeet is unavailable (CLI or model missing, or the job names a language
+Parakeet does not support) the job falls back to whisper.cpp, which also
+returns word timings, and only then to the configured
+`VOXHELM_STT_BACKEND`/`VOXHELM_STT_FALLBACK_BACKEND` chain, without the re-cut.
+A Parakeet run that fails for any other reason fails the job. Other jobs, and
+jobs naming a concrete model, are never rerouted. See
+`specs/2026-10-15_parakeet_asr_backend.md`.
+
 ## WebVTT Output
 
 The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)
@@ -157,6 +169,9 @@ export VOXHELM_PARAKEET_CHUNK_SECONDS="600"
 export VOXHELM_PARAKEET_OVERLAP_SECONDS="30"
 export VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS=""  # unset: no --max-duration
 export VOXHELM_PARAKEET_TIMEOUT_SECONDS="1800"
+# "parakeet" routes known-speaker jobs with the re-cut to Parakeet first (see
+# the known-speaker section); empty keeps them on the configured chain.
+export VOXHELM_KNOWN_SPEAKER_STT_BACKEND=""
 # Post-decode transcript sanitizer (defaults shown). Deterministic backstop that
 # collapses repeated-sentence loops and drops subtitle-credit / punctuation-only
 # hallucinations from every produced transcript. Disable only to inspect raw
@@ -624,6 +639,19 @@ backend names, and concrete STT model names when claiming work. `auto`,
 `whisper-1`, and `gpt-4o-mini-transcribe` match the configured default backend
 and model; claim responses send that resolved concrete backend/model while
 preserving the submitted aliases as `requested_backend`/`requested_model`.
+Known-speaker jobs routed to Parakeet (`VOXHELM_KNOWN_SPEAKER_STT_BACKEND` on the
+control plane) are the exception: the target is chosen per claiming worker as
+the first of Parakeet, whisper.cpp and the configured chain that the worker
+advertises, so such a job never waits for a Parakeet worker, and the claim adds
+`fallbacks` (`[{"backend": ..., "model": ...}]`, the remaining advertised
+entries in order) that the worker tries when the claimed backend turns out to
+be unavailable. Workers advertise `parakeet` only while `VOXHELM_PARAKEET_BIN`
+resolves and `VOXHELM_PARAKEET_MODEL_DIR` holds `config.json` and
+`model.safetensors`, re-checked on every heartbeat, and log the CLI version at
+startup; they also advertise `whispercpp` whenever its binary and model are
+present, even outside their configured chain, so the fallback keeps word
+timings. Routed jobs with a language Parakeet does not support skip it. Remote STT runs are admitted through the non-interactive lane of the
+lane scheduler, like local ones.
 Heartbeat storage contract: `hostname` is optional and trimmed, with at most
 255 Unicode characters. `concurrency` is an integer from 1 through 2147483647
 (booleans are rejected); omitted or null values default to 1. `capabilities` is

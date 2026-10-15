@@ -59,7 +59,9 @@ class TranscribeParams:
     language: str | None
     scheduler_lane: str = LANE_NON_INTERACTIVE
     # Ask the backend for per-word timings on each segment. Backends that cannot
-    # provide them return segments without words.
+    # provide them return segments without words. Only known-speaker jobs with
+    # the re-cut set it, so it also selects their backend chain (see
+    # ``known_speaker_backend_chain``).
     word_timestamps: bool = False
     # Cooperative cancellation: set by the caller (the sync HTTP view on client
     # disconnect). Excluded from equality/repr so parameter comparisons and log
@@ -337,8 +339,7 @@ class ParakeetBackend:
         self.timeout_seconds = timeout_seconds
 
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
-        language = normalize_language_code(params.language)
-        if language and language not in PARAKEET_LANGUAGES:
+        if not parakeet_supports_language(params.language):
             raise BackendUnavailableError(
                 f"Parakeet does not support language '{params.language}'."
             )
@@ -944,6 +945,55 @@ def get_backend_services_for_model(request_model: str) -> list[BackendInvocation
     return services
 
 
+def known_speaker_backend_chain(
+    request_model: str, *, language: str | None = None
+) -> list[str] | None:
+    """Ordered backends for a known-speaker job with the re-cut, or ``None``.
+
+    Only automatic model requests are routed, and only when
+    ``VOXHELM_KNOWN_SPEAKER_STT_BACKEND`` names Parakeet. whisper.cpp comes
+    next because it is the only other backend that returns word timings;
+    after it the configured chain follows, without words and so without the
+    re-cut, exactly as such a job behaves without routing. A language Parakeet
+    does not support leaves it out of the chain.
+    """
+    if settings.VOXHELM_KNOWN_SPEAKER_STT_BACKEND != PARAKEET_BACKEND_NAME:
+        return None
+    if not is_auto_backend_model_request(request_model):
+        return None
+    chain: list[str] = []
+    for name in (
+        PARAKEET_BACKEND_NAME if parakeet_supports_language(language) else "",
+        "whispercpp",
+        settings.VOXHELM_STT_BACKEND,
+        settings.VOXHELM_STT_FALLBACK_BACKEND.strip(),
+    ):
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+def parakeet_supports_language(language: str | None) -> bool:
+    """A job without a language is passed through; Parakeet detects it."""
+    normalized = normalize_language_code(language)
+    return not normalized or normalized in PARAKEET_LANGUAGES
+
+
+def get_backend_services_for_params(params: TranscribeParams) -> list[BackendInvocation]:
+    # Word timings are asked for exactly by known-speaker jobs with the re-cut.
+    chain = (
+        known_speaker_backend_chain(params.request_model, language=params.language)
+        if params.word_timestamps
+        else None
+    )
+    if chain is None:
+        return get_backend_services_for_model(params.request_model)
+    return [
+        BackendInvocation(name, service_for_backend_name(name, request_model=params.request_model))
+        for name in chain
+    ]
+
+
 def service_for_backend_name(backend_name: str, *, request_model: str) -> BackendProtocol:
     if backend_name == settings.VOXHELM_STT_BACKEND and is_auto_backend_model_request(
         request_model
@@ -1066,7 +1116,7 @@ def transcribe_audio(audio_path: Path, params: TranscribeParams) -> Transcriptio
     with admit_local_inference(params.scheduler_lane, cancel_event=params.cancel_event):
         _raise_if_cancelled(params)
         unavailable_errors: list[str] = []
-        for invocation in get_backend_services_for_model(params.request_model):
+        for invocation in get_backend_services_for_params(params):
             _raise_if_cancelled(params)
             try:
                 result = invocation.service.transcribe(audio_path, params)

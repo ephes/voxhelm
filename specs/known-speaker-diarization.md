@@ -285,10 +285,13 @@ start with one speaker and end with another. Naming or blanking such a segment
 is wrong either way. When word timings are available, Voxhelm therefore
 re-cuts the segments before classifying them:
 
-- Word timings come from whisper.cpp. Known-speaker jobs with the re-cut on
-  run whisper.cpp with full JSON output on one processor (token offsets are
-  chunk-relative with several). Other backends return no word timings; their
-  segments are left as they are and no track is built.
+- Word timings come from whisper.cpp or, with
+  `VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet`, from Parakeet (falling back
+  to whisper.cpp; see `2026-10-15_parakeet_asr_backend.md`). Known-speaker
+  jobs with the re-cut on run whisper.cpp with full JSON output on one
+  processor (token offsets are chunk-relative with several). Other backends
+  return no word timings; their segments are left as they are and no track
+  is built.
 - The speaker track classifies a window of `mixed_window_duration` seconds
   every `resegment_hop` seconds over the whole file against the centroids. A
   frame is clear when it reaches `mixed_window_margin` and

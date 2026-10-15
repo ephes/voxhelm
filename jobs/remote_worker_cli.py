@@ -10,6 +10,7 @@ import os
 import platform
 import shlex
 import ssl
+import subprocess
 import sys
 import threading
 from collections.abc import Sequence
@@ -31,6 +32,7 @@ from jobs.media import (
     is_video_path,
     reserve_temp_media_path,
 )
+from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions import formats as transcript_formats
 from transcriptions.diarization import (
     DiarizationError,
@@ -55,10 +57,15 @@ from transcriptions.known_speaker import (
 )
 from transcriptions.sanitizer import sanitize_result
 from transcriptions.service import (
+    PARAKEET_BACKEND_NAME,
+    BackendUnavailableError,
     TranscribeParams,
     TranscriptionResult,
     build_backend_service,
     resolve_model_name_for_backend,
+    resolve_parakeet_runtime,
+    resolve_whispercpp_binary,
+    resolve_whispercpp_model_path,
 )
 
 LOGGER = logging.getLogger("voxhelm.remote_worker")
@@ -529,18 +536,40 @@ def materialize_staged_upload(raw_input: dict[str, Any]) -> DownloadedMedia:
 
 
 def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> TranscriptionResult:
-    backend_name = require_string(claim.get("backend"), "claim.backend")
-    model_name = require_string(claim.get("model"), "claim.model")
-    service = build_backend_service(backend_name=backend_name, model_name=model_name)
-    result = service.transcribe(
-        audio_path,
-        TranscribeParams(
-            request_model=model_name,
-            prompt=None,
-            language=optional_string(claim.get("language")),
-            word_timestamps=claim_wants_word_timestamps(claim),
+    targets = [
+        (
+            require_string(claim.get("backend"), "claim.backend"),
+            require_string(claim.get("model"), "claim.model"),
         ),
-    )
+        *claim_fallback_targets(claim),
+    ]
+    language = optional_string(claim.get("language"))
+    word_timestamps = claim_wants_word_timestamps(claim)
+    unavailable_errors: list[str] = []
+    result: TranscriptionResult | None = None
+    # The STT child shares the GPU with other inference on this host, so it is
+    # admitted like the local path and the embedding step.
+    with admit_local_inference(LANE_NON_INTERACTIVE):
+        for backend_name, model_name in targets:
+            service = build_backend_service(backend_name=backend_name, model_name=model_name)
+            try:
+                result = service.transcribe(
+                    audio_path,
+                    TranscribeParams(
+                        request_model=model_name,
+                        prompt=None,
+                        language=language,
+                        word_timestamps=word_timestamps,
+                    ),
+                )
+            except BackendUnavailableError as exc:
+                LOGGER.warning("stt backend unavailable backend=%s detail=%s", backend_name, exc)
+                unavailable_errors.append(f"{backend_name}: {exc}")
+                continue
+            break
+    if result is None:
+        joined = "; ".join(unavailable_errors)
+        raise WorkerError(f"No claimed STT backend is available on this worker. {joined}")
     # Mirror the local transcribe_audio path: sanitize before diarization and
     # artifact rendering so remote_pull workers emit the same clean transcripts.
     return sanitize_result(
@@ -548,6 +577,26 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
         enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
         repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
     )
+
+
+def claim_fallback_targets(claim: dict[str, Any]) -> list[tuple[str, str]]:
+    """The claim's ``fallbacks``: backends to try, in order, if the claimed one is unavailable."""
+    raw_fallbacks = claim.get("fallbacks")
+    if raw_fallbacks is None:
+        return []
+    if not isinstance(raw_fallbacks, list):
+        raise WorkerError("claim.fallbacks must be a list.")
+    targets: list[tuple[str, str]] = []
+    for entry in raw_fallbacks:
+        if not isinstance(entry, dict):
+            raise WorkerError("claim.fallbacks entries must be objects.")
+        targets.append(
+            (
+                require_string(entry.get("backend"), "claim.fallbacks.backend"),
+                require_string(entry.get("model"), "claim.fallbacks.model"),
+            )
+        )
+    return targets
 
 
 def claim_wants_word_timestamps(claim: dict[str, Any]) -> bool:
@@ -803,6 +852,10 @@ def build_capabilities() -> dict[str, Any]:
         backends.add(fallback_backend)
     if settings.VOXHELM_WHISPERKIT_ENABLED:
         backends.add("whisperkit")
+    if whispercpp_runtime_available():
+        # Known-speaker jobs routed to Parakeet fall back to whisper.cpp, the
+        # other backend with word timings, even where it is not in the chain.
+        backends.add("whispercpp")
 
     models = set()
     for backend in sorted(backends):
@@ -827,17 +880,87 @@ def build_capabilities() -> dict[str, Any]:
         output_formats.append("speakers")
         embedding_models.append(KnownSpeakerConfig().embedding_model)
 
-    return {
-        "job_types": ["transcribe"],
-        "backends": sorted(backends),
-        "models": sorted(models),
-        "output_formats": output_formats,
-        "diarization": {
-            "anonymous": diarization_available,
-            "known_speaker": diarization_available,
-            "embedding_models": embedding_models,
-        },
-    }
+    return with_current_stt_runtimes(
+        {
+            "job_types": ["transcribe"],
+            "backends": sorted(backends),
+            "models": sorted(models),
+            "output_formats": output_formats,
+            "diarization": {
+                "anonymous": diarization_available,
+                "known_speaker": diarization_available,
+                "embedding_models": embedding_models,
+            },
+        }
+    )
+
+
+def with_current_stt_runtimes(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """Re-check runtimes that can disappear while the worker runs.
+
+    Called on every heartbeat: a worker advertises Parakeet only while its CLI
+    resolves and its model directory is complete, so a worker whose model went
+    away gets whisper.cpp claims from the next poll on.
+    """
+    backends = {str(name) for name in capabilities.get("backends", [])}
+    models = {str(name) for name in capabilities.get("models", [])}
+    backends.discard(PARAKEET_BACKEND_NAME)
+    models.discard(settings.VOXHELM_PARAKEET_MODEL_NAME)
+    if parakeet_runtime_available():
+        backends.add(PARAKEET_BACKEND_NAME)
+        models.add(settings.VOXHELM_PARAKEET_MODEL_NAME)
+    return {**capabilities, "backends": sorted(backends), "models": sorted(models)}
+
+
+def whispercpp_runtime_available() -> bool:
+    try:
+        resolve_whispercpp_binary(settings.VOXHELM_WHISPERCPP_BIN)
+        resolve_whispercpp_model_path(settings.VOXHELM_WHISPERCPP_MODEL)
+    except BackendUnavailableError:
+        return False
+    return True
+
+
+_parakeet_last_available: bool | None = None
+
+
+def parakeet_runtime_available() -> bool:
+    global _parakeet_last_available
+    try:
+        resolve_parakeet_runtime(
+            binary_path=settings.VOXHELM_PARAKEET_BIN,
+            model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+        )
+    except BackendUnavailableError as exc:
+        available, detail = False, str(exc)
+    else:
+        available, detail = True, ""
+    if available != _parakeet_last_available and (
+        settings.VOXHELM_PARAKEET_MODEL_DIR or _parakeet_last_available
+    ):
+        LOGGER.info("parakeet capability available=%s %s", available, detail)
+    _parakeet_last_available = available
+    return available
+
+
+def log_parakeet_version() -> None:
+    try:
+        executable, _model_dir = resolve_parakeet_runtime(
+            binary_path=settings.VOXHELM_PARAKEET_BIN,
+            model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+        )
+        completed = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=60,
+        )
+    except BackendUnavailableError, OSError, subprocess.TimeoutExpired:
+        return
+    LOGGER.info("parakeet cli version=%s", completed.stdout.strip() or "unknown")
 
 
 def diarization_runtime_available() -> bool:
@@ -1079,11 +1202,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     setup_django_for_worker()
     config = parse_worker_config(args)
     log_startup(config)
+    log_parakeet_version()
     capabilities = build_capabilities()
     client = WorkerClient(config=config)
 
     while True:
         try:
+            capabilities = with_current_stt_runtimes(capabilities)
             claimed = run_worker_once(config=config, client=client, capabilities=capabilities)
         except KeyboardInterrupt:
             return 130

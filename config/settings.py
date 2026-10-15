@@ -399,6 +399,12 @@ _parakeet_max_sentence_seconds = float(
 if _parakeet_max_sentence_seconds < 0 or not math.isfinite(_parakeet_max_sentence_seconds):
     raise ValueError("VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS must be a non-negative number.")
 VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS = _parakeet_max_sentence_seconds or None
+# "parakeet" routes known-speaker jobs with the speaker-change re-cut (and an
+# automatic model) to Parakeet, then whisper.cpp, then the configured chain.
+# Empty keeps them on the configured chain.
+VOXHELM_KNOWN_SPEAKER_STT_BACKEND = os.getenv("VOXHELM_KNOWN_SPEAKER_STT_BACKEND", "").strip()
+if VOXHELM_KNOWN_SPEAKER_STT_BACKEND not in {"", "parakeet"}:
+    raise ValueError("VOXHELM_KNOWN_SPEAKER_STT_BACKEND must be empty or 'parakeet'.")
 VOXHELM_PARAKEET_TIMEOUT_SECONDS = validate_positive_int(
     "VOXHELM_PARAKEET_TIMEOUT_SECONDS", int(os.getenv("VOXHELM_PARAKEET_TIMEOUT_SECONDS", "1800"))
 )

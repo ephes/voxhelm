@@ -1,7 +1,7 @@
 # Parakeet ASR backend for known-speaker jobs
 
-Status: 2026-10-15, in progress: backend and output adapter implemented;
-routing and deployment pending. Evidence:
+Status: 2026-10-15, in progress: backend, output adapter and routing
+implemented; deployment pending. Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
 
 ## Why

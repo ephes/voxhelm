@@ -6,7 +6,7 @@ import json
 import math
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any
@@ -31,6 +31,7 @@ from jobs.retention import (
 from jobs.services import (
     DEFAULT_TRANSCRIPTION_OUTPUT_FORMATS,
     isoformat_or_none,
+    job_wants_word_timestamps,
     reconcile_remote_job_state,
     serialize_job,
     transcription_diarization_enabled,
@@ -46,6 +47,7 @@ from transcriptions.known_speaker import (
     KnownSpeakerConfig,
 )
 from transcriptions.service import (
+    known_speaker_backend_chain,
     resolve_backend_name_for_model,
     resolve_model_name_for_backend,
 )
@@ -132,6 +134,9 @@ WORKER_HEARTBEAT_JSON_MAX_DEPTH = 100
 class RemoteClaim:
     job: Job
     lease_token: str
+    # The claiming worker's advertised capabilities; the STT target is chosen
+    # per worker from them.
+    capabilities: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -323,7 +328,7 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
                 )
                 if updated == 1:
                     job = Job.objects.get(id=candidate.id)
-                    return RemoteClaim(job=job, lease_token=lease_token)
+                    return RemoteClaim(job=job, lease_token=lease_token, capabilities=capabilities)
     return None
 
 
@@ -562,8 +567,13 @@ def sanitize_remote_failure_detail(*, retryable: bool) -> str:
 
 def serialize_claim(claim: RemoteClaim) -> dict[str, Any]:
     job = claim.job
-    target = resolve_remote_stt_target(job)
-    return {
+    targets = remote_stt_targets_for_worker(job, claim.capabilities)
+    if not targets:
+        # Only reachable when the claim and its serialization disagree on the
+        # capabilities; keep the per-job target the claim filter used before.
+        targets = [resolve_remote_stt_target(job)]
+    target, fallbacks = targets[0], targets[1:]
+    payload: dict[str, Any] = {
         "job": {
             "id": str(job.id),
             "job_type": job.job_type,
@@ -586,6 +596,13 @@ def serialize_claim(claim: RemoteClaim) -> dict[str, Any]:
             "artifact_store": job.leased_artifact_store,
         }
     }
+    if fallbacks:
+        # Tried in order by the worker when the claimed backend turns out to be
+        # unavailable there; older workers ignore the field.
+        payload["job"]["fallbacks"] = [
+            {"backend": fallback.backend, "model": fallback.model} for fallback in fallbacks
+        ]
+    return payload
 
 
 def serialize_claim_input(job: Job) -> dict[str, Any]:
@@ -821,16 +838,47 @@ def worker_can_run_job(job: Job, capabilities: dict[str, Any]) -> bool:
 
 
 def worker_supports_requested_stt(job: Job, capabilities: dict[str, Any]) -> bool:
+    return bool(remote_stt_targets_for_worker(job, capabilities))
+
+
+def remote_stt_targets_for_worker(
+    job: Job, capabilities: dict[str, Any]
+) -> list[ResolvedSttTarget]:
+    """The job's STT targets this worker advertises, in order of preference."""
     advertised_backends = string_set(capabilities.get("backends"))
     advertised_models = string_set(capabilities.get("models"))
     if not advertised_backends or not advertised_models:
-        return False
-
+        return []
     try:
-        target = resolve_remote_stt_target(job)
+        targets = remote_stt_targets(job)
     except RuntimeError:
-        return False
-    return target.backend in advertised_backends and target.model in advertised_models
+        return []
+    return [
+        target
+        for target in targets
+        if target.backend in advertised_backends and target.model in advertised_models
+    ]
+
+
+def remote_stt_targets(job: Job) -> list[ResolvedSttTarget]:
+    """Ordered STT targets for a job: the known-speaker chain, or the one target."""
+    requested_model = job.model or "auto"
+    chain = (
+        known_speaker_backend_chain(requested_model, language=job.language or None)
+        if (job.backend or "auto") == "auto" and job_wants_word_timestamps(job)
+        else None
+    )
+    if chain is None:
+        return [resolve_remote_stt_target(job)]
+    return [
+        ResolvedSttTarget(
+            backend=backend_name,
+            model=resolve_model_name_for_backend(
+                request_model=requested_model, backend_name=backend_name
+            ),
+        )
+        for backend_name in chain
+    ]
 
 
 def resolve_remote_stt_target(job: Job) -> ResolvedSttTarget:
