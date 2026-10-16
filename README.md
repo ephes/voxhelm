@@ -172,7 +172,8 @@ export VOXHELM_PARAKEET_TIMEOUT_SECONDS="1800"
 # Window transcription for the ad-analysis drift check (D-27): whisper
 # large-v3-turbo through VOXHELM_WHISPERCPP_BIN. A file name in
 # VOXHELM_MODEL_CACHE_DIR or a path; the file must have the pinned SHA-256
-# (transcriptions/windows.py), any other file leaves window transcription unavailable.
+# (transcriptions/windows.py), any other file leaves window transcription, and so
+# the ad-analysis-v1 profile, unavailable.
 export VOXHELM_WINDOW_MODEL="ggml-large-v3-turbo.bin"
 export VOXHELM_WINDOW_TIMEOUT_SECONDS="120"
 # "parakeet" routes known-speaker jobs with the re-cut to Parakeet first (see
@@ -474,7 +475,16 @@ engine, and is versioned: any change to its settings is a new profile name.
 `VOXHELM_PARAKEET_OVERLAP_SECONDS` and `VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS`
 say (it uses `VOXHELM_PARAKEET_BIN`, `VOXHELM_PARAKEET_MODEL_DIR`,
 `VOXHELM_PARAKEET_MODEL_NAME` and `VOXHELM_PARAKEET_TIMEOUT_SECONDS`). The
-transcript is not sanitized.
+transcript is not sanitized. For a German job (`language_hint` `de`) the
+profile then runs the German drift check (D-28): it counts English and German
+function words in every 30 s grid window `[30k, 30k + 30)` of the Parakeet
+word starts, flags a window with at least 4 English ones that are at least
+10 % of both, re-transcribes each flagged window with whisper large-v3-turbo
+(window transcription, below), and keeps the retry only when whisper detects
+German with p >= 0.9; then every Parakeet word starting in the window is
+replaced by the retry's words. The profile needs both runtimes on every host
+(Parakeet and `whisper-cli` with the pinned turbo model), whatever the job's
+language.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/jobs \
@@ -496,20 +506,35 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
   `language`, no `model` other than `auto`, and no diarization.
 - Besides the requested transcript formats the job always writes
   `words.json` (`result.artifacts.words`):
-  `{"schema_version": 1, "profile": ..., "identity": {...}, "words": [{"w", "s", "e", "c"}, ...]}`
+  `{"schema_version": 1, "profile": ..., "identity": {...}, "words": [{"w", "s", "e", "c"}, ...], "drift": {...}}`
   with one entry per word (a token starting with a space starts a word; other
   tokens join it), start and end in seconds and `c` the mean token confidence,
-  all rounded to 3 decimals.
+  all rounded to 3 decimals. Words of an accepted turbo retry have `c: null`.
+  The words carry the drift check's splice; the transcript formats stay
+  Parakeet's sentences.
+- `words.json` also holds the drift check's records, `"drift"`:
+  `{"rule": "fw-en4-share10-v1", "checked": true, "language": "de", "reason": null,
+  "summary": {"windows", "flagged", "accepted", "rejected", "retry_seconds"},
+  "windows": [{"t", "en", "de", "flagged", "words_before", "words_after"}, ...]}`,
+  where a flagged window adds `language`, `p`, `accepted`, `retry_words` and
+  `retry_seconds`. For other languages `checked` is `false`, `reason` says why
+  and `windows` is empty. They are part of the words artifact, so `DELETE` and
+  the backstop remove them with it.
 - `result.metadata.profile` and the artifact's `identity` record the engine:
   profile name, model name, the model's repo, commit and weights checksum (from
   the deployment's `VOXHELM_MODEL_REVISION` marker in the model directory, or a
   Hugging Face snapshot directory name), the `parakeet-mlx` and `mlx` versions
-  of the CLI's environment, the profile settings and the language hint.
-- No fallback: a local job without the CLI or model fails; in `remote_pull`
+  of the CLI's environment, the profile settings, the drift check (`drift`:
+  rule, thresholds, function-word list hash, acceptance, and `retry` with the
+  whisper.cpp version, the turbo model name, its SHA-256 and the decoding
+  settings) and the language hint.
+- No fallback and no silent skip: a local job without the Parakeet CLI or
+  model, or without `whisper-cli` or the pinned turbo model, fails before
+  Parakeet runs, and a window retry that fails fails the job; in `remote_pull`
   mode a profile job is only claimed by a worker that advertises the profile
   (`capabilities.profiles`), so it waits until one does. A worker that loses
-  the model after claiming fails the attempt as retryable and the job goes back
-  to the queue.
+  either model after claiming fails the attempt as retryable and the job goes
+  back to the queue.
 - `DELETE /v1/jobs/{id}` (producer token): removes a finished profile job's
   artifacts, their stored objects, queued object deletions, every object its
   remote attempts stored below their artifact prefix (also those no completion
@@ -532,8 +557,8 @@ See `specs/2026-10-16_ad_analysis_profile.md`.
 
 `transcriptions.windows.transcribe_window(audio_path, t)` re-transcribes the
 30 s window `[t, t + 30)` of a local source file with whisper large-v3-turbo,
-for the profile's German drift check (slice 3 of the podcast spec; not called
-by a profile yet, and not an HTTP route, D-27). It decodes the clip
+for the profile's German drift check (not an HTTP route, D-27; called by
+`ad-analysis-v1`, D-28). It decodes the clip
 `[max(0, t - 1), +32 s)` with ffmpeg to 16 kHz mono, runs `whisper-cli` with
 the language detected on the clip (`-l auto`, greedy best-of 2, temperature 0
 with 0.2 increments, 4 threads) and returns the words starting in the window
@@ -544,7 +569,9 @@ the pinned `1fc70f77...bc69` is refused (`BackendUnavailableError`), and no
 other model is ever used. The clip lives in a temporary directory of the call;
 nothing is stored. `evals/window_retry_compare.py` compares it with the
 research retries (identical on 40 windows, see
-`specs/2026-10-16_window_transcription.md`).
+`specs/2026-10-16_window_transcription.md`); `evals/drift_check_g2.py` runs
+gate G2 of the whole drift check on the 22 German research episodes
+(`specs/2026-10-16_drift_check.md`).
 
 ## Batch Speaker Diarization
 
@@ -756,11 +783,14 @@ present, even outside their configured chain, so the fallback keeps word
 timings. Routed jobs with a language Parakeet does not support skip it. Remote STT runs are admitted through the non-interactive lane of the
 lane scheduler, like local ones.
 Workers advertise transcription profiles (`"profiles": ["ad-analysis-v1"]`) by
-the same per-heartbeat Parakeet check; a profile job is claimed only by a worker
+the same per-heartbeat Parakeet check, and only while `whisper-cli` and the
+pinned turbo model (`VOXHELM_WINDOW_MODEL`) also resolve; a profile job is claimed only by a worker
 that lists its profile, its claim carries `profile` and no `fallbacks`, and the
 completion must include `words.json` (kind `words`, exposed, `application/json`)
 and `result_metadata.profile` with the engine identity, which the control plane
-reduces to the known fields.
+reduces to the known fields; its `drift` part must equal the control plane's
+own drift rule and pinned turbo model (only the worker's whisper.cpp version
+is taken from it), otherwise the completion is refused.
 Heartbeat storage contract: `hostname` is optional and trimmed, with at most
 255 Unicode characters. `concurrency` is an integer from 1 through 2147483647
 (booleans are rejected); omitted or null values default to 1. `capabilities` is

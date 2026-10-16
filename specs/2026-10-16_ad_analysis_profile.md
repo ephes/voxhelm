@@ -28,11 +28,15 @@ on remote workers; the `words` artifact; recorded engine identity;
 `prune_job_artifacts`.
 
 Out of scope (later slices of the podcast spec): the whisper turbo window
-endpoint and the German drift check (they will add per-window records to the
-words artifact and the retry model hash to the identity, as a new profile
-version if the words change), scheduling `prune_job_artifacts` (slice 16).
-The window transcription (slice 2) is now in
-`2026-10-16_window_transcription.md` (D-27); slice 3 calls it from the profile.
+endpoint and the German drift check, scheduling `prune_job_artifacts` (slice
+16). The window transcription (slice 2) is now in
+`2026-10-16_window_transcription.md` (D-27). Amended 2026-10-16 by slice 3
+(`2026-10-16_drift_check.md`, D-28): the drift check runs inside this profile,
+adds per-window records to the words artifact (`drift`) and the drift rule and
+retry model hash to the identity, and the profile needs the turbo window
+runtime as well. Because nothing of this profile had been deployed or served,
+`ad-analysis-v1` was amended in place instead of becoming a new name (D-28);
+from its first deploy on any change is a new name.
 
 ## Design
 
@@ -98,8 +102,13 @@ attempt as retryable, and the job returns to the queue (bounded by
 
 ```json
 {"schema_version": 1, "profile": "ad-analysis-v1", "identity": {...},
- "words": [{"w": "Hi,", "s": 5.84, "e": 6.24, "c": 0.973}, ...]}
+ "words": [{"w": "Hi,", "s": 5.84, "e": 6.24, "c": 0.973}, ...],
+ "drift": {...}}
 ```
+
+The `words` are Parakeet's with the drift check's accepted retries spliced in
+(retry words have `c: null`); `drift` holds its per-window records
+(`2026-10-16_drift_check.md`).
 
 Words are built from all tokens of the CLI output in order, across sentence
 boundaries, with the research runner's rule: a token whose text starts with
@@ -123,10 +132,12 @@ must not.
 | `model` | `VOXHELM_PARAKEET_MODEL_NAME` |
 | `model_repo`, `model_revision`, `model_sha256` | the `VOXHELM_MODEL_REVISION` marker the ops-library role writes into the model directory; for a Hugging Face snapshot directory the commit is its name; empty when unknown |
 | `cli`, `cli_version`, `mlx_version` | the CLI script's own interpreter (`importlib.metadata` of `parakeet-mlx` and `mlx`), `--version` as fallback; cached per CLI file and mtime |
+| `drift` | the drift rule (`fw-en4-share10-v1`, thresholds, function-word list hash, acceptance) and `retry`: whisper.cpp version, turbo model name and SHA-256, decoding settings (D-28) |
 | `language_hint` | the job's hint |
 
 The control plane keeps only these fields from a remote worker and sets
-`language_hint` from the job.
+`language_hint` from the job; the worker's `drift` must equal the control
+plane's own (only its whisper.cpp version is kept from it).
 
 ### Retention
 

@@ -1010,7 +1010,9 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
 def run_profile_for_job(*, job: Job, audio_path: Path) -> ProfileTranscription:
     """Run the job's profile under lane admission; never another engine.
 
-    A missing CLI or model raises ``BackendUnavailableError`` and fails the job.
+    The drift check runs inside the same admission. A missing Parakeet CLI or model, or
+    a missing ``whisper-cli`` or turbo model, raises ``BackendUnavailableError`` and fails
+    the job.
     """
     profile = get_transcription_profile(job.profile)
     with admit_local_inference(LANE_NON_INTERACTIVE):

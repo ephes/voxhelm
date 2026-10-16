@@ -645,7 +645,7 @@ capacity preservation takes precedence over automatic age-based recovery.
 - The profile writes a `words` artifact (`words.json`) with per-word times and mean token confidence built from all tokens exactly as the research runner did, and records engine identity (model commit and checksum from the deployment marker, `parakeet-mlx` and `mlx` versions, settings, language hint) in the job result and the artifact.
 - Retention: producer-scoped `DELETE /v1/jobs/{id}` for finished profile jobs and a profile-owned 7-day backstop in `prune_job_artifacts` (D-09 note of 2026-10-16).
 
-**Not decided here:** the drift check and turbo window endpoint (slices 2-3 of the podcast spec, which will extend the profile's identity and artifact), scheduling `prune_job_artifacts` (slice 16), profiles for other producers. (The window endpoint: D-27.)
+**Not decided here:** the drift check and turbo window endpoint (slices 2-3 of the podcast spec, which will extend the profile's identity and artifact), scheduling `prune_job_artifacts` (slice 16), profiles for other producers. (The window endpoint: D-27; the drift check, amending this profile before its first deploy: D-28.)
 
 **Blocks implementation:** No.
 
@@ -672,7 +672,38 @@ capacity preservation takes precedence over automatic age-based recovery.
 - No residue: temporary directory per call, no ORM access, error messages without transcript text. Verified identical to the research output on 40 dev windows (3,342 words).
 - A producer route can later wrap the same function if a producer needs windows; that is a new decision.
 
-**Not decided here:** which windows are retried, the p >= 0.9 acceptance, the splice and per-window records (slice 3), the profile version that adds the retry model hash, worker capability for the turbo model.
+**Not decided here:** which windows are retried, the p >= 0.9 acceptance, the splice and per-window records (slice 3), the profile version that adds the retry model hash, worker capability for the turbo model. (All decided in D-28.)
+
+**Blocks implementation:** No.
+
+---
+
+## D-28: How does the ad-analysis profile run the German drift check, and does it stay `ad-analysis-v1`?
+
+**Status:** Implemented 2026-10-16 (not yet deployed). Slice 3 of the podcast server-side ad analysis (`~/projects/podcast/docs/player/specs/server-ad-analysis-design.md`, "Analysis Stages" 3, adapter contract row "Drift check with turbo retry" (b), gate G2); slice description: `specs/2026-10-16_drift_check.md`.
+
+**Context:** Parakeet drifts into English inside German speech in about 9 % of German 30 s windows. The frozen research rule (`round2-german-drift`, FREEZE.txt 2026-10-15) flags grid windows by English and German function words and re-transcribes them with whisper large-v3-turbo; the spec adopts the post-hoc acceptance (episode language with p >= 0.9). The podcast spec wants the per-window records to "come back with the words and be kept", the retry model hash in the identity, workers that advertise the profile only with the turbo model, and calls the profile versioned ("any change to its settings is a new profile name"). Slice 1 (D-26) is committed but has never been deployed or served to a producer.
+
+**Options:**
+
+| Question | Options | Tradeoff |
+|----------|---------|----------|
+| Where the records live | A. Inside `words.json` (`drift`) / B. a sibling `drift.json` artifact / C. job result metadata | A: one artifact that the producer already fetches, covered unchanged by `DELETE`, the backstop, the remote completion check and its exposure; the records are a few KB. B: a second required remote artifact, a second fetch, and words and records could get out of step. C: metadata outlives nothing but is not where Delve reads, and remote metadata is sanitized to scalars |
+| Profile name | A. Amend `ad-analysis-v1` before the first deploy / B. `ad-analysis-v2` | A: no producer, cache or deployment ever saw the slice 1 output; the podcast spec's profile JSON already pairs `voxhelmProfile: ad-analysis-v1` with the drift block. B: a name whose predecessor never existed outside this Mac, and a `v1` that would have to stay accepted or be removed |
+| Runtime requirement | A. The profile needs the turbo runtime for every job / B. only for German jobs | A: capability is per profile, not per job language, so a worker that advertises the profile can run any of its jobs; the identity (retry hash) is the same for every job. B: an English job could run where German ones cannot, but advertising and identity would depend on the job |
+| Retry process | A. One `whisper-cli` per window (D-27) / B. a resident `whisper-server` | A: no extra service, nothing to keep alive or secure; measured cost is within G2's budget. B: saves the model load per window but adds a long-lived process per host |
+
+**Accepted decision:** A in every row.
+
+- `transcriptions/drift.py` reproduces the frozen check verbatim: research word lists and tokenizer (`lib.py`, list hash recorded), grid `[30k, 30k + 30)` over Parakeet word starts, flag `en >= 4 and en / max(1, en + de) >= 0.10`, retry through `transcribe_window`, accept when the detected language equals the job's `language_hint` and p >= 0.9, splice as `splice.py` (drop words starting in the window, add the retry's, stable sort by start). The word list keeps "these" (REPORT.md's later suggestion to drop it is not part of the frozen rule).
+- It runs only for the profile's languages (`de`); other jobs carry `drift.checked: false` with a reason. Every window gets a record (t, counts, flag, and for flagged windows language, p, accepted, word counts, retry seconds); `words.json` keeps `schema_version` 1 (nothing was ever served with the old shape).
+- `ad-analysis-v1` is amended in place, recorded here; from its first deploy on, any change to the profile (including the rule, the word lists or the turbo model) is a new name.
+- Both runtimes are resolved before Parakeet runs; a missing or unverified turbo model fails a local job and makes a claimed remote attempt retryable; workers advertise the profile only while Parakeet and the window runtime resolve; a window retry that fails fails the job. Nothing skips the check silently.
+- The identity gains `drift` (rule record plus `retry`: whisper.cpp version, model, SHA-256, settings); the control plane refuses a remote completion whose drift identity differs from its own and keeps only the worker's whisper.cpp version.
+- The splice changes only `words.json`; the transcript formats stay Parakeet's sentences.
+- Cancellation (`cancel_event`) is checked before Parakeet, before and inside each window retry, and once more after the last window.
+
+**Not decided here:** dropping "these" from the English list or restricting whisper's language choice (would be a new profile), drift checks for other languages, splicing the transcript formats, holdout G2 (the gate is dev-only).
 
 **Blocks implementation:** No.
 

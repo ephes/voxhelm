@@ -1,7 +1,8 @@
 # Window transcription (whisper large-v3-turbo on one clip)
 
 Status: 2026-10-16, implemented and verified locally (see "Verification");
-not deployed, not yet used by a profile. Decision: D-27. Source: slice 2 of
+not deployed. Used by the `ad-analysis-v1` drift check since slice 3
+(`2026-10-16_drift_check.md`, D-28). Decision: D-27. Source: slice 2 of
 the podcast server-side ad analysis,
 `~/projects/podcast/docs/player/specs/server-ad-analysis-design.md`
 ("Voxhelm Adapter Contract", row "Drift check with turbo retry", part (a);
@@ -25,10 +26,10 @@ the pinned turbo model check, the identity record, `window_runtime_available()`,
 settings `VOXHELM_WINDOW_MODEL` and `VOXHELM_WINDOW_TIMEOUT_SECONDS`, the
 comparison tool `evals/window_retry_compare.py`.
 
-Out of scope (slice 3): the function-word check, which windows are retried,
-the p >= 0.9 acceptance, the splice, per-window records in `words.json`, the
-retry model hash in the profile identity (as a new profile version if the
-words change), advertising the profile only on workers where
+Out of scope (slice 3, now `2026-10-16_drift_check.md`): the function-word
+check, which windows are retried, the p >= 0.9 acceptance, the splice,
+per-window records in `words.json`, the retry model hash in the profile
+identity, advertising the profile only on workers where
 `window_runtime_available()` holds.
 
 ## Interface: an internal function, no HTTP route (D-27)

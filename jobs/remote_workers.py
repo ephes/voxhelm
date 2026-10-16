@@ -47,6 +47,7 @@ from jobs.services import (
     validate_known_speaker_reference_urls,
 )
 from jobs.staging import delete_staged_media, release_staged_media_claims_for_job
+from transcriptions import windows
 from transcriptions.errors import ApiError
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
@@ -57,6 +58,7 @@ from transcriptions.profiles import (
     WORDS_ARTIFACT_FORMAT,
     WORDS_ARTIFACT_NAME,
     WORDS_CONTENT_TYPE,
+    TranscriptionProfile,
     get_transcription_profile,
 )
 from transcriptions.service import (
@@ -1192,8 +1194,55 @@ def sanitize_profile_identity(value: object, *, job: Job) -> dict[str, Any]:
         else:
             settings_record[key] = safe_worker_metadata_string(raw)
     identity["settings"] = settings_record
+    identity["drift"] = sanitize_drift_identity(
+        value.get("drift"), profile=get_transcription_profile(job.profile)
+    )
     identity["language_hint"] = job.language or None
     return identity
+
+
+def sanitize_drift_identity(value: object, *, profile: TranscriptionProfile) -> dict[str, Any]:
+    """The worker's drift check identity, which must be this control plane's own.
+
+    The rule (thresholds, function-word lists, acceptance) and the retry engine (model,
+    its SHA-256 and the decoding settings) must equal the profile's; only the worker's
+    ``whisper-cli`` version is taken from it. Anything else means the worker ran another
+    drift check, and the completion is refused.
+    """
+    expected_rule = profile.drift.record()
+    if (
+        not isinstance(value, dict)
+        or {key: value.get(key) for key in expected_rule} != expected_rule
+    ):
+        raise ApiError("result_metadata.profile.drift does not match the profile's drift check.")
+    retry = value.get("retry")
+    expected_retry = {
+        "engine": windows.WINDOW_ENGINE,
+        "cli": windows.WINDOW_CLI,
+        "model": windows.WINDOW_MODEL_NAME,
+        "model_sha256": windows.WINDOW_MODEL_SHA256,
+        "settings": windows.WINDOW_SETTINGS.record(),
+    }
+    if (
+        not isinstance(retry, dict)
+        or {key: retry.get(key) for key in expected_retry} != expected_retry
+    ):
+        raise ApiError(
+            "result_metadata.profile.drift.retry does not match the pinned window model."
+        )
+    raw_version = retry.get("cli_version")
+    cli_version = (safe_worker_metadata_string(raw_version) if raw_version else "") or ""
+    return {
+        **expected_rule,
+        "retry": {
+            "engine": windows.WINDOW_ENGINE,
+            "cli": windows.WINDOW_CLI,
+            "cli_version": cli_version,
+            "model": windows.WINDOW_MODEL_NAME,
+            "model_sha256": windows.WINDOW_MODEL_SHA256,
+            "settings": windows.WINDOW_SETTINGS.record(),
+        },
+    }
 
 
 def clear_source_metadata(metadata: dict[str, Any]) -> None:

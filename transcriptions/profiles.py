@@ -8,11 +8,16 @@ workers that cannot run it do not claim it) or fails, it never runs something el
 ``ad-analysis-v1`` (podcast server-side ad analysis) runs Parakeet TDT through the
 ``parakeet-mlx`` CLI with 30 s chunks, 5 s overlap, full attention and no
 ``--max-duration``: the settings of the research runs whose words the ad detector was
-tuned on. Besides the usual transcript artifacts it writes a ``words`` artifact with
-per-word start, end and mean token confidence, and records the engine identity (model
-commit, CLI and MLX versions, profile settings) in the job result and in that artifact.
-Its artifacts and job row are removed by the producer (``DELETE /v1/jobs/{id}``) or, at
-the latest, by ``prune_job_artifacts`` seven days after the job finished.
+tuned on. For a German job it then runs the drift check (``transcriptions.drift``): 30 s
+windows with English drift are re-transcribed with the pinned whisper large-v3-turbo
+model (``transcriptions.windows``) and their words spliced in. Besides the usual
+transcript artifacts it writes a ``words`` artifact with per-word start, end and mean
+token confidence and the drift check's per-window records, and records the engine
+identity (model commit, CLI and MLX versions, profile settings, the drift rule and the
+retry engine with its model hash) in the job result and in that artifact. The profile
+needs both runtimes on every host, whatever the job's language. Its artifacts and job
+row are removed by the producer (``DELETE /v1/jobs/{id}``) or, at the latest, by
+``prune_job_artifacts`` seven days after the job finished.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from typing import Any
 
 from django.conf import settings
 
+from transcriptions.drift import DRIFT_RULE, DriftRule, run_drift_check
 from transcriptions.service import (
     PARAKEET_BACKEND_NAME,
     BackendUnavailableError,
@@ -40,6 +46,12 @@ from transcriptions.service import (
     parakeet_child_env,
     parakeet_supports_language,
     resolve_parakeet_runtime,
+)
+from transcriptions.windows import (
+    raise_if_cancelled,
+    resolve_window_runtime,
+    window_identity,
+    window_runtime_available,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -72,6 +84,8 @@ class TranscriptionProfile:
     overlap_seconds: int
     local_attention: bool
     max_sentence_seconds: float | None
+    # The drift check (function-word rule, turbo retry, acceptance, splice).
+    drift: DriftRule
     # Every artifact and the job row of a terminal job are deleted this long after the
     # job finished, whether or not the producer deleted the job itself.
     artifact_retention_seconds: int
@@ -95,6 +109,7 @@ PROFILES: dict[str, TranscriptionProfile] = {
         overlap_seconds=5,
         local_attention=False,
         max_sentence_seconds=None,
+        drift=DRIFT_RULE,
         artifact_retention_seconds=SEVEN_DAYS_SECONDS,
     ),
 }
@@ -125,8 +140,11 @@ def normalize_language_hint(language_hint: str | None) -> str | None:
 @dataclass(frozen=True)
 class ProfileTranscription:
     result: TranscriptionResult
+    # The profile's words: Parakeet's, with the drift check's accepted retries spliced in.
     words: list[dict[str, Any]]
     identity: dict[str, Any]
+    # The drift check's outcome: rule, whether it ran, summary and per-window records.
+    drift: dict[str, Any]
 
     def words_document(self) -> dict[str, Any]:
         return {
@@ -134,11 +152,13 @@ class ProfileTranscription:
             "profile": self.identity["profile"],
             "identity": self.identity,
             "words": self.words,
+            "drift": self.drift,
         }
 
 
 def profile_runtime_available(profile: TranscriptionProfile) -> bool:
-    """True when this host can run the profile (its CLI and model directory resolve)."""
+    """True when this host can run the profile: its Parakeet CLI and model directory and
+    the drift check's window runtime (``whisper-cli`` and the pinned turbo model)."""
     try:
         resolve_parakeet_runtime(
             binary_path=settings.VOXHELM_PARAKEET_BIN,
@@ -146,7 +166,7 @@ def profile_runtime_available(profile: TranscriptionProfile) -> bool:
         )
     except BackendUnavailableError:
         return False
-    return profile.backend == PARAKEET_BACKEND_NAME
+    return profile.backend == PARAKEET_BACKEND_NAME and window_runtime_available()
 
 
 def available_profile_names() -> list[str]:
@@ -162,10 +182,15 @@ def run_profile_transcription(
 ) -> ProfileTranscription:
     """Transcribe with exactly the profile's engine and settings; never another engine.
 
-    Raises ``BackendUnavailableError`` when the CLI or model is missing on this host. The
-    caller admits the run through the lane scheduler. The transcript is not sanitized: the
-    words artifact and the transcript artifacts are the engine's output as it is.
+    Then runs the profile's drift check on the words. Raises ``BackendUnavailableError``
+    when the Parakeet CLI or model, ``whisper-cli`` or the pinned turbo model is missing on
+    this host; both are resolved before Parakeet runs, so a job never runs without the
+    check. The caller admits the run through the lane scheduler. The transcript is not
+    sanitized, and the transcript artifacts are Parakeet's sentences as they are; only the
+    words carry the drift check's splice.
     """
+    raise_if_cancelled(cancel_event)
+    window_executable, _ = resolve_window_runtime()
     model_name = settings.VOXHELM_PARAKEET_MODEL_NAME
     backend = ParakeetBackend(
         binary_path=settings.VOXHELM_PARAKEET_BIN,
@@ -192,15 +217,24 @@ def run_profile_transcription(
         ),
     )
     result = normalize_parakeet_payload(payload, model_name=model_name)
-    words = parakeet_payload_words(payload)
+    drift = run_drift_check(
+        audio_path,
+        parakeet_payload_words(payload),
+        language=language_hint,
+        rule=profile.drift,
+        cancel_event=cancel_event,
+    )
     identity = profile_identity(
         profile,
         executable=executable,
         model_dir=model_dir,
         model_name=model_name,
         language_hint=language_hint,
+        window_executable=window_executable,
     )
-    return ProfileTranscription(result=result, words=words, identity=identity)
+    return ProfileTranscription(
+        result=result, words=drift.words, identity=identity, drift=drift.record
+    )
 
 
 def parakeet_payload_words(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -259,6 +293,7 @@ def profile_identity(
     model_dir: Path,
     model_name: str,
     language_hint: str | None,
+    window_executable: str,
 ) -> dict[str, Any]:
     versions = cli_versions(executable)
     return {
@@ -270,6 +305,7 @@ def profile_identity(
         "cli_version": versions.get("parakeet-mlx", ""),
         "mlx_version": versions.get("mlx", ""),
         "settings": profile.settings_record(),
+        "drift": {**profile.drift.record(), "retry": window_identity(window_executable)},
         "language_hint": language_hint,
     }
 

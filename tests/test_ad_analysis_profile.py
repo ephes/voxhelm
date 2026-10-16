@@ -34,7 +34,8 @@ from tests.test_remote_workers import (
     transcript_manifest,
     worker_headers,
 )
-from transcriptions import profiles
+from tests.window_fakes import clear_window_caches, install_fake_window_runtime
+from transcriptions import profiles, windows
 from transcriptions.profiles import (
     AD_ANALYSIS_V1,
     PROFILES,
@@ -106,16 +107,22 @@ def parakeet_cli(settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("transcriptions.service.build_backend_service", no_other_engine)
     monkeypatch.setattr(worker_cli, "build_backend_service", no_other_engine)
+    # The drift check's turbo runtime; the fixture's audio is English, so every retried
+    # window is detected as English and Parakeet's words stay.
+    window = install_fake_window_runtime(settings, tmp_path, monkeypatch)
+    window.set_language("default", "en", 0.98)
 
     class Runtime:
         pass
 
     runtime = Runtime()
+    runtime.window = window  # type: ignore[attr-defined]
     runtime.model_dir = model_dir  # type: ignore[attr-defined]
     runtime.args = lambda: json.loads(record.read_text(encoding="utf-8"))  # type: ignore[attr-defined]
     runtime.other_engine_calls = calls  # type: ignore[attr-defined]
     yield runtime
     profiles._cli_versions.cache_clear()
+    clear_window_caches()
 
 
 def profile_payload(**overrides: Any) -> dict[str, Any]:
@@ -384,6 +391,22 @@ def words_manifest_entry(job_id: str, attempt: int, **overrides: Any) -> dict[st
     return entry
 
 
+def drift_identity(**retry_overrides: Any) -> dict[str, Any]:
+    """The drift check identity a worker records: the profile's rule and the pinned retry."""
+    return {
+        **PROFILES[AD_ANALYSIS_V1].drift.record(),
+        "retry": {
+            "engine": "whisper.cpp",
+            "cli": "whisper-cli",
+            "cli_version": "1.9.5",
+            "model": "ggml-large-v3-turbo",
+            "model_sha256": windows.WINDOW_MODEL_SHA256,
+            "settings": windows.WINDOW_SETTINGS.record(),
+            **retry_overrides,
+        },
+    }
+
+
 def worker_identity(**overrides: Any) -> dict[str, Any]:
     identity: dict[str, Any] = {
         "profile": AD_ANALYSIS_V1,
@@ -396,6 +419,7 @@ def worker_identity(**overrides: Any) -> dict[str, Any]:
         "cli_version": "0.5.3",
         "mlx_version": "0.32.4",
         "settings": PROFILES[AD_ANALYSIS_V1].settings_record(),
+        "drift": drift_identity(),
         "language_hint": "de",
         "unexpected": "dropped",
     }

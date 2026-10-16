@@ -614,7 +614,8 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
 def transcribe_claim_profile(*, claim: dict[str, Any], audio_path: Path) -> ProfileTranscription:
     """Run the claim's profile with its fixed settings; never another engine.
 
-    The claim's ``fallbacks`` are ignored for a profile. A missing CLI or model raises
+    The claim's ``fallbacks`` are ignored for a profile. A missing Parakeet CLI or model,
+    or a missing ``whisper-cli`` or turbo model for the drift check, raises
     ``BackendUnavailableError``, which fails the attempt as retryable: the job goes back
     to the queue and only a worker that advertises the profile claims it again.
     """
@@ -950,8 +951,9 @@ def with_current_stt_runtimes(capabilities: dict[str, Any]) -> dict[str, Any]:
     Called on every heartbeat: a worker advertises Parakeet only while its CLI
     resolves and its model directory is complete, so a worker whose model went
     away gets whisper.cpp claims from the next poll on. Transcription profiles
-    (``ad-analysis-v1``) are advertised under ``profiles`` by the same check; a
-    worker without them never claims a profile job.
+    (``ad-analysis-v1``) are advertised under ``profiles`` by the same check, and
+    only while the drift check's window runtime (``whisper-cli`` and the pinned
+    turbo model) resolves too; a worker without them never claims a profile job.
     """
     backends = {str(name) for name in capabilities.get("backends", [])}
     models = {str(name) for name in capabilities.get("models", [])}
