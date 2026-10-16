@@ -5,6 +5,10 @@ verified locally (see "Local verification"); deployed and switched on the
 same day (verification steps 2 and 3's switch done, staging re-runs
 pending). Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
+Follow-on (2026-10-16): the `ad-analysis-v1` profile runs the same backend
+with its own fixed settings and no fallback
+(`2026-10-16_ad_analysis_profile.md`); the backend gained `run()` and a
+`local_attention` option for it, the invocation below is unchanged.
 
 ## Why
 

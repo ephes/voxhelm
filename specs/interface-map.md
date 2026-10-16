@@ -148,6 +148,7 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 |--------|------|------|---------|
 | POST | `/v1/jobs` | Producer token | Submit a new job |
 | GET | `/v1/jobs/<job_id>` | Producer token | Poll job status |
+| DELETE | `/v1/jobs/<job_id>` | Producer token (the job's producer) | Delete a finished profile job: artifacts, objects and row (D-26) |
 | GET | `/v1/jobs/<job_id>/artifacts/<name>` | Producer token | Download an exposed artifact |
 
 #### 2.2.1 Job Submission (Producer Side)
@@ -255,6 +256,10 @@ The producer-facing `id` is Voxhelm's stable job identifier. Voxhelm also stores
 **Request:** `GET /v1/jobs/<job_id>/artifacts/<name>`
 
 Returns the named exposed artifact for the caller's job. Consumers do not need direct MinIO access.
+
+#### 2.2.4 Transcription Profiles (D-26)
+
+A `transcribe` job may name `"profile": "ad-analysis-v1"` with an optional `"language_hint"` instead of `backend`/`model`/`language`. The profile fixes engine and settings (Parakeet TDT through `parakeet-mlx`, 30 s chunks, 5 s overlap, full attention, no `--max-duration`, no sanitizer), never falls back to another engine, and is part of the `task_ref` identity. The job additionally writes `words.json` (`result.artifacts.words`: `{"schema_version": 1, "profile", "identity", "words": [{"w", "s", "e", "c"}]}`) and records the engine identity (model commit and checksum, `parakeet-mlx` and `mlx` versions, settings, language hint) in `result.metadata.profile`; the job payload carries `"profile"`. Remote workers advertise `capabilities.profiles`; only such a worker claims a profile job, and the claim carries `profile` without `fallbacks`. The producer deletes a finished profile job with `DELETE /v1/jobs/<job_id>` (204; 404 for unknown or foreign jobs; 409 for non-profile, unfinished or non-allowlisted jobs; 503 to retry after a store error), including objects of attempts no completion registered, a staged upload it still holds and its task result; `prune_job_artifacts` removes the same 7 days after the job finished otherwise. Details: `2026-10-16_ad_analysis_profile.md`.
 
 #### 2.2.3 Internal Execution Model
 

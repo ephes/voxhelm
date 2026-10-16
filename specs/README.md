@@ -7,7 +7,7 @@ Current implementation and research snapshot as of 2026-05-27:
 - The core M3 service/runtime slice is implemented: Piper-backed TTS, `POST /v1/audio/speech`, and batch `synthesize` jobs are live in Voxhelm.
 - The post-M3 operator transcript follow-on is also implemented: Voxhelm now ships the session-authenticated operator UI at `/`, mixed sync/batch operator routing, and server-owned `dote` / `podlove` transcript artifacts.
 - The live production shape is a Django HTTP process plus a Django Tasks worker and a Wyoming STT/TTS sidecar on `studio`, with private HTTPS ingress on `macmini` at `https://voxhelm.home.xn--wersdrfer-47a.de`.
-- Implemented endpoints: `GET /v1/health`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, and `GET /v1/jobs/{id}/artifacts/{name}`.
+- Implemented endpoints: `GET /v1/health`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` (finished profile jobs only, D-26), and `GET /v1/jobs/{id}/artifacts/{name}`.
 - Implemented sync STT contract: bearer auth, multipart upload, JSON URL mode, accepted models `gpt-4o-mini-transcribe` and `whisper-1`, plus the explicit `whisperkit` opt-in path when that backend is enabled, and response formats `json`, `text`, `verbose_json`, and `vtt`.
 - Implemented TTS contract: Piper-backed synchronous speech generation plus batch `synthesize` jobs with artifact storage.
 - Implemented batch contract: persisted jobs and artifacts, Django Tasks internal execution, idempotent `task_ref` handling, video-to-audio extraction, artifact download through the Voxhelm HTTP proxy, and canonical batch transcript artifacts for `json`, `text`, `vtt`, `dote`, and `podlove`.
@@ -202,6 +202,7 @@ Active top-level spec set:
 - [`diarization-quality-research.md`](./diarization-quality-research.md)
 - [`2026-10-12_mixed_speaker_segments.md`](./2026-10-12_mixed_speaker_segments.md)
 - [`2026-10-15_parakeet_asr_backend.md`](./2026-10-15_parakeet_asr_backend.md)
+- [`2026-10-16_ad_analysis_profile.md`](./2026-10-16_ad_analysis_profile.md)
 - [`remote-transcription-workers.md`](./remote-transcription-workers.md)
 - [`README.md`](./README.md)
 

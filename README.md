@@ -393,13 +393,25 @@ uv run python manage.py prune_job_artifacts
   `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` ago (default `86400`, 24 h;
   `0` deletes it on the next run after the job finished);
 - transcript, speaker-sidecar and speech artifacts, and anything marked exposed,
-  are never touched; queued and running jobs are never touched.
+  are never touched, except for jobs of a transcription profile with a backstop
+  (below); queued and running jobs are never touched.
+- every artifact of an `ad-analysis-v1` job (any kind, exposed or not) is deleted
+  once the job finished more than 7 days ago, and its job row with it (the row
+  holds the transcript text), whether or not the producer deleted the job itself
+  (see [Transcription Profiles](#transcription-profiles)). The same run deletes
+  what the job's remote attempts stored below their artifact prefix without a
+  completion registering it (a rejected, failed, retried or abandoned attempt;
+  the prefix of every profile attempt is recorded at claim time), a staged
+  upload the job still holds (a completion whose staged-object deletion failed),
+  and the job's Django task result. This backstop is owned by the profile and
+  applies even with `VOXHELM_JOB_METADATA_RETENTION_SECONDS=0`.
 
 Deletion is allowlist-based: only an object voxhelm generated for that job is
 ever deleted, i.e. a key ending in exactly `jobs/<job_id>/<artifact name>` or
 `jobs/<job_id>/attempt-<n>/<artifact name>` below the artifact prefix it was
 written under (so a later `VOXHELM_ARTIFACT_PREFIX` change does not block
-retention), with no empty, `.` or `..` segments. On the filesystem backend the resolved real path
+retention), with no empty, `.` or `..` segments; a staged upload's key must end in exactly
+`staged-inputs/<upload_id>/<filename>`. On the filesystem backend the resolved real path
 must also equal the literal path under the root (no symlinks) and the file must
 not be hard-linked. Anything else is refused: the row and object stay, and the
 command (and `--dry-run`) lists it as refused; refused queued deletions stay
@@ -427,10 +439,12 @@ job's `finished_at`, else its last update; `0` disables job metadata pruning).
 A job is only deleted once it owns nothing anymore: no artifact row of any kind
 (so intermediates must have been pruned first, and a job whose intermediate was
 refused, failed to delete or is not yet past source retention keeps its row),
-no queued `PendingArtifactDeletion` and no staged upload still claimed by it.
-Transcript, speaker-sidecar and speech artifacts are kept indefinitely and are
-served through their job, so a job that still has them keeps its row. Queued
-and running jobs are never deleted. Each batch re-checks these conditions under
+no queued `PendingArtifactDeletion`, no recorded remote attempt prefix still to
+clean and no staged upload still claimed by it. Transcript, speaker-sidecar and speech artifacts are kept indefinitely and are
+served through their job, so a job that still has them keeps its row. A
+profile job past its backstop loses those artifacts in the same run and its row
+then goes regardless of the metadata retention. Queued and running jobs are
+never deleted. Each batch re-checks these conditions under
 the database write lock. Deleting a job also frees its `task_ref`, so a later
 submission with the same `task_ref` creates a new job. `--dry-run` lists the
 job rows a real run would delete, counting the artifacts and queued deletions
@@ -442,6 +456,71 @@ is enough) on the control plane, with the same environment as the service.
 Current scope note: batch staged uploads are audio-only in this slice. URL
 audio and URL video keep working on the existing path. Uploaded video and true
 service-owned chunk splitting/stitching are still explicitly deferred.
+
+## Transcription Profiles
+
+A batch transcription job can name a profile instead of a backend and model. A
+profile pins every setting that changes its output, never falls back to another
+engine, and is versioned: any change to its settings is a new profile name.
+`ad-analysis-v1` (the podcast server-side ad analysis) runs Parakeet TDT through
+`parakeet-mlx` with 30 s chunks, 5 s overlap, full attention and no
+`--max-duration`, whatever the deployment's `VOXHELM_PARAKEET_CHUNK_SECONDS`,
+`VOXHELM_PARAKEET_OVERLAP_SECONDS` and `VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS`
+say (it uses `VOXHELM_PARAKEET_BIN`, `VOXHELM_PARAKEET_MODEL_DIR`,
+`VOXHELM_PARAKEET_MODEL_NAME` and `VOXHELM_PARAKEET_TIMEOUT_SECONDS`). The
+transcript is not sanitized.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/jobs \
+  -H "Authorization: Bearer replace-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "transcribe",
+    "profile": "ad-analysis-v1",
+    "language_hint": "de",
+    "input": {"kind": "upload", "upload_id": "replace-me"},
+    "output": {"formats": ["json"]},
+    "task_ref": "smart-skip-<sha256>"
+  }'
+```
+
+- `language_hint` is the feed language. Parakeet takes no language argument;
+  the hint is normalized (`de-DE` -> `de`), recorded with the job, and a hint
+  outside Parakeet's 25 languages is rejected with 400. A profile job takes no
+  `language`, no `model` other than `auto`, and no diarization.
+- Besides the requested transcript formats the job always writes
+  `words.json` (`result.artifacts.words`):
+  `{"schema_version": 1, "profile": ..., "identity": {...}, "words": [{"w", "s", "e", "c"}, ...]}`
+  with one entry per word (a token starting with a space starts a word; other
+  tokens join it), start and end in seconds and `c` the mean token confidence,
+  all rounded to 3 decimals.
+- `result.metadata.profile` and the artifact's `identity` record the engine:
+  profile name, model name, the model's repo, commit and weights checksum (from
+  the deployment's `VOXHELM_MODEL_REVISION` marker in the model directory, or a
+  Hugging Face snapshot directory name), the `parakeet-mlx` and `mlx` versions
+  of the CLI's environment, the profile settings and the language hint.
+- No fallback: a local job without the CLI or model fails; in `remote_pull`
+  mode a profile job is only claimed by a worker that advertises the profile
+  (`capabilities.profiles`), so it waits until one does. A worker that loses
+  the model after claiming fails the attempt as retryable and the job goes back
+  to the queue.
+- `DELETE /v1/jobs/{id}` (producer token): removes a finished profile job's
+  artifacts, their stored objects, queued object deletions, every object its
+  remote attempts stored below their artifact prefix (also those no completion
+  registered), a staged upload it still holds, its Django task result, and
+  finally the job row, through the same allowlist, reference checks and write
+  lock as `prune_job_artifacts`. `204` when everything is gone; `404` for an
+  unknown job or another producer's job (so also for a repeated delete); `409`
+  for a job without a profile, a job that has not finished, or one holding an
+  artifact, attempt object or staged upload outside the allowlist (nothing is
+  deleted); `503` when a stored object could not be deleted or listed (what was
+  deleted stays deleted, retry the request).
+- A profile job's task result (`django_tasks_db`) records only
+  `{"job_id", "profile"}`, never the transcript.
+- Backstop: `prune_job_artifacts` deletes every artifact and the row of an
+  `ad-analysis-v1` job 7 days after it finished (see the retention section).
+
+See `specs/2026-10-16_ad_analysis_profile.md`.
 
 ## Batch Speaker Diarization
 
@@ -652,6 +731,12 @@ startup; they also advertise `whispercpp` whenever its binary and model are
 present, even outside their configured chain, so the fallback keeps word
 timings. Routed jobs with a language Parakeet does not support skip it. Remote STT runs are admitted through the non-interactive lane of the
 lane scheduler, like local ones.
+Workers advertise transcription profiles (`"profiles": ["ad-analysis-v1"]`) by
+the same per-heartbeat Parakeet check; a profile job is claimed only by a worker
+that lists its profile, its claim carries `profile` and no `fallbacks`, and the
+completion must include `words.json` (kind `words`, exposed, `application/json`)
+and `result_metadata.profile` with the engine identity, which the control plane
+reduces to the known fields.
 Heartbeat storage contract: `hostname` is optional and trimmed, with at most
 255 Unicode characters. `concurrency` is an integer from 1 through 2147483647
 (booleans are rejected); omitted or null values default to 1. `capabilities` is

@@ -55,6 +55,15 @@ from transcriptions.known_speaker import (
     run_known_speaker_postprocess,
     slice_samples,
 )
+from transcriptions.profiles import (
+    WORDS_ARTIFACT_FORMAT,
+    WORDS_ARTIFACT_NAME,
+    WORDS_CONTENT_TYPE,
+    ProfileTranscription,
+    available_profile_names,
+    get_transcription_profile,
+    run_profile_transcription,
+)
 from transcriptions.sanitizer import sanitize_result
 from transcriptions.service import (
     PARAKEET_BACKEND_NAME,
@@ -386,7 +395,12 @@ def process_claim(
                 )
 
             heartbeater.update(phase="transcribe")
-            result = transcribe_claim_audio(claim=claim, audio_path=audio_path)
+            profile_run: ProfileTranscription | None = None
+            if claim.get("profile") is not None:
+                profile_run = transcribe_claim_profile(claim=claim, audio_path=audio_path)
+                result = profile_run.result
+            else:
+                result = transcribe_claim_audio(claim=claim, audio_path=audio_path)
 
             speakers_artifact_payload: dict[str, Any] | None = None
             diarization = claim_diarization(claim)
@@ -418,6 +432,23 @@ def process_claim(
                     result=result,
                 )
             )
+            if profile_run is not None:
+                artifacts.append(
+                    upload_bytes_artifact(
+                        store=store,
+                        artifact_prefix=artifact_prefix,
+                        data=json.dumps(
+                            profile_run.words_document(),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8"),
+                        name=WORDS_ARTIFACT_NAME,
+                        kind="words",
+                        format_name=WORDS_ARTIFACT_FORMAT,
+                        content_type=WORDS_CONTENT_TYPE,
+                        exposed=True,
+                    )
+                )
             if speakers_artifact_payload is not None:
                 artifacts.append(
                     upload_bytes_artifact(
@@ -443,6 +474,7 @@ def process_claim(
                     result=result,
                     processing_seconds=round(monotonic() - started, 3),
                     speakers_artifact=speakers_artifact_payload,
+                    profile_identity=profile_run.identity if profile_run is not None else None,
                 ),
                 artifacts=artifacts,
             )
@@ -577,6 +609,20 @@ def transcribe_claim_audio(*, claim: dict[str, Any], audio_path: Path) -> Transc
         enabled=settings.VOXHELM_SANITIZE_TRANSCRIPT,
         repeat_threshold=settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD,
     )
+
+
+def transcribe_claim_profile(*, claim: dict[str, Any], audio_path: Path) -> ProfileTranscription:
+    """Run the claim's profile with its fixed settings; never another engine.
+
+    The claim's ``fallbacks`` are ignored for a profile. A missing CLI or model raises
+    ``BackendUnavailableError``, which fails the attempt as retryable: the job goes back
+    to the queue and only a worker that advertises the profile claims it again.
+    """
+    profile = get_transcription_profile(require_string(claim.get("profile"), "claim.profile"))
+    with admit_local_inference(LANE_NON_INTERACTIVE):
+        return run_profile_transcription(
+            profile, audio_path, language_hint=optional_string(claim.get("language"))
+        )
 
 
 def claim_fallback_targets(claim: dict[str, Any]) -> list[tuple[str, str]]:
@@ -826,6 +872,7 @@ def build_result_metadata(
     result: TranscriptionResult,
     processing_seconds: float,
     speakers_artifact: dict[str, Any] | None,
+    profile_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration_seconds = max((segment.end for segment in result.segments), default=0.0)
     metadata: dict[str, Any] = {
@@ -842,6 +889,8 @@ def build_result_metadata(
         metadata["diarization"] = {
             "known_speaker_summary": speakers_artifact.get("summary", {}),
         }
+    if profile_identity is not None:
+        metadata["profile"] = profile_identity
     return metadata
 
 
@@ -900,16 +949,25 @@ def with_current_stt_runtimes(capabilities: dict[str, Any]) -> dict[str, Any]:
 
     Called on every heartbeat: a worker advertises Parakeet only while its CLI
     resolves and its model directory is complete, so a worker whose model went
-    away gets whisper.cpp claims from the next poll on.
+    away gets whisper.cpp claims from the next poll on. Transcription profiles
+    (``ad-analysis-v1``) are advertised under ``profiles`` by the same check; a
+    worker without them never claims a profile job.
     """
     backends = {str(name) for name in capabilities.get("backends", [])}
     models = {str(name) for name in capabilities.get("models", [])}
     backends.discard(PARAKEET_BACKEND_NAME)
     models.discard(settings.VOXHELM_PARAKEET_MODEL_NAME)
+    profiles: list[str] = []
     if parakeet_runtime_available():
         backends.add(PARAKEET_BACKEND_NAME)
         models.add(settings.VOXHELM_PARAKEET_MODEL_NAME)
-    return {**capabilities, "backends": sorted(backends), "models": sorted(models)}
+        profiles = available_profile_names()
+    return {
+        **capabilities,
+        "backends": sorted(backends),
+        "models": sorted(models),
+        "profiles": profiles,
+    }
 
 
 def whispercpp_runtime_available() -> bool:

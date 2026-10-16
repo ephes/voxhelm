@@ -37,6 +37,7 @@ from jobs.staging import (
     materialize_staged_media,
     release_staged_media_claims_for_job,
 )
+from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from synthesis.service import (
     AUDIO_OUTPUT_FORMATS,
     MAX_TTS_SPEED,
@@ -75,6 +76,16 @@ from transcriptions.known_speaker import (
     run_known_speaker_postprocess,
     slice_samples,
 )
+from transcriptions.profiles import (
+    WORDS_ARTIFACT_FORMAT,
+    WORDS_ARTIFACT_NAME,
+    WORDS_CONTENT_TYPE,
+    ProfileError,
+    ProfileTranscription,
+    get_transcription_profile,
+    normalize_language_hint,
+    run_profile_transcription,
+)
 from transcriptions.service import (
     TranscribeParams,
     TranscriptionResult,
@@ -110,6 +121,8 @@ class JobRequest:
     diarization: dict[str, Any]
     context: dict[str, Any]
     task_ref: str
+    # Named transcription profile; empty for ordinary jobs.
+    profile: str = ""
 
 
 def create_job_from_payload(*, producer: str, payload: dict[str, Any]) -> tuple[Job, bool]:
@@ -242,6 +255,7 @@ def insert_batch_job(
             backend=request.backend,
             model=request.model,
             language=request.language or "",
+            profile=request.profile,
             input_data=input_data,
             output_data=output_data,
             context_data=request.context,
@@ -390,8 +404,23 @@ def parse_job_request(payload: dict[str, Any]) -> JobRequest:
 
 def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
     priority, lane, backend = parse_common_job_fields(payload)
-    model = ensure_transcription_model(payload.get("model", "auto"))
-    language = optional_string(payload.get("language"))
+    profile = parse_transcription_profile(payload)
+    if profile:
+        # The profile fixes the engine and model; only "auto" (or no model) is accepted.
+        if optional_string(payload.get("model")) not in {None, "auto"}:
+            raise ApiError("Profile jobs choose their own model; omit model or use 'auto'.")
+        model = "auto"
+        if payload.get("language") is not None:
+            raise ApiError("Profile jobs take language_hint instead of language.")
+        try:
+            language = normalize_language_hint(optional_string(payload.get("language_hint")))
+        except ProfileError as exc:
+            raise ApiError(str(exc)) from exc
+    else:
+        if payload.get("language_hint") is not None:
+            raise ApiError("language_hint requires a profile.")
+        model = ensure_transcription_model(payload.get("model", "auto"))
+        language = optional_string(payload.get("language"))
 
     input_data = ensure_object(payload.get("input"), "input")
     input_kind = optional_string(input_data.get("kind"))
@@ -418,6 +447,8 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         ensure_object(payload.get("output", {}), "output")
     )
     diarization = parse_diarization_option(payload)
+    if profile and diarization.get("enabled"):
+        raise ApiError("Profile jobs do not support diarization.")
     context = ensure_object(payload.get("context", {}), "context")
     task_ref = optional_string(payload.get("task_ref")) or ""
 
@@ -433,7 +464,18 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         diarization=diarization,
         context=context,
         task_ref=task_ref,
+        profile=profile,
     )
+
+
+def parse_transcription_profile(payload: dict[str, Any]) -> str:
+    profile = optional_string(payload.get("profile"))
+    if profile is None:
+        return ""
+    try:
+        return get_transcription_profile(profile).name
+    except ProfileError as exc:
+        raise ApiError(str(exc)) from exc
 
 
 def existing_job_matches_request(
@@ -447,6 +489,7 @@ def existing_job_matches_request(
     return (
         existing.backend == request.backend
         and existing.model == request.model
+        and existing.profile == request.profile
         and (existing.language or None) == request.language
         and existing_transcription_input_matches_request(existing.input_data, request.input_data)
         and sorted(existing.output_data.get("formats", [])) == sorted(request.output_formats)
@@ -478,6 +521,7 @@ def job_request_fingerprint(request: JobRequest) -> str:
         input_data=request.input_data,
         output_formats=request.output_formats,
         diarization=request.diarization,
+        profile=request.profile,
     )
 
 
@@ -901,15 +945,20 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             store_extracted_audio_artifact(job=job, audio_path=extracted_audio_path)
             audio_path = extracted_audio_path
 
-        result = transcribe_audio(
-            audio_path,
-            TranscribeParams(
-                request_model=job.model or "auto",
-                prompt=None,
-                language=job.language or None,
-                word_timestamps=job_wants_word_timestamps(job),
-            ),
-        )
+        profile_run: ProfileTranscription | None = None
+        if job.profile:
+            profile_run = run_profile_for_job(job=job, audio_path=audio_path)
+            result = profile_run.result
+        else:
+            result = transcribe_audio(
+                audio_path,
+                TranscribeParams(
+                    request_model=job.model or "auto",
+                    prompt=None,
+                    language=job.language or None,
+                    word_timestamps=job_wants_word_timestamps(job),
+                ),
+            )
         speakers_artifact: dict[str, Any] | None = None
         if transcription_diarization_enabled(job):
             if transcription_diarization_strategy(job) == KNOWN_SPEAKER_STRATEGY:
@@ -929,10 +978,19 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
             processing_seconds=processing_seconds,
             speakers_artifact=speakers_artifact,
         )
+        if profile_run is not None:
+            metadata["profile"] = profile_run.identity
         persist_transcription_output_artifacts(
             job=job, result=result, speakers_artifact=speakers_artifact
         )
+        if profile_run is not None:
+            persist_profile_words_artifact(job=job, profile_run=profile_run)
         mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
+        if job.profile:
+            # The task backend keeps the return value (django_tasks_db: DBTaskResult) beyond
+            # the job's deletion; a profile transcript must only live in the job and its
+            # artifacts.
+            return {"job_id": str(job.id), "profile": job.profile}
         return {"job_id": str(job.id), "text": result.text, "metadata": metadata}
     except Exception as exc:
         mark_job_failed(job=job, exc=exc)
@@ -947,6 +1005,29 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
                 delete_staged_media(staged=staged_media, missing_ok=True)
             except Exception:
                 pass
+
+
+def run_profile_for_job(*, job: Job, audio_path: Path) -> ProfileTranscription:
+    """Run the job's profile under lane admission; never another engine.
+
+    A missing CLI or model raises ``BackendUnavailableError`` and fails the job.
+    """
+    profile = get_transcription_profile(job.profile)
+    with admit_local_inference(LANE_NON_INTERACTIVE):
+        return run_profile_transcription(profile, audio_path, language_hint=job.language or None)
+
+
+def persist_profile_words_artifact(*, job: Job, profile_run: ProfileTranscription) -> None:
+    payload = json.dumps(profile_run.words_document(), ensure_ascii=False, separators=(",", ":"))
+    create_or_replace_artifact(
+        job=job,
+        name=WORDS_ARTIFACT_NAME,
+        kind=JobArtifact.Kind.WORDS,
+        format_name=WORDS_ARTIFACT_FORMAT,
+        content_type=WORDS_CONTENT_TYPE,
+        payload=payload.encode("utf-8"),
+        exposed=True,
+    )
 
 
 def prepare_transcription_input_media(*, job: Job) -> tuple[DownloadedMedia, StagedMedia | None]:
@@ -1481,6 +1562,8 @@ def serialize_job(job: Job) -> dict[str, Any]:
         "finished_at": isoformat_or_none(job.finished_at),
         "task_ref": job.task_ref or None,
     }
+    if job.profile:
+        payload["profile"] = job.profile
     if job.state == Job.State.SUCCEEDED:
         artifacts = {
             artifact.format: artifact_proxy_path(job=job, artifact=artifact)

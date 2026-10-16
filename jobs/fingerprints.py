@@ -24,6 +24,7 @@ def job_request_fingerprint_from_fields(
     input_data: dict[str, Any],
     output_formats: list[str],
     diarization: dict[str, Any] | None,
+    profile: str = "",
 ) -> str:
     if job_type != TRANSCRIBE_JOB_TYPE:
         # Synthesis keeps the original looser task_ref behaviour: any non-failed job of the same
@@ -39,6 +40,9 @@ def job_request_fingerprint_from_fields(
             "output_formats": sorted(output_formats),
             "diarization": diarization if diarization is not None else {"enabled": False},
         }
+        if profile:
+            # Only profile jobs carry the key, so fingerprints of existing jobs stay unchanged.
+            material["profile"] = profile
     encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -58,6 +62,7 @@ def stored_job_request_fingerprint(
     language: str,
     input_data: dict[str, Any],
     output_data: dict[str, Any],
+    profile: str = "",
 ) -> str:
     return job_request_fingerprint_from_fields(
         job_type=job_type,
@@ -67,4 +72,5 @@ def stored_job_request_fingerprint(
         input_data=input_data or {},
         output_formats=list((output_data or {}).get("formats", [])),
         diarization=(output_data or {}).get("diarization", {"enabled": False}),
+        profile=profile,
     )

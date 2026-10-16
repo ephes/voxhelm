@@ -329,6 +329,7 @@ class ParakeetBackend:
         overlap_seconds: int,
         max_sentence_seconds: float | None,
         timeout_seconds: int,
+        local_attention: bool = True,
     ) -> None:
         self.binary_path = binary_path
         self.model_dir = model_dir
@@ -337,8 +338,14 @@ class ParakeetBackend:
         self.overlap_seconds = overlap_seconds
         self.max_sentence_seconds = max_sentence_seconds
         self.timeout_seconds = timeout_seconds
+        self.local_attention = local_attention
 
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        payload = self.run(audio_path, params)
+        return normalize_parakeet_payload(payload, model_name=self.model_name)
+
+    def run(self, audio_path: Path, params: TranscribeParams) -> dict[str, Any]:
+        """Run the CLI once and return its JSON payload (sentences with tokens)."""
         if not parakeet_supports_language(params.language):
             raise BackendUnavailableError(
                 f"Parakeet does not support language '{params.language}'."
@@ -369,7 +376,7 @@ class ParakeetBackend:
                 str(self.chunk_seconds),
                 "--overlap-duration",
                 str(self.overlap_seconds),
-                "--local-attention",
+                "--local-attention" if self.local_attention else "--full-attention",
             ]
             if self.max_sentence_seconds:
                 args.extend(["--max-duration", f"{self.max_sentence_seconds:g}"])
@@ -407,7 +414,9 @@ class ParakeetBackend:
             self.model_name,
             monotonic() - started,
         )
-        return normalize_parakeet_payload(payload, model_name=self.model_name)
+        if not isinstance(payload, dict):
+            raise RuntimeError("Parakeet transcription produced an unexpected payload.")
+        return payload
 
 
 def parakeet_child_env() -> dict[str, str]:

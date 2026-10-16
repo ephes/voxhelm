@@ -22,7 +22,14 @@ from django.utils import timezone
 
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store_for_identity
 from jobs.media import validate_allowed_media_url
-from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia, Worker
+from jobs.models import (
+    Job,
+    JobArtifact,
+    PendingArtifactDeletion,
+    RemoteAttemptPrefix,
+    StagedMedia,
+    Worker,
+)
 from jobs.retention import (
     PRUNABLE_ARTIFACT_KINDS,
     drain_pending_artifact_deletions,
@@ -45,6 +52,12 @@ from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     KNOWN_SPEAKER_STRATEGY,
     KnownSpeakerConfig,
+)
+from transcriptions.profiles import (
+    WORDS_ARTIFACT_FORMAT,
+    WORDS_ARTIFACT_NAME,
+    WORDS_CONTENT_TYPE,
+    get_transcription_profile,
 )
 from transcriptions.service import (
     known_speaker_backend_chain,
@@ -98,6 +111,25 @@ REMOTE_RESULT_METADATA_NUMBER_KEYS: set[str] = {
     "processing_seconds",
 }
 REMOTE_METADATA_STRING_MAX_LENGTH = 256
+PROFILE_IDENTITY_STRING_KEYS: set[str] = {
+    "profile",
+    "backend",
+    "model",
+    "model_repo",
+    "model_revision",
+    "model_sha256",
+    "cli",
+    "cli_version",
+    "mlx_version",
+}
+PROFILE_SETTINGS_KEYS: set[str] = {
+    "chunk_seconds",
+    "overlap_seconds",
+    "local_attention",
+    "max_sentence_seconds",
+    "decoding",
+    "precision",
+}
 KNOWN_SPEAKER_SUMMARY_STRING_KEYS: set[str] = {
     "strategy",
     "embedding_model",
@@ -327,6 +359,15 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
                     )
                 )
                 if updated == 1:
+                    if candidate.profile:
+                        # Durable with the lease and before any upload: objects this
+                        # attempt stores stay findable even if no completion lists them.
+                        RemoteAttemptPrefix.objects.create(
+                            job_id=candidate.id,
+                            attempt=next_attempt,
+                            prefix=artifact_prefix,
+                            storage_identity=artifact_store_identity,
+                        )
                     job = Job.objects.get(id=candidate.id)
                     return RemoteClaim(job=job, lease_token=lease_token, capabilities=capabilities)
     return None
@@ -596,7 +637,10 @@ def serialize_claim(claim: RemoteClaim) -> dict[str, Any]:
             "artifact_store": job.leased_artifact_store,
         }
     }
-    if fallbacks:
+    if job.profile:
+        # The worker runs the profile's fixed settings; a profile never has fallbacks.
+        payload["job"]["profile"] = job.profile
+    elif fallbacks:
         # Tried in order by the worker when the claimed backend turns out to be
         # unavailable there; older workers ignore the field.
         payload["job"]["fallbacks"] = [
@@ -816,6 +860,10 @@ def mark_remote_job_failed_before_claim(*, job: Job, message: str) -> None:
 def worker_can_run_job(job: Job, capabilities: dict[str, Any]) -> bool:
     if Job.JobType.TRANSCRIBE not in string_set(capabilities.get("job_types")):
         return False
+    # A profile job only goes to a worker that advertises the profile (it re-checks the
+    # runtime on every poll); otherwise it waits, it never runs another engine.
+    if job.profile and job.profile not in string_set(capabilities.get("profiles")):
+        return False
     if not worker_supports_requested_stt(job, capabilities):
         return False
     if not worker_supports_requested_output_formats(job, capabilities):
@@ -861,7 +909,18 @@ def remote_stt_targets_for_worker(
 
 
 def remote_stt_targets(job: Job) -> list[ResolvedSttTarget]:
-    """Ordered STT targets for a job: the known-speaker chain, or the one target."""
+    """Ordered STT targets for a job: the profile's engine, the known-speaker chain, or
+    the one target."""
+    if job.profile:
+        profile = get_transcription_profile(job.profile)
+        return [
+            ResolvedSttTarget(
+                backend=profile.backend,
+                model=resolve_model_name_for_backend(
+                    request_model="auto", backend_name=profile.backend
+                ),
+            )
+        ]
     requested_model = job.model or "auto"
     chain = (
         known_speaker_backend_chain(requested_model, language=job.language or None)
@@ -946,6 +1005,11 @@ def validate_remote_artifacts(
     if extra_formats:
         raise ApiError(f"Unexpected transcript artifact format(s): {', '.join(extra_formats)}.")
 
+    has_words = any(artifact["kind"] == JobArtifact.Kind.WORDS for artifact in normalized)
+    if job.profile and not has_words:
+        raise ApiError(f"Profile jobs must include {WORDS_ARTIFACT_NAME}.")
+    if has_words and not job.profile:
+        raise ApiError("Words artifacts are only allowed for profile jobs.")
     has_speaker_sidecar = any(
         artifact["kind"] == JobArtifact.Kind.TRANSCRIPT_SPEAKERS for artifact in normalized
     )
@@ -977,6 +1041,9 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
     elif kind == JobArtifact.Kind.TRANSCRIPT_SPEAKERS:
         if name != "transcript.speakers.json" or format_name != "speakers":
             raise ApiError("Speaker sidecar artifact must be transcript.speakers.json.")
+    elif kind == JobArtifact.Kind.WORDS:
+        if name != WORDS_ARTIFACT_NAME or format_name != WORDS_ARTIFACT_FORMAT:
+            raise ApiError(f"Words artifact must be {WORDS_ARTIFACT_NAME}.")
     elif expected is not None:
         raise ApiError(f"Artifact format '{format_name}' does not match kind '{kind}'.")
     elif kind not in REMOTE_SIDE_ARTIFACT_KINDS:
@@ -1008,6 +1075,8 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
         raise ApiError("Requested transcript artifacts must be exposed.")
     if kind == JobArtifact.Kind.TRANSCRIPT_SPEAKERS and not exposed:
         raise ApiError("Speaker sidecar artifact must be exposed to the producer.")
+    if kind == JobArtifact.Kind.WORDS and not exposed:
+        raise ApiError("Words artifact must be exposed to the producer.")
     return {
         "name": name,
         "kind": kind,
@@ -1033,6 +1102,8 @@ def validate_remote_artifact_content_type(
         expected_content_type = TRANSCRIPT_CONTENT_TYPES_BY_FORMAT[format_name]
     elif kind == JobArtifact.Kind.TRANSCRIPT_SPEAKERS:
         expected_content_type = SPEAKER_SIDECAR_CONTENT_TYPE
+    elif kind == JobArtifact.Kind.WORDS:
+        expected_content_type = WORDS_CONTENT_TYPE
 
     if expected_content_type is not None and content_type != expected_content_type:
         raise ApiError(f"Artifact {name} content_type must be {expected_content_type}.")
@@ -1091,10 +1162,38 @@ def normalize_remote_result_metadata(
                 job=job,
             )
         metadata["diarization"] = sanitized_diarization
+    if job.profile:
+        metadata["profile"] = sanitize_profile_identity(result_metadata.get("profile"), job=job)
     metadata["worker_id"] = worker_id
     metadata["attempt"] = job.attempt_count
     metadata["execution_mode"] = Job.ExecutionMode.REMOTE_PULL
     return metadata
+
+
+def sanitize_profile_identity(value: object, *, job: Job) -> dict[str, Any]:
+    """The worker's recorded engine identity for a profile job, reduced to known fields."""
+    if not isinstance(value, dict) or value.get("profile") != job.profile:
+        raise ApiError("Profile jobs must include result_metadata.profile for their profile.")
+    identity: dict[str, Any] = {}
+    for key in sorted(PROFILE_IDENTITY_STRING_KEYS):
+        raw = value.get(key)
+        sanitized = safe_worker_metadata_string(raw) if raw else ""
+        identity[key] = sanitized or ""
+    raw_settings = value.get("settings")
+    if not isinstance(raw_settings, dict):
+        raise ApiError("result_metadata.profile.settings must be an object.")
+    settings_record: dict[str, Any] = {}
+    for key in sorted(PROFILE_SETTINGS_KEYS):
+        raw = raw_settings.get(key)
+        if isinstance(raw, bool) or raw is None:
+            settings_record[key] = raw
+        elif isinstance(raw, (int, float)):
+            settings_record[key] = safe_worker_metadata_number(raw)
+        else:
+            settings_record[key] = safe_worker_metadata_string(raw)
+    identity["settings"] = settings_record
+    identity["language_hint"] = job.language or None
+    return identity
 
 
 def clear_source_metadata(metadata: dict[str, Any]) -> None:

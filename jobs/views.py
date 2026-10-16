@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from jobs.models import Job, JobArtifact
 from jobs.remote_workers import (
@@ -19,10 +20,13 @@ from jobs.remote_workers import (
     serialize_claim,
     validate_worker_payload_identity,
 )
+from jobs.retention import JobNotDeletable, RefusedDeletion, delete_job_for_producer
 from jobs.services import create_job_from_payload, serialize_job
 from jobs.staging import serialize_staged_media, stage_uploaded_audio
 from transcriptions.errors import ApiError
 from transcriptions.views import openai_error_response, require_bearer_token
+
+LOGGER = logging.getLogger(__name__)
 
 
 @csrf_exempt
@@ -157,14 +161,51 @@ def parse_json_object_request(request: HttpRequest, context: str) -> dict[str, o
     return payload
 
 
-@require_GET
-def job_detail(request: HttpRequest, job_id: UUID) -> JsonResponse:
+@csrf_exempt
+@require_http_methods(["GET", "DELETE"])
+def job_detail(request: HttpRequest, job_id: UUID) -> JsonResponse | HttpResponse:
     try:
         producer = require_bearer_token(request)
+        if request.method == "DELETE":
+            return delete_job(producer=producer, job_id=job_id)
         job = get_object_or_404(Job, id=job_id, producer=producer)
         return JsonResponse(serialize_job(job))
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
+
+
+def delete_job(*, producer: str, job_id: UUID) -> JsonResponse | HttpResponse:
+    """``DELETE /v1/jobs/{id}``: the producer removes a finished profile job.
+
+    204 once its artifacts, their objects and the row are gone; 404 for a job that does
+    not exist or belongs to another producer (also on a repeated delete); 409 for a job
+    that is not a profile job, has not finished, or holds an artifact outside the
+    deletion allowlist (nothing deleted); 503 when an object could not be deleted (what
+    was deleted stays deleted, the rest is kept for a retry).
+    """
+    try:
+        delete_job_for_producer(job_id=job_id, producer=producer)
+    except Job.DoesNotExist:
+        return openai_error_response(
+            "Job not found.", status=404, error_type="invalid_request_error"
+        )
+    except JobNotDeletable as exc:
+        return openai_error_response(str(exc), status=409, error_type="conflict_error")
+    except RefusedDeletion:
+        return openai_error_response(
+            "The job holds an artifact that is not a voxhelm-generated job object; "
+            "nothing was deleted.",
+            status=409,
+            error_type="conflict_error",
+        )
+    except Exception:
+        LOGGER.exception("Could not delete job %s of producer %s.", job_id, producer)
+        return openai_error_response(
+            "The job could not be deleted completely; retry the request.",
+            status=503,
+            error_type="server_error",
+        )
+    return HttpResponse(status=204)
 
 
 @require_GET

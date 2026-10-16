@@ -176,6 +176,8 @@
 
 **Implementation note (2026-10-06, job metadata):** `manage.py prune_job_artifacts` now also deletes the `Job` row of terminal jobs that finished more than `VOXHELM_JOB_METADATA_RETENTION_SECONDS` ago (default 90 days, `0` disables), after the artifact pass and only once the job owns no artifact row, queued object deletion or claimed staged upload. Delete, not archive. Jobs that still own indefinite transcript or speech artifacts keep their row, because those artifacts are served through the job; an archive/sweep policy for them remains open.
 
+**Implementation note (2026-10-16, transcription profiles):** Profile jobs (D-26, `ad-analysis-v1`) are the first exception to "transcripts indefinite": their producer deletes them with `DELETE /v1/jobs/{id}` (artifacts, objects, queued deletions, a claimed staged upload, then the row; same allowlist and reference checks as the prune), and `prune_job_artifacts` applies the profile's 7-day backstop, deleting every artifact of any kind and then the row of a terminal profile job that finished more than 7 days ago, also with job metadata retention disabled. The row goes too because it carries the transcript text. Both paths also delete what the job's remote attempts stored below their artifact prefix (recorded at claim time as `RemoteAttemptPrefix`, listed in the store, so objects of a rejected or failed completion are found), a staged upload the job still holds (same allowlist, reference check and write lock as artifacts), and the job's `DBTaskResult`; a profile task returns only its job id and profile.
+
 ---
 
 ## D-10: What is the service process topology?
@@ -617,6 +619,33 @@ capacity preservation takes precedence over automatic age-based recovery.
 | D. Leave the workers unscheduled | At most three GPU users on `studio` at once (Wyoming, one sync request, one worker job); each is slowed proportionally, none is blocked; 128 GiB leaves ample memory |
 
 **Accepted decision:** Option D. Revisit if a second worker process per host, a concurrent local LLM job, or measured interactive latency during a bulk run makes the unscheduled overlap a problem.
+
+**Blocks implementation:** No.
+
+---
+
+## D-26: How does a producer get reproducible, engine-pinned transcripts it can delete?
+
+**Status:** Implemented 2026-10-16 (not yet deployed). Slice 1 of the podcast server-side ad analysis (`~/projects/podcast/docs/player/specs/server-ad-analysis-design.md`); slice description: `specs/2026-10-16_ad_analysis_profile.md`.
+
+**Context:** The podcast ad detector was tuned on Parakeet words produced with 30 s chunks, 5 s overlap and full attention. Voxhelm routes Parakeet only for known-speaker jobs, with the deployment's 600 s / 30 s / local attention / `--max-duration 30` settings and a whisper.cpp fallback, and `verbose_json` drops word timings. A fallback or a settings change would silently change the detector's input. Transcript artifacts are kept forever, while the podcast backend's retention promises that voxhelm keeps no copy for long.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Let producers pass engine settings per job | Flexible, but every producer must know Parakeet's flags and results cannot be cached by name |
+| B. Named, versioned profiles owned by Voxhelm | One name pins engine, settings and output shape; a change is a new name; adds a small registry |
+| C. Reuse the known-speaker routing with a flag | No new concept, but inherits the fallback chain and the deployment's chunk settings |
+
+**Accepted decision:** Option B.
+
+- `POST /v1/jobs` accepts `profile` (only `ad-analysis-v1` today) and `language_hint`; such a job takes no `language`, no concrete `model` and no diarization, and the profile is part of the `task_ref` fingerprint (only when set, so existing fingerprints are unchanged).
+- A profile never falls back: local jobs fail when the CLI or model is missing; remote workers advertise `capabilities.profiles` from the same per-heartbeat check as Parakeet, and only such workers claim profile jobs, so they wait otherwise.
+- The profile writes a `words` artifact (`words.json`) with per-word times and mean token confidence built from all tokens exactly as the research runner did, and records engine identity (model commit and checksum from the deployment marker, `parakeet-mlx` and `mlx` versions, settings, language hint) in the job result and the artifact.
+- Retention: producer-scoped `DELETE /v1/jobs/{id}` for finished profile jobs and a profile-owned 7-day backstop in `prune_job_artifacts` (D-09 note of 2026-10-16).
+
+**Not decided here:** the drift check and turbo window endpoint (slices 2-3 of the podcast spec, which will extend the profile's identity and artifact), scheduling `prune_job_artifacts` (slice 16), profiles for other producers.
 
 **Blocks implementation:** No.
 

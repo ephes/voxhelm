@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -32,6 +34,8 @@ class ArtifactStore(Protocol):
     def stat(self, *, key: str) -> StoredArtifact: ...
 
     def delete(self, *, key: str) -> None: ...
+
+    def list_keys(self, *, prefix: str) -> list[str]: ...
 
 
 class FilesystemArtifactStore:
@@ -81,6 +85,36 @@ class FilesystemArtifactStore:
     def delete(self, *, key: str) -> None:
         target = self.root / key
         target.unlink(missing_ok=True)
+
+    def list_keys(self, *, prefix: str) -> list[str]:
+        """Keys of every entry below ``prefix`` that is not a directory, symlinks included."""
+        base = prefix.strip("/")
+        directory = self.root / base
+        # Path.is_dir() reports an unsearchable parent as "missing"; only a directory
+        # that really does not exist may list as empty.
+        try:
+            if not stat.S_ISDIR(directory.stat().st_mode):
+                return []
+        except FileNotFoundError, NotADirectoryError:
+            return []
+        keys: list[str] = []
+
+        def raise_listing_error(error: OSError) -> None:
+            # os.walk skips unreadable directories by default; a directory that only
+            # looks empty would let cleanup drop the records of objects still in it.
+            raise error
+
+        for current, dirnames, filenames in os.walk(
+            directory, followlinks=False, onerror=raise_listing_error
+        ):
+            relative = Path(current).relative_to(directory)
+            names = [
+                *filenames,
+                *(name for name in dirnames if (Path(current) / name).is_symlink()),
+            ]
+            for name in names:
+                keys.append("/".join(part for part in (base, *relative.parts, name) if part))
+        return sorted(keys)
 
 
 class S3ArtifactStore:
@@ -150,6 +184,13 @@ class S3ArtifactStore:
 
     def delete(self, *, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def list_keys(self, *, prefix: str) -> list[str]:
+        keys: list[str] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            keys.extend(str(item["Key"]) for item in page.get("Contents", []))
+        return sorted(keys)
 
 
 @lru_cache(maxsize=1)

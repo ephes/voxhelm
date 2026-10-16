@@ -68,6 +68,9 @@ class Job(models.Model):
     backend = models.CharField(max_length=128, blank=True)
     model = models.CharField(max_length=255, blank=True)
     language = models.CharField(max_length=32, blank=True)
+    # Named transcription profile (``transcriptions.profiles``), e.g. ``ad-analysis-v1``.
+    # Empty for ordinary jobs.
+    profile = models.CharField(max_length=64, blank=True, default="")
     input_data = models.JSONField()
     output_data = models.JSONField(default=dict)
     context_data = models.JSONField(default=dict)
@@ -99,6 +102,7 @@ class Job(models.Model):
             models.Index(fields=["execution_mode", "state", "priority", "created_at"]),
             models.Index(fields=["assigned_worker_id", "state"]),
             models.Index(fields=["lease_expires_at"]),
+            models.Index(fields=["profile", "state"]),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -138,6 +142,7 @@ class JobArtifact(models.Model):
         TRANSCRIPT_DOTE = "transcript_dote", "Transcript DOTe"
         TRANSCRIPT_PODLOVE = "transcript_podlove", "Transcript Podlove"
         TRANSCRIPT_SPEAKERS = "transcript_speakers", "Transcript speaker suggestions"
+        WORDS = "words", "Profile words"
         SPEECH_WAV = "speech_wav", "Speech WAV"
         SPEECH_MP3 = "speech_mp3", "Speech MP3"
         SPEECH_OGG = "speech_ogg", "Speech OGG"
@@ -201,6 +206,25 @@ class PendingArtifactDeletion(models.Model):
     kind = models.CharField(max_length=64, choices=JobArtifact.Kind.choices)
     storage_backend = models.CharField(max_length=32)
     storage_key = models.CharField(max_length=512)
+    storage_identity = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+
+class RemoteAttemptPrefix(models.Model):
+    """The artifact prefix one remote attempt of a profile job was leased (D-26).
+
+    Written in the claim transaction, before the worker uploads anything, so objects an
+    attempt stored without a completion registering them (rejected, failed, retried or
+    abandoned) are still found and deleted by ``DELETE /v1/jobs/{id}`` and the profile
+    backstop of ``manage.py prune_job_artifacts``. Removed once its prefix is empty.
+    """
+
+    job_id = models.UUIDField(db_index=True)
+    attempt = models.PositiveIntegerField()
+    prefix = models.CharField(max_length=512)
     storage_identity = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
 

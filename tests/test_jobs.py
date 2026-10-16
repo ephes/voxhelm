@@ -2165,9 +2165,13 @@ def test_fingerprint_migration_backfills_and_tolerates_legacy_duplicates():
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
     executor.migrate([("jobs", "0008_job_request_fingerprint")])
+    # The historical model: later migrations add columns the current model would select.
+    MigratedJob = executor.loader.project_state(
+        [("jobs", "0008_job_request_fingerprint")]
+    ).apps.get_model("jobs", "Job")
 
     try:
-        jobs = {job.id: job for job in Job.objects.all()}
+        jobs = {job.id: job for job in MigratedJob.objects.all()}
         expected = stored_fingerprint(jobs[newer_duplicate.id])
         assert jobs[newer_duplicate.id].request_fingerprint == expected
         assert jobs[older_duplicate.id].request_fingerprint == ""

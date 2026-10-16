@@ -10,10 +10,13 @@ class Command(BaseCommand):
     help = (
         "Delete expired intermediate job artifacts (D-09): non-exposed source media of "
         "finished jobs older than VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS and extracted "
-        "audio of finished jobs. Transcript and speech artifacts are never touched. Then "
-        "delete job rows of terminal jobs finished more than "
-        "VOXHELM_JOB_METADATA_RETENTION_SECONDS ago that no longer own any artifact, "
-        "queued deletion or claimed staged upload."
+        "audio of finished jobs. Transcript and speech artifacts are never touched, except "
+        "that jobs of a transcription profile with a backstop (ad-analysis-v1: 7 days) lose "
+        "every artifact, the objects of remote attempts and a staged upload they still hold once "
+        "they finished longer ago than it. Then delete job rows of "
+        "terminal jobs finished more than VOXHELM_JOB_METADATA_RETENTION_SECONDS ago (or "
+        "past their profile's backstop) that no longer own any artifact, queued deletion "
+        "or claimed staged upload."
     )
 
     def add_arguments(self, parser) -> None:
@@ -54,6 +57,34 @@ class Command(BaseCommand):
                 + (f", {result.pending_failed} still pending" if result.pending_failed else "")
                 + "."
             )
+        if result.attempt_prefixes_deleted or result.attempt_prefixes_failed:
+            self.stdout.write(
+                f"{verb} {result.attempt_prefixes_deleted} remote attempt prefix(es) of "
+                "profile jobs past their backstop"
+                + (
+                    f", {result.attempt_prefixes_failed} still pending"
+                    if result.attempt_prefixes_failed
+                    else ""
+                )
+                + "."
+            )
+        if result.attempt_prefixes_refused:
+            self.stdout.write(
+                f"Refused {result.attempt_prefixes_refused} remote attempt prefix(es): they "
+                "hold objects outside the job's generated layout; left in place."
+            )
+        if result.staged_deleted or result.staged_failed:
+            self.stdout.write(
+                f"{verb} {result.staged_deleted} staged upload(s) of profile jobs past their "
+                "backstop"
+                + (f", {result.staged_failed} still pending" if result.staged_failed else "")
+                + "."
+            )
+        if result.staged_refused:
+            self.stdout.write(
+                f"Refused {result.staged_refused} staged upload(s): not voxhelm staged keys; "
+                "left in place."
+            )
         for job in result.jobs_deleted:
             self.stdout.write(
                 f"{verb} {job.state} {job.job_type} job {job.id} of producer {job.producer} "
@@ -65,8 +96,14 @@ class Command(BaseCommand):
             + (f"{retention}s" if retention else "disabled")
             + ")."
         )
-        if result.failed or result.pending_failed:
+        failed = (
+            len(result.failed)
+            + result.pending_failed
+            + result.attempt_prefixes_failed
+            + result.staged_failed
+        )
+        if failed:
             raise CommandError(
-                f"Could not delete {len(result.failed) + result.pending_failed} object(s); "
+                f"Could not delete {failed} object(s) or attempt prefix(es); "
                 "they stay recorded for the next run."
             )
