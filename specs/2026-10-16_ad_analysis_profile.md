@@ -31,6 +31,8 @@ Out of scope (later slices of the podcast spec): the whisper turbo window
 endpoint and the German drift check (they will add per-window records to the
 words artifact and the retry model hash to the identity, as a new profile
 version if the words change), scheduling `prune_job_artifacts` (slice 16).
+The window transcription (slice 2) is now in
+`2026-10-16_window_transcription.md` (D-27); slice 3 calls it from the profile.
 
 ## Design
 

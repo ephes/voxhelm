@@ -169,6 +169,12 @@ export VOXHELM_PARAKEET_CHUNK_SECONDS="600"
 export VOXHELM_PARAKEET_OVERLAP_SECONDS="30"
 export VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS=""  # unset: no --max-duration
 export VOXHELM_PARAKEET_TIMEOUT_SECONDS="1800"
+# Window transcription for the ad-analysis drift check (D-27): whisper
+# large-v3-turbo through VOXHELM_WHISPERCPP_BIN. A file name in
+# VOXHELM_MODEL_CACHE_DIR or a path; the file must have the pinned SHA-256
+# (transcriptions/windows.py), any other file leaves window transcription unavailable.
+export VOXHELM_WINDOW_MODEL="ggml-large-v3-turbo.bin"
+export VOXHELM_WINDOW_TIMEOUT_SECONDS="120"
 # "parakeet" routes known-speaker jobs with the re-cut to Parakeet first (see
 # the known-speaker section); empty keeps them on the configured chain.
 export VOXHELM_KNOWN_SPEAKER_STT_BACKEND=""
@@ -521,6 +527,24 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
   `ad-analysis-v1` job 7 days after it finished (see the retention section).
 
 See `specs/2026-10-16_ad_analysis_profile.md`.
+
+### Window transcription (whisper turbo)
+
+`transcriptions.windows.transcribe_window(audio_path, t)` re-transcribes the
+30 s window `[t, t + 30)` of a local source file with whisper large-v3-turbo,
+for the profile's German drift check (slice 3 of the podcast spec; not called
+by a profile yet, and not an HTTP route, D-27). It decodes the clip
+`[max(0, t - 1), +32 s)` with ffmpeg to 16 kHz mono, runs `whisper-cli` with
+the language detected on the clip (`-l auto`, greedy best-of 2, temperature 0
+with 0.2 increments, 4 threads) and returns the words starting in the window
+(`[{"w", "s", "e"}]`, file time, 3 decimals), the detected language and its
+probability, and the identity (whisper.cpp version, model name and SHA-256,
+settings). The model is `VOXHELM_WINDOW_MODEL`; a file whose SHA-256 is not
+the pinned `1fc70f77...bc69` is refused (`BackendUnavailableError`), and no
+other model is ever used. The clip lives in a temporary directory of the call;
+nothing is stored. `evals/window_retry_compare.py` compares it with the
+research retries (identical on 40 windows, see
+`specs/2026-10-16_window_transcription.md`).
 
 ## Batch Speaker Diarization
 

@@ -408,6 +408,13 @@ if VOXHELM_KNOWN_SPEAKER_STT_BACKEND not in {"", "parakeet"}:
 VOXHELM_PARAKEET_TIMEOUT_SECONDS = validate_positive_int(
     "VOXHELM_PARAKEET_TIMEOUT_SECONDS", int(os.getenv("VOXHELM_PARAKEET_TIMEOUT_SECONDS", "1800"))
 )
+# Window transcription (D-27): whisper large-v3-turbo on one 32 s clip, run through
+# VOXHELM_WHISPERCPP_BIN. The file (a name in VOXHELM_MODEL_CACHE_DIR or a path) must
+# have the pinned SHA-256 (transcriptions/windows.py); any other file is refused.
+VOXHELM_WINDOW_MODEL = os.getenv("VOXHELM_WINDOW_MODEL", "ggml-large-v3-turbo.bin").strip()
+VOXHELM_WINDOW_TIMEOUT_SECONDS = validate_positive_int(
+    "VOXHELM_WINDOW_TIMEOUT_SECONDS", int(os.getenv("VOXHELM_WINDOW_TIMEOUT_SECONDS", "120"))
+)
 # Post-decode transcript sanitizer. A deterministic backstop that runs after
 # every backend transcription (before format rendering) to collapse repeated-
 # sentence loops and drop subtitle-credit / punctuation-only hallucinations the

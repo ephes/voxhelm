@@ -645,7 +645,34 @@ capacity preservation takes precedence over automatic age-based recovery.
 - The profile writes a `words` artifact (`words.json`) with per-word times and mean token confidence built from all tokens exactly as the research runner did, and records engine identity (model commit and checksum from the deployment marker, `parakeet-mlx` and `mlx` versions, settings, language hint) in the job result and the artifact.
 - Retention: producer-scoped `DELETE /v1/jobs/{id}` for finished profile jobs and a profile-owned 7-day backstop in `prune_job_artifacts` (D-09 note of 2026-10-16).
 
-**Not decided here:** the drift check and turbo window endpoint (slices 2-3 of the podcast spec, which will extend the profile's identity and artifact), scheduling `prune_job_artifacts` (slice 16), profiles for other producers.
+**Not decided here:** the drift check and turbo window endpoint (slices 2-3 of the podcast spec, which will extend the profile's identity and artifact), scheduling `prune_job_artifacts` (slice 16), profiles for other producers. (The window endpoint: D-27.)
+
+**Blocks implementation:** No.
+
+---
+
+## D-27: How does the ad-analysis profile re-transcribe one window with whisper turbo?
+
+**Status:** Implemented 2026-10-16 (not yet deployed, not yet called by a profile). Slice 2 of the podcast server-side ad analysis (`~/projects/podcast/docs/player/specs/server-ad-analysis-design.md`, "window endpoint"); slice description: `specs/2026-10-16_window_transcription.md`.
+
+**Context:** The German drift check (slice 3) re-transcribes flagged 30 s windows with whisper large-v3-turbo, language detected on the clip, and needs the research runner's words, detected language and probability. The podcast spec calls this a "window endpoint" and requires that nothing (clip, words, job row) remains after a response. Its only caller is the `ad-analysis-v1` profile, which runs where the episode audio is: the Django Tasks worker or a remote worker. Delve never calls it.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. In-process function `transcribe_window(audio_path, t)` used by the profile | Runs on the already materialised source on any host that runs the profile; no request, job or artifact exists, so nothing can persist; no new producer surface |
+| B. Producer-authenticated synchronous HTTP route over a staged upload or job source | Callable by producers, but no producer needs it; a remote worker would send its audio back to the control plane per window, or the control plane would keep a source copy it otherwise deletes; adds auth, limits, admission and retention duties |
+| C. A batch job type per window | Reuses job plumbing, but creates job rows and artifacts per window that then have to be deleted, the opposite of the retention requirement |
+
+**Accepted decision:** Option A; the spec's "window endpoint" is this function.
+
+- whisper.cpp `whisper-cli` (the binary voxhelm already runs) with the decoding the research `whisper-server` used: `-l auto -t 4 -p 1 -bs 1 -bo 2 -tp 0.00 -tpi 0.20 -ml 60 -ojf`; clip `[max(0, t - 1), +32 s)` decoded by ffmpeg exactly as `retry.py`; words assembled from tokens and kept for starts in `[t, t + 30)` as `retry.py`; the probability is read from whisper.cpp's log line and cross-checked with the JSON result's language.
+- Pinned model: the ggml file named by `VOXHELM_WINDOW_MODEL` must have SHA-256 `1fc70f77...bc69` (in code); otherwise `BackendUnavailableError`, never another model or backend. Identity: engine, CLI version, model name and hash, settings.
+- No residue: temporary directory per call, no ORM access, error messages without transcript text. Verified identical to the research output on 40 dev windows (3,342 words).
+- A producer route can later wrap the same function if a producer needs windows; that is a new decision.
+
+**Not decided here:** which windows are retried, the p >= 0.9 acceptance, the splice and per-window records (slice 3), the profile version that adds the retry model hash, worker capability for the turbo model.
 
 **Blocks implementation:** No.
 
