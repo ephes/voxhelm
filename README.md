@@ -802,6 +802,10 @@ Capacity is a small, bounded set of slots (decision D-24):
 - `VOXHELM_LANE_SCHEDULER_ENABLED=false` disables all gating. Setting
   `0` interactive and `1` non-interactive slots restores the original
   single-slot behaviour without a code change.
+- Remote pull workers (`voxhelm-remote-worker`, including the one on `studio`)
+  run with the scheduler disabled and do not take slots (decision D-25): each
+  processes one job at a time, and sharing the single non-interactive slot would
+  make sync requests wait behind whole podcast jobs.
 
 Only backends that run outside the calling process may overlap: `whisper-cli`
 subprocesses and the WhisperKit sidecar. In-process backends keep a lock per

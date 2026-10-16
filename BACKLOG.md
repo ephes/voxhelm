@@ -58,9 +58,9 @@ protection, and the production proof remain open.
   - [ ] validate against `python-podcast/docs/known-speaker-runbook.rst` and `evals/known_speaker_results.md`.
 - [x] Keep claim eligibility bounded by advertised capabilities: `job_type=transcribe`, batch only, and
   known-speaker jobs only when the worker/hybrid path advertises the required pyannote/wespeaker/reference support.
-- [ ] Preserve the C13 lane scheduler for any future local `studio` pull worker; `atlas.local` is outside that
-  host-local gate. Since D-24 the scheduler has bounded slots (one reserved interactive slot plus one
-  non-interactive slot on `studio`); a local pull worker would take non-interactive slots like the sync endpoint.
+- [x] Lane scheduler and pull workers: decided in D-25 that the remote-pull workers (`atlas` and the one on
+  `studio`) stay unscheduled; their admission calls are no-ops because the worker env leaves the scheduler
+  disabled. A future local Django Tasks STT path on `studio` would still go through the scheduler.
 - [ ] Prove the goal with a real production python-podcast Generate Transcript run that is claimed by `atlas.local`,
   populates the django-cast `Transcript.speakers` sidecar, clears the known-speaker quality bar, and leaves artifacts
   retrievable through normal Voxhelm job artifact URLs.
@@ -86,10 +86,8 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [x] ops-library `voxhelm_deploy` vars and ops-control pins (`1 + 1`).
 - [x] Deploy to `studio` and record the live measurement (interactive latency with and without a concurrent
   long job, peak memory, long job completion, disconnect check) in the spec (2026-09-06).
-- [ ] Follow-up (out of this slice): the `voxhelm-remote-worker` process that runs on `studio` itself calls the
-  STT backend directly (`transcribe_claim_audio`) and does not take a scheduler slot, so a studio-claimed
-  podcast job shares the GPU with Wyoming without being counted. Decide whether that worker should acquire a
-  non-interactive slot (see the "Preserve the C13 lane scheduler" item above).
+- [x] Follow-up: should the `voxhelm-remote-worker` process on `studio` take a non-interactive slot? No (D-25):
+  sharing the single slot would make Daybook voice memos wait behind whole podcast jobs during a bulk run.
 
 ## Wyoming input limits
 

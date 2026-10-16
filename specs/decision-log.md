@@ -601,6 +601,27 @@ capacity preservation takes precedence over automatic age-based recovery.
 
 ---
 
+## D-25: Should the remote transcription workers take lane-scheduler slots?
+
+**Status:** Accepted 2026-10-16. No code or deployment change: the worker already wraps its STT and embedding steps in `admit_local_inference(LANE_NON_INTERACTIVE)`, and the worker env (ops-library `voxhelm_remote_worker_deploy`) sets no `VOXHELM_LANE_SCHEDULER_*`, so `VOXHELM_LANE_SCHEDULER_ENABLED` keeps its default `false` there and admission is a no-op. This decision keeps it that way. It narrows the "any local `studio` pull worker must keep using this scheduler" notes in D-23 and D-24 for the remote-pull worker that already runs on `studio`.
+
+**Context:** Two `voxhelm-remote-worker` processes claim batch transcription jobs: `atlas` and `studio`. Each processes one job at a time. On `atlas` nothing else runs Voxhelm inference. On `studio` the control plane (uvicorn and the Wyoming sidecar) runs as `root` with the scheduler enabled at `1 + 1` slots (D-24) in `/opt/apps/voxhelm/site/var/lane-scheduler`, and the worker runs as the service user. The one non-interactive slot serves the sync endpoint, which Daybook's voice-memo long lane depends on; ops-control ties that lane to the `1 + 1` pins. A podcast job on a worker takes 2 to 7 minutes of Parakeet (measured on the 2026-10-15 pilot re-runs), longer with whisper.cpp, and the bulk run covers about 190 episodes.
+
+**Options:**
+
+| Option | Tradeoff |
+|--------|----------|
+| A. Enable the scheduler on `atlas` only | Changes nothing: one worker process, one job at a time, no other consumer to coordinate with |
+| B. Share the control plane's scheduler on `studio` | Counts the worker's GPU use, but needs a group-writable scheduler directory and lock file across `root` and the service user, and puts the worker in the single non-interactive slot: during a bulk run every voice memo waits up to one whole podcast job, which risks Daybook client timeouts |
+| C. Raise `studio` to `1 + 2` and share the scheduler | Keeps a slot free for the sync endpoint while a worker job runs, but the bound is then the same as today's unscheduled concurrency (Wyoming, one sync request, one worker job) plus cross-user directory permissions and a change to the pinned Daybook contract |
+| D. Leave the workers unscheduled | At most three GPU users on `studio` at once (Wyoming, one sync request, one worker job); each is slowed proportionally, none is blocked; 128 GiB leaves ample memory |
+
+**Accepted decision:** Option D. Revisit if a second worker process per host, a concurrent local LLM job, or measured interactive latency during a bulk run makes the unscheduled overlap a problem.
+
+**Blocks implementation:** No.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:

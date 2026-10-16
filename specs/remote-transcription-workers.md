@@ -102,8 +102,8 @@ B2/B3 remain later alternatives if the credential boundary should be tightened a
 The existing C13 host-wide lane scheduler is local to `studio`:
 
 - `atlas.local` inference is outside the `studio` scheduler and does not need to acquire the `studio` lane gate.
-- Any future local pull worker running on `studio` must still use the C13 admission path before STT/TTS inference.
-- The first Option B slice does not migrate the local `studio` transcription worker to pull-worker execution, so this remains a follow-up constraint rather than a first-slice implementation task.
+- The `voxhelm-remote-worker` that runs on `studio` itself stays unscheduled too (D-25, 2026-10-16): its env leaves `VOXHELM_LANE_SCHEDULER_ENABLED` at `false`, so its admission calls are no-ops. Sharing the single non-interactive slot would make sync requests wait behind whole podcast jobs.
+- Local Django Tasks inference on `studio` (batch `synthesize`, and batch `transcribe` when not in `remote_pull` mode) still goes through the C13 admission path.
 
 ### Diarization and known-speaker work
 
