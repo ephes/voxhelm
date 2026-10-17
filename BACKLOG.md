@@ -56,6 +56,11 @@ protection, and the production proof remain open.
   - [x] treat private known-speaker reference descriptors as trusted worker-only data and keep them out of logs;
   - [x] ensure `transcript.speakers.json` and `result_metadata.diarization` match existing studio behavior in the worker contract;
   - [ ] validate against `python-podcast/docs/known-speaker-runbook.rst` and `evals/known_speaker_results.md`.
+- [x] Give batch and remote URL fetches their own elapsed budget and retry transient fetch failures inside one
+  attempt (D-30, 2026-10-17): `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (600 s per try) and
+  `VOXHELM_BATCH_URL_FETCH_ATTEMPTS` (3 tries); sync URL inputs keep the 60 s budget and one try.
+- [ ] Decide whether a fetch failure that survives the in-attempt retries should still count against
+  `max_attempts` (needs a failure category in `POST /v1/internal/work/{job_id}/fail`; D-30 option B).
 - [x] Keep claim eligibility bounded by advertised capabilities: `job_type=transcribe`, batch only, and
   known-speaker jobs only when the worker/hybrid path advertises the required pyannote/wespeaker/reference support.
 - [ ] Preserve the C13 lane scheduler for any future local `studio` pull worker; `atlas.local` is outside that

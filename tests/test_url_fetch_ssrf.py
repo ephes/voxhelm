@@ -98,6 +98,8 @@ def local_allowlist(settings: Any) -> None:
     settings.VOXHELM_PRIVATE_URL_HOSTS = set()
     settings.VOXHELM_BATCH_MAX_DOWNLOAD_BYTES = 1024
     settings.VOXHELM_MAX_URL_DOWNLOAD_BYTES = 1024
+    # One try per batch download unless a test exercises the retry loop.
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 1
 
 
 def _fetch_media(url: str) -> Path:
@@ -390,6 +392,7 @@ def test_elapsed_budget_stops_slow_progress(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.2
+    settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS = 0.2
     started = time.monotonic()
     try:
         with pytest.raises(ApiError):
@@ -410,6 +413,7 @@ def test_dns_consumes_elapsed_budget(monkeypatch, settings, local_allowlist, iso
 
     monkeypatch.setattr(media, "resolve_host_addresses", slow_dns)
     settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.05
+    settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS = 0.05
     started = time.monotonic()
     with pytest.raises(ApiError, match="elapsed budget"):
         _fetch_media("http://127.0.0.1/file.mp3")
@@ -435,6 +439,7 @@ def test_elapsed_budget_interrupts_tls_handshake(
     thread = threading.Thread(target=stall_tls, daemon=True)
     thread.start()
     settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.6
+    settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS = 0.6
     settings.VOXHELM_PRIVATE_URL_HOSTS = {"127.0.0.1"}
     original_resolve = media.resolve_host_addresses
 
@@ -453,3 +458,189 @@ def test_elapsed_budget_interrupts_tls_handshake(
         finished.set()
         listener.close()
         thread.join(timeout=3)
+
+
+class _FlakyHandler(BaseHTTPRequestHandler):
+    """Serves AUDIO_BYTES after a scripted sequence of failures, one per request."""
+
+    script: list[str] = []
+    requests_seen: list[str] = []
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        import time
+
+        type(self).requests_seen.append(self.path)
+        step = type(self).script.pop(0) if type(self).script else "ok"
+        try:
+            if step.isdigit():
+                self.send_response(int(step))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if step == "truncated":
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(len(AUDIO_BYTES) + 10))
+                self.end_headers()
+                self.wfile.write(AUDIO_BYTES)
+                self.close_connection = True
+                return
+            if step == "unsupported":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"no")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(AUDIO_BYTES)))
+            self.end_headers()
+            for byte in AUDIO_BYTES:
+                self.wfile.write(bytes([byte]))
+                self.wfile.flush()
+                if step == "slow":
+                    time.sleep(0.03)
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def flaky_server(local_allowlist) -> Iterator[str]:
+    _FlakyHandler.script = []
+    _FlakyHandler.requests_seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def retry_sleeps(monkeypatch) -> list[float]:
+    sleeps: list[float] = []
+    monkeypatch.setattr(media, "_retry_sleep", sleeps.append)
+    return sleeps
+
+
+def test_batch_media_uses_its_own_elapsed_budget(flaky_server, settings, isolated_tempdir):
+    # About 0.5 s of body: over the sync budget, well inside the batch budget.
+    settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS = 0.15
+    settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS = 5
+    _FlakyHandler.script = ["slow", "slow"]
+    with pytest.raises(ApiError, match="elapsed budget|URL fetch failed"):
+        _fetch_input(f"{flaky_server}/file.mp3")
+    result = _fetch_media(f"{flaky_server}/file.mp3")
+    try:
+        assert result.read_bytes() == AUDIO_BYTES
+    finally:
+        result.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("failure", ["503", "502", "429", "slow", "truncated"])
+def test_batch_media_retries_a_transient_failure_within_one_call(
+    failure, flaky_server, settings, isolated_tempdir, retry_sleeps
+):
+    settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS = 0.15
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    _FlakyHandler.script = [failure]
+    result = _fetch_media(f"{flaky_server}/file.mp3")
+    try:
+        assert result.read_bytes() == AUDIO_BYTES
+    finally:
+        result.unlink(missing_ok=True)
+    assert _FlakyHandler.requests_seen == ["/file.mp3", "/file.mp3"]
+    assert retry_sleeps == [5.0]
+    assert [path.name for path in isolated_tempdir.iterdir()] == []
+
+
+def test_batch_media_gives_up_after_the_configured_tries(
+    flaky_server, settings, isolated_tempdir, retry_sleeps
+):
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    _FlakyHandler.script = ["503", "503", "503", "ok"]
+    with pytest.raises(media.TransientFetchError, match="HTTP 503"):
+        _fetch_media(f"{flaky_server}/file.mp3")
+    assert len(_FlakyHandler.requests_seen) == 3
+    assert retry_sleeps == [5.0, 10.0]
+    assert list(isolated_tempdir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("404", "HTTP 404"),
+        ("403", "HTTP 403"),
+        ("unsupported", "Unsupported remote media type"),
+    ],
+)
+def test_batch_media_does_not_retry_a_permanent_failure(
+    failure, message, flaky_server, settings, isolated_tempdir, retry_sleeps
+):
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    _FlakyHandler.script = [failure]
+    # No suffix in the path, so the media type comes from Content-Type.
+    with pytest.raises(ApiError, match=message) as excinfo:
+        _fetch_media(f"{flaky_server}/file")
+    assert not isinstance(excinfo.value, media.TransientFetchError)
+    assert len(_FlakyHandler.requests_seen) == 1
+    assert retry_sleeps == []
+    assert list(isolated_tempdir.iterdir()) == []
+
+
+def test_batch_media_does_not_retry_the_size_limit(
+    flaky_server, settings, isolated_tempdir, retry_sleeps
+):
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    settings.VOXHELM_BATCH_MAX_DOWNLOAD_BYTES = 4
+    with pytest.raises(ApiError, match="download limit") as excinfo:
+        _fetch_media(f"{flaky_server}/file.mp3")
+    assert not isinstance(excinfo.value, media.TransientFetchError)
+    assert len(_FlakyHandler.requests_seen) == 1
+    assert retry_sleeps == []
+
+
+def test_batch_media_does_not_retry_an_allowlist_rejection(settings, retry_sleeps):
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    with pytest.raises(ApiError, match="allowlist") as excinfo:
+        download_allowed_media(source_url="https://evil.example.net/file.mp3")
+    assert not isinstance(excinfo.value, media.TransientFetchError)
+    assert retry_sleeps == []
+
+
+def test_batch_media_retry_backoff_is_capped(
+    flaky_server, settings, isolated_tempdir, retry_sleeps
+):
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 6
+    _FlakyHandler.script = ["500"] * 5
+    result = _fetch_media(f"{flaky_server}/file.mp3")
+    result.unlink(missing_ok=True)
+    assert retry_sleeps == [5.0, 10.0, 20.0, 30.0, 30.0]
+
+
+def test_sync_input_fetch_is_not_retried(flaky_server, settings, isolated_tempdir, retry_sleeps):
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    _FlakyHandler.script = ["503"]
+    with pytest.raises(media.TransientFetchError, match="HTTP 503"):
+        _fetch_input(f"{flaky_server}/file.mp3")
+    assert len(_FlakyHandler.requests_seen) == 1
+    assert retry_sleeps == []
+
+
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
+def test_body_shorter_than_content_length_is_rejected(
+    fetch, flaky_server, settings, isolated_tempdir
+):
+    _FlakyHandler.script = ["truncated"]
+    with pytest.raises(media.TransientFetchError, match="announced content length"):
+        fetch(f"{flaky_server}/file.mp3")
+    assert list(isolated_tempdir.iterdir()) == []
