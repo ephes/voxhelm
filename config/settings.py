@@ -603,6 +603,9 @@ VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS = validate_positive_int(
     int(os.getenv("VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS", "900")),
 )
 VOXHELM_FFMPEG_BIN = os.getenv("VOXHELM_FFMPEG_BIN", "ffmpeg")
+# ffprobe measures the media duration the ad-analysis profile checks chapter marks
+# against (D-29); the profile needs it on every host that runs it.
+VOXHELM_FFPROBE_BIN = os.getenv("VOXHELM_FFPROBE_BIN", "ffprobe")
 VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS = validate_positive_int(
     "VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS",
     int(os.getenv("VOXHELM_VIDEO_EXTRACTION_TIMEOUT_SECONDS", "900")),

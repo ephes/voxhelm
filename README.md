@@ -176,6 +176,9 @@ export VOXHELM_PARAKEET_TIMEOUT_SECONDS="1800"
 # the ad-analysis-v1 profile, unavailable.
 export VOXHELM_WINDOW_MODEL="ggml-large-v3-turbo.bin"
 export VOXHELM_WINDOW_TIMEOUT_SECONDS="120"
+# ffprobe measures the media duration the ad-analysis-v1 profile checks a job's
+# chapter marks against (D-29); without it the profile is unavailable.
+export VOXHELM_FFPROBE_BIN="ffprobe"
 # "parakeet" routes known-speaker jobs with the re-cut to Parakeet first (see
 # the known-speaker section); empty keeps them on the configured chain.
 export VOXHELM_KNOWN_SPEAKER_STT_BACKEND=""
@@ -482,9 +485,12 @@ word starts, flags a window with at least 4 English ones that are at least
 10 % of both, re-transcribes each flagged window with whisper large-v3-turbo
 (window transcription, below), and keeps the retry only when whisper detects
 German with p >= 0.9; then every Parakeet word starting in the window is
-replaced by the retry's words. The profile needs both runtimes on every host
-(Parakeet and `whisper-cli` with the pinned turbo model), whatever the job's
-language.
+replaced by the retry's words. A job may also carry the edges of the episode's
+sponsor chapters (`chapter_marks_ms`, D-29): the profile then transcribes the
+`turbo-window-v1` word window around each mark with the same turbo model
+(chapter windows, below). The profile needs its runtimes on every host
+(Parakeet, `whisper-cli` with the pinned turbo model, and ffprobe), whatever the
+job's language.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/jobs \
@@ -496,6 +502,7 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
     "language_hint": "de",
     "input": {"kind": "upload", "upload_id": "replace-me"},
     "output": {"formats": ["json"]},
+    "chapter_marks_ms": [1591000, 1701741],
     "task_ref": "smart-skip-<sha256>"
   }'
 ```
@@ -520,6 +527,21 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
   `retry_seconds`. For other languages `checked` is `false`, `reason` says why
   and `windows` is empty. They are part of the words artifact, so `DELETE` and
   the backstop remove them with it.
+- `chapter_marks_ms` (optional, only with a profile): whole milliseconds of file
+  time, 1 to 256 of them, each in `[0, 24 h]`, strictly increasing; anything
+  else is rejected with 400, and the marks are part of the `task_ref` identity.
+  A mark after the media's end (ffprobe's duration, rounded to milliseconds)
+  fails the job before Parakeet runs. The job then also writes
+  `chapter_windows.json` (`result.artifacts.chapter_windows`):
+  `{"schema_version": 1, "profile", "rule": "turbo-window-v1", "identity": {...}, "duration_ms",
+  "summary": {"windows", "ok", "seconds"}, "windows": [{"mark_ms", "ok", "clip_start", "shift",
+  "exit_codes", "seconds", "words": [{"w", "s", "e"}, ...]}, ...]}`, one window
+  per mark in order, words in file seconds; `ok: false` (no words) when
+  whisper.cpp failed on all five clips. `result.metadata.chapter_windows` holds
+  its identity and summary. Without marks nothing changes. A remote worker gets
+  the marks with the claim, and its completion must include an exposed
+  `chapter_windows.json` and the pinned chapter windows identity (only its
+  whisper.cpp version is taken), or it is refused.
 - `result.metadata.profile` and the artifact's `identity` record the engine:
   profile name, model name, the model's repo, commit and weights checksum (from
   the deployment's `VOXHELM_MODEL_REVISION` marker in the model directory, or a
@@ -552,6 +574,26 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
   `ad-analysis-v1` job 7 days after it finished (see the retention section).
 
 See `specs/2026-10-16_ad_analysis_profile.md`.
+
+### Chapter windows (whisper turbo, `turbo-window-v1`)
+
+For a profile job with `chapter_marks_ms`,
+`transcriptions.chapter_windows.run_chapter_windows` transcribes, after the drift
+check and inside the same admission, the 120 s clip
+`[max(0, t - 60 + shift), +120 s)` around each mark `t` exactly as the ad
+research's `asrwin120.py` did: ffmpeg to 16 kHz mono WAV, `whisper-cli` with the
+pinned turbo model (`VOXHELM_WINDOW_MODEL`, the drift check's file), English,
+DTW token timestamps (`-dtw large.v3.turbo`), one word per segment
+(`-ml 1 -sow`), the prompt `Hello, and welcome back. Thanks!`, plain JSON, and
+whisper.cpp's default decoding passed explicitly (`-t 4 -p 1 -bs 5 -bo 5
+-tp 0.00 -tpi 0.20`). When whisper.cpp exits with an error (a DTW abort) the
+clip is shifted by 0.7, -0.7, 1.9 and -1.9 s in turn; the pinned model is
+checked again after every failed clip, so a model that went away fails the job
+instead of producing untranscribed windows. Words are every non-blank segment's
+stripped text with the clip start plus its offsets, rounded to 3 decimals. On
+the 26 episodes of the podcast gate G6 the 102 windows are identical, word for
+word and to the millisecond, to the research's. See
+`specs/2026-10-17_chapter_windows.md`.
 
 ### Window transcription (whisper turbo)
 

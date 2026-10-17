@@ -15,9 +15,14 @@ transcript artifacts it writes a ``words`` artifact with per-word start, end and
 token confidence and the drift check's per-window records, and records the engine
 identity (model commit, CLI and MLX versions, profile settings, the drift rule and the
 retry engine with its model hash) in the job result and in that artifact. The profile
-needs both runtimes on every host, whatever the job's language. Its artifacts and job
-row are removed by the producer (``DELETE /v1/jobs/{id}``) or, at the latest, by
-``prune_job_artifacts`` seven days after the job finished.
+needs both runtimes on every host, whatever the job's language. A job may carry chapter
+marks (``chapter_marks_ms``, D-29): the profile then checks them against the media's
+duration (ffprobe) before Parakeet runs and, after the drift check, transcribes the
+``turbo-window-v1`` word window of each mark with the same turbo model
+(``transcriptions.chapter_windows``) into a ``chapter_windows`` artifact; ffprobe is part
+of the profile's runtime too. Its artifacts and job row are removed by the producer
+(``DELETE /v1/jobs/{id}``) or, at the latest, by ``prune_job_artifacts`` seven days after
+the job finished.
 """
 
 from __future__ import annotations
@@ -34,6 +39,14 @@ from typing import Any
 
 from django.conf import settings
 
+from transcriptions.chapter_windows import (
+    ChapterWindows,
+    check_marks_within,
+    ffprobe_runtime_available,
+    media_duration_ms,
+    resolve_ffprobe_binary,
+    run_chapter_windows,
+)
 from transcriptions.drift import DRIFT_RULE, DriftRule, run_drift_check
 from transcriptions.service import (
     PARAKEET_BACKEND_NAME,
@@ -145,6 +158,8 @@ class ProfileTranscription:
     identity: dict[str, Any]
     # The drift check's outcome: rule, whether it ran, summary and per-window records.
     drift: dict[str, Any]
+    # The chapter windows of a job with chapter marks (D-29); None without marks.
+    chapter_windows: ChapterWindows | None = None
 
     def words_document(self) -> dict[str, Any]:
         return {
@@ -155,10 +170,16 @@ class ProfileTranscription:
             "drift": self.drift,
         }
 
+    def chapter_windows_document(self) -> dict[str, Any] | None:
+        if self.chapter_windows is None:
+            return None
+        return self.chapter_windows.document(profile=self.identity["profile"])
+
 
 def profile_runtime_available(profile: TranscriptionProfile) -> bool:
-    """True when this host can run the profile: its Parakeet CLI and model directory and
-    the drift check's window runtime (``whisper-cli`` and the pinned turbo model)."""
+    """True when this host can run the profile: its Parakeet CLI and model directory, the
+    window runtime of the drift check and the chapter windows (``whisper-cli`` and the
+    pinned turbo model) and ffprobe for the chapter marks' duration check."""
     try:
         resolve_parakeet_runtime(
             binary_path=settings.VOXHELM_PARAKEET_BIN,
@@ -166,7 +187,11 @@ def profile_runtime_available(profile: TranscriptionProfile) -> bool:
         )
     except BackendUnavailableError:
         return False
-    return profile.backend == PARAKEET_BACKEND_NAME and window_runtime_available()
+    return (
+        profile.backend == PARAKEET_BACKEND_NAME
+        and window_runtime_available()
+        and ffprobe_runtime_available()
+    )
 
 
 def available_profile_names() -> list[str]:
@@ -178,19 +203,28 @@ def run_profile_transcription(
     audio_path: Path,
     *,
     language_hint: str | None,
+    chapter_marks_ms: list[int] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> ProfileTranscription:
     """Transcribe with exactly the profile's engine and settings; never another engine.
 
-    Then runs the profile's drift check on the words. Raises ``BackendUnavailableError``
-    when the Parakeet CLI or model, ``whisper-cli`` or the pinned turbo model is missing on
-    this host; both are resolved before Parakeet runs, so a job never runs without the
-    check. The caller admits the run through the lane scheduler. The transcript is not
-    sanitized, and the transcript artifacts are Parakeet's sentences as they are; only the
-    words carry the drift check's splice.
+    Then runs the profile's drift check on the words and, for a job with chapter marks,
+    the chapter windows (D-29). Raises ``BackendUnavailableError`` when the Parakeet CLI
+    or model, ``whisper-cli``, the pinned turbo model or ffprobe is missing on this host;
+    all are resolved before Parakeet runs, so a job never runs without the check, and a
+    mark after the media's end raises ``ChapterMarkError`` before Parakeet runs too. The
+    caller admits the run through the lane scheduler. The transcript is not sanitized, and
+    the transcript artifacts are Parakeet's sentences as they are; only the words carry the
+    drift check's splice.
     """
     raise_if_cancelled(cancel_event)
-    window_executable, _ = resolve_window_runtime()
+    window_executable, window_model = resolve_window_runtime()
+    ffprobe = resolve_ffprobe_binary()
+    duration_ms = 0
+    if chapter_marks_ms:
+        duration_ms = media_duration_ms(audio_path, ffprobe=ffprobe, cancel_event=cancel_event)
+        check_marks_within(chapter_marks_ms, duration_ms)
+        raise_if_cancelled(cancel_event)
     model_name = settings.VOXHELM_PARAKEET_MODEL_NAME
     backend = ParakeetBackend(
         binary_path=settings.VOXHELM_PARAKEET_BIN,
@@ -224,6 +258,16 @@ def run_profile_transcription(
         rule=profile.drift,
         cancel_event=cancel_event,
     )
+    chapter_windows: ChapterWindows | None = None
+    if chapter_marks_ms:
+        chapter_windows = run_chapter_windows(
+            audio_path,
+            chapter_marks_ms,
+            executable=window_executable,
+            model_path=window_model,
+            duration_ms=duration_ms,
+            cancel_event=cancel_event,
+        )
     identity = profile_identity(
         profile,
         executable=executable,
@@ -233,7 +277,11 @@ def run_profile_transcription(
         window_executable=window_executable,
     )
     return ProfileTranscription(
-        result=result, words=drift.words, identity=identity, drift=drift.record
+        result=result,
+        words=drift.words,
+        identity=identity,
+        drift=drift.record,
+        chapter_windows=chapter_windows,
     )
 
 

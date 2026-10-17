@@ -25,6 +25,7 @@ def job_request_fingerprint_from_fields(
     output_formats: list[str],
     diarization: dict[str, Any] | None,
     profile: str = "",
+    chapter_marks_ms: list[int] | None = None,
 ) -> str:
     if job_type != TRANSCRIBE_JOB_TYPE:
         # Synthesis keeps the original looser task_ref behaviour: any non-failed job of the same
@@ -43,6 +44,9 @@ def job_request_fingerprint_from_fields(
         if profile:
             # Only profile jobs carry the key, so fingerprints of existing jobs stay unchanged.
             material["profile"] = profile
+        if chapter_marks_ms:
+            # Only jobs with chapter marks (D-29) carry the key, for the same reason.
+            material["chapter_marks_ms"] = list(chapter_marks_ms)
     encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -73,4 +77,5 @@ def stored_job_request_fingerprint(
         output_formats=list((output_data or {}).get("formats", [])),
         diarization=(output_data or {}).get("diarization", {"enabled": False}),
         profile=profile,
+        chapter_marks_ms=(output_data or {}).get("chapter_marks_ms"),
     )

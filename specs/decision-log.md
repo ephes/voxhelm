@@ -709,6 +709,35 @@ capacity preservation takes precedence over automatic age-based recovery.
 
 ---
 
+## D-29: How does Delve get the turbo word windows of its sponsor-chapter edges?
+
+**Status:** Implemented 2026-10-17 (not yet deployed). Podcast Server-Side Ad Analysis v1, slice 10b (Delve slice 10, "Chapter stage and result assembly" of `~/projects/podcast/docs/backend/specs/smart-skip-coordination.md`, gate G6); slice description: `specs/2026-10-17_chapter_windows.md`. Amends `ad-analysis-v1` in place (D-28's rule: nothing of the profile has been deployed or served yet).
+
+**Context:** Delve's chapter text check moves each sponsor-chapter edge onto the advertisement's real start or end. G6 fails with the Parakeet words Delve already has and passes with the research's turbo windows (`round2-chapter-textcheck/asrwin120.py`, FREEZE.txt 2026-10-15T00:58:02Z): whisper large-v3-turbo (the drift check's pinned file), English, DTW token timestamps, one word per segment, a punctuated prompt, 120 s around each edge, shifted on a DTW abort. Voxhelm's window function (D-27) is the drift check's: 32 s, language detected, no prompt, no DTW. Delve knows the edges before it submits (they come from the file's ID3 chapters and its duration), but it holds the audio only in its own media directory; the voxhelm job already has it.
+
+**Options:**
+
+| Question | Options | Tradeoff |
+|----------|---------|----------|
+| Where the pass runs | A. Inside `ad-analysis-v1`: the job carries the marks, the profile writes a `chapter_windows` artifact / B. A separate profile `chapter-windows-v1`, a second job per episode / C. A producer route over a staged upload | A: one upload, one job, one DELETE and the 7-day backstop cover it; the audio is already materialised where Parakeet runs; Delve stores words and windows in one step. B: a second staged upload of the same episode, a second job lifecycle in Delve's state machine (upload, submit, poll, fetch, delete) for a few seconds of whisper. C: a new producer surface with its own auth, limits, admission and retention (D-27's reasons) |
+| Artifact | A. A sibling `chapter_windows.json` / B. Inside `words.json` (as D-28's drift records) | A: the windows are another engine's words with their own identity, a job without marks has none, and `words.json` (verified in G1/G2) stays byte for byte what it is without marks; costs one more required remote artifact and one more fetch. B: one fetch, but the words document and its identity would change shape with the request |
+| Which marks | A. Strictly increasing whole milliseconds, 1-256, checked against ffprobe's duration on the materialised source / B. Seconds as floats, any order | A: one canonical request per set of edges (it is part of the `task_ref` identity), exactly the research's `t` (`round(t * 1000)` is whole for every research edge), and the same duration measure Delve takes; B: duplicates and float formatting would make equal requests differ |
+| Profile name | A. Amend `ad-analysis-v1` / B. `ad-analysis-v2` | A: never deployed or served; a job without marks is unchanged (same words, identity and artifacts); B: a name whose predecessor never existed outside this Mac |
+
+**Accepted decision:** A in every row.
+
+- `POST /v1/jobs` takes `chapter_marks_ms` with a profile only (400 otherwise, and for an empty list, more than 256 marks, a non-integer, a mark outside `[0, 24 h]` or marks that are not strictly increasing); they are stored in `output_data`, part of the `task_ref` match and fingerprint (only when present, so other fingerprints are unchanged), and carried by a remote claim.
+- Before Parakeet runs, the profile resolves the window runtime and ffprobe (now part of the profile's runtime and of `capabilities.profiles`), measures the source's duration and refuses a mark after its end (`ChapterMarkError`: the job fails; on a remote worker the failure is not retryable). After the drift check it runs `transcriptions.chapter_windows.run_chapter_windows`: for each mark the research clip, ffmpeg arguments, `whisper-cli -l en -t 4 -p 1 -bs 5 -bo 5 -tp 0.00 -tpi 0.20 -dtw large.v3.turbo -ml 1 -sow --prompt 'Hello, and welcome back. Thanks!' -oj -np` (whisper.cpp 1.9.5's default decoding passed explicitly), the research's shift sequence on a whisper.cpp error and its word assembly; a window none of the five clips transcribes is `ok: false` with its exit statuses. The pinned model is checked again after every failed clip, so a model that went away fails the run instead of passing as untranscribed windows; ffmpeg failures, timeouts and malformed output fail the run.
+- `chapter_windows.json` (kind `chapter_windows`, exposed): schema 1, profile, rule `turbo-window-v1`, identity (rule, engine, whisper.cpp version, model and SHA-256, every clip and decoding setting including the prompt and its hash and the shifts), duration, summary and one window per mark (`mark_ms`, `ok`, `clip_start`, `shift`, `exit_codes`, `seconds`, `words` `{w, s, e}` in file seconds). `result.metadata.chapter_windows` keeps identity and summary (no words). A remote completion of a job with marks must include it exposed and a chapter windows identity equal to the control plane's (only the whisper.cpp version is taken); one without marks must not include it.
+- Cancellation is checked before each window and inside each clip's processes; one temporary directory per pass, removed on every path; errors carry logs, never words. `DELETE` and the backstop remove the artifact like any other of a profile job.
+- Verified on the 26 G6 episodes: all 102 windows identical to the research's (36,313 words, text, start and end, clip start and shift; the same model hash), and G6 through Delve's real route with a local voxhelm passes (6 fixed, 0 worse, 22 of 22 kit-2 cuts inside; the 102 windows Delve stored identical to the research's).
+
+**Not decided here:** windows for non-English episodes (the rule is the research's English-forced recipe; Delve sends the marks of every file with sponsor chapters), a resident whisper process for the windows, a producer route.
+
+**Blocks implementation:** No.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:

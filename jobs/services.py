@@ -49,6 +49,13 @@ from synthesis.service import (
     export_audio,
     synthesize_text,
 )
+from transcriptions.chapter_windows import (
+    CHAPTER_WINDOWS_ARTIFACT_FORMAT,
+    CHAPTER_WINDOWS_ARTIFACT_NAME,
+    CHAPTER_WINDOWS_CONTENT_TYPE,
+    ChapterMarkError,
+    parse_chapter_marks,
+)
 from transcriptions.diarization import (
     DiarizationError,
     DiarizationParams,
@@ -123,6 +130,8 @@ class JobRequest:
     task_ref: str
     # Named transcription profile; empty for ordinary jobs.
     profile: str = ""
+    # Chapter marks of a profile job whose chapter windows are wanted (D-29).
+    chapter_marks_ms: list[int] | None = None
 
 
 def create_job_from_payload(*, producer: str, payload: dict[str, Any]) -> tuple[Job, bool]:
@@ -241,6 +250,8 @@ def insert_batch_job(
         output_data: dict[str, Any] = {"formats": request.output_formats}
         if request.job_type == Job.JobType.TRANSCRIBE:
             output_data["diarization"] = request.diarization
+        if request.chapter_marks_ms:
+            output_data["chapter_marks_ms"] = list(request.chapter_marks_ms)
 
         job = Job.objects.create(
             producer=producer,
@@ -395,6 +406,10 @@ def create_operator_sync_transcription(
 
 def parse_job_request(payload: dict[str, Any]) -> JobRequest:
     job_type = ensure_choice(payload.get("job_type"), Job.JobType.values, "job_type")
+    # Chapter marks belong to a transcription profile (D-29); any other job type refuses them
+    # instead of dropping them.
+    if job_type != Job.JobType.TRANSCRIBE and "chapter_marks_ms" in payload:
+        raise ApiError("chapter_marks_ms requires a profile.")
     if job_type == Job.JobType.TRANSCRIBE:
         return parse_transcription_job_request(payload)
     if job_type == Job.JobType.SYNTHESIZE:
@@ -416,11 +431,18 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
             language = normalize_language_hint(optional_string(payload.get("language_hint")))
         except ProfileError as exc:
             raise ApiError(str(exc)) from exc
+        try:
+            chapter_marks_ms = parse_chapter_marks(payload.get("chapter_marks_ms"))
+        except ChapterMarkError as exc:
+            raise ApiError(str(exc)) from exc
     else:
         if payload.get("language_hint") is not None:
             raise ApiError("language_hint requires a profile.")
+        if payload.get("chapter_marks_ms") is not None:
+            raise ApiError("chapter_marks_ms requires a profile.")
         model = ensure_transcription_model(payload.get("model", "auto"))
         language = optional_string(payload.get("language"))
+        chapter_marks_ms = None
 
     input_data = ensure_object(payload.get("input"), "input")
     input_kind = optional_string(input_data.get("kind"))
@@ -465,6 +487,7 @@ def parse_transcription_job_request(payload: dict[str, Any]) -> JobRequest:
         context=context,
         task_ref=task_ref,
         profile=profile,
+        chapter_marks_ms=chapter_marks_ms,
     )
 
 
@@ -494,6 +517,7 @@ def existing_job_matches_request(
         and existing_transcription_input_matches_request(existing.input_data, request.input_data)
         and sorted(existing.output_data.get("formats", [])) == sorted(request.output_formats)
         and existing.output_data.get("diarization", {"enabled": False}) == request.diarization
+        and existing.output_data.get("chapter_marks_ms") == request.chapter_marks_ms
     )
 
 
@@ -522,6 +546,7 @@ def job_request_fingerprint(request: JobRequest) -> str:
         output_formats=request.output_formats,
         diarization=request.diarization,
         profile=request.profile,
+        chapter_marks_ms=request.chapter_marks_ms,
     )
 
 
@@ -980,11 +1005,14 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
         )
         if profile_run is not None:
             metadata["profile"] = profile_run.identity
+            if profile_run.chapter_windows is not None:
+                metadata["chapter_windows"] = profile_run.chapter_windows.metadata_record()
         persist_transcription_output_artifacts(
             job=job, result=result, speakers_artifact=speakers_artifact
         )
         if profile_run is not None:
             persist_profile_words_artifact(job=job, profile_run=profile_run)
+            persist_profile_chapter_windows_artifact(job=job, profile_run=profile_run)
         mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
         if job.profile:
             # The task backend keeps the return value (django_tasks_db: DBTaskResult) beyond
@@ -1010,13 +1038,27 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
 def run_profile_for_job(*, job: Job, audio_path: Path) -> ProfileTranscription:
     """Run the job's profile under lane admission; never another engine.
 
-    The drift check runs inside the same admission. A missing Parakeet CLI or model, or
-    a missing ``whisper-cli`` or turbo model, raises ``BackendUnavailableError`` and fails
-    the job.
+    The drift check and the chapter windows run inside the same admission. A missing
+    Parakeet CLI or model, a missing ``whisper-cli``, turbo model or ffprobe raises
+    ``BackendUnavailableError`` and fails the job, as does a chapter mark after the
+    media's end (``ChapterMarkError``).
     """
     profile = get_transcription_profile(job.profile)
     with admit_local_inference(LANE_NON_INTERACTIVE):
-        return run_profile_transcription(profile, audio_path, language_hint=job.language or None)
+        return run_profile_transcription(
+            profile,
+            audio_path,
+            language_hint=job.language or None,
+            chapter_marks_ms=job_chapter_marks(job),
+        )
+
+
+def job_chapter_marks(job: Job) -> list[int] | None:
+    """The job's stored chapter marks (checked again: the row is read back from SQLite)."""
+    try:
+        return parse_chapter_marks((job.output_data or {}).get("chapter_marks_ms"))
+    except ChapterMarkError as exc:
+        raise RuntimeError(f"Stored chapter marks are invalid: {exc}") from exc
 
 
 def persist_profile_words_artifact(*, job: Job, profile_run: ProfileTranscription) -> None:
@@ -1027,6 +1069,24 @@ def persist_profile_words_artifact(*, job: Job, profile_run: ProfileTranscriptio
         kind=JobArtifact.Kind.WORDS,
         format_name=WORDS_ARTIFACT_FORMAT,
         content_type=WORDS_CONTENT_TYPE,
+        payload=payload.encode("utf-8"),
+        exposed=True,
+    )
+
+
+def persist_profile_chapter_windows_artifact(
+    *, job: Job, profile_run: ProfileTranscription
+) -> None:
+    document = profile_run.chapter_windows_document()
+    if document is None:
+        return
+    payload = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
+    create_or_replace_artifact(
+        job=job,
+        name=CHAPTER_WINDOWS_ARTIFACT_NAME,
+        kind=JobArtifact.Kind.CHAPTER_WINDOWS,
+        format_name=CHAPTER_WINDOWS_ARTIFACT_FORMAT,
+        content_type=CHAPTER_WINDOWS_CONTENT_TYPE,
         payload=payload.encode("utf-8"),
         exposed=True,
     )

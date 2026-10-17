@@ -34,6 +34,13 @@ from jobs.media import (
 )
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions import formats as transcript_formats
+from transcriptions.chapter_windows import (
+    CHAPTER_WINDOWS_ARTIFACT_FORMAT,
+    CHAPTER_WINDOWS_ARTIFACT_NAME,
+    CHAPTER_WINDOWS_CONTENT_TYPE,
+    ChapterMarkError,
+    parse_chapter_marks,
+)
 from transcriptions.diarization import (
     DiarizationError,
     DiarizationParams,
@@ -449,6 +456,22 @@ def process_claim(
                         exposed=True,
                     )
                 )
+                chapter_document = profile_run.chapter_windows_document()
+                if chapter_document is not None:
+                    artifacts.append(
+                        upload_bytes_artifact(
+                            store=store,
+                            artifact_prefix=artifact_prefix,
+                            data=json.dumps(
+                                chapter_document, ensure_ascii=False, separators=(",", ":")
+                            ).encode("utf-8"),
+                            name=CHAPTER_WINDOWS_ARTIFACT_NAME,
+                            kind="chapter_windows",
+                            format_name=CHAPTER_WINDOWS_ARTIFACT_FORMAT,
+                            content_type=CHAPTER_WINDOWS_CONTENT_TYPE,
+                            exposed=True,
+                        )
+                    )
             if speakers_artifact_payload is not None:
                 artifacts.append(
                     upload_bytes_artifact(
@@ -475,6 +498,11 @@ def process_claim(
                     processing_seconds=round(monotonic() - started, 3),
                     speakers_artifact=speakers_artifact_payload,
                     profile_identity=profile_run.identity if profile_run is not None else None,
+                    chapter_windows=(
+                        profile_run.chapter_windows.metadata_record()
+                        if profile_run is not None and profile_run.chapter_windows is not None
+                        else None
+                    ),
                 ),
                 artifacts=artifacts,
             )
@@ -522,6 +550,9 @@ def run_worker_once(
 
 def retryable_worker_error(exc: Exception) -> bool:
     if isinstance(exc, WorkerHttpError) and exc.status in {401, 403, 404, 409}:
+        return False
+    if isinstance(exc, ChapterMarkError):
+        # Marks after the media's end (or malformed ones) fail on every worker.
         return False
     return True
 
@@ -615,14 +646,19 @@ def transcribe_claim_profile(*, claim: dict[str, Any], audio_path: Path) -> Prof
     """Run the claim's profile with its fixed settings; never another engine.
 
     The claim's ``fallbacks`` are ignored for a profile. A missing Parakeet CLI or model,
-    or a missing ``whisper-cli`` or turbo model for the drift check, raises
-    ``BackendUnavailableError``, which fails the attempt as retryable: the job goes back
-    to the queue and only a worker that advertises the profile claims it again.
+    or a missing ``whisper-cli``, turbo model or ffprobe for the drift check and the chapter
+    windows, raises ``BackendUnavailableError``, which fails the attempt as retryable: the
+    job goes back to the queue and only a worker that advertises the profile claims it
+    again. Chapter marks the worker cannot use (``ChapterMarkError``) fail it for good.
     """
     profile = get_transcription_profile(require_string(claim.get("profile"), "claim.profile"))
+    chapter_marks_ms = parse_chapter_marks(claim.get("chapter_marks_ms"))
     with admit_local_inference(LANE_NON_INTERACTIVE):
         return run_profile_transcription(
-            profile, audio_path, language_hint=optional_string(claim.get("language"))
+            profile,
+            audio_path,
+            language_hint=optional_string(claim.get("language")),
+            chapter_marks_ms=chapter_marks_ms,
         )
 
 
@@ -874,6 +910,7 @@ def build_result_metadata(
     processing_seconds: float,
     speakers_artifact: dict[str, Any] | None,
     profile_identity: dict[str, Any] | None = None,
+    chapter_windows: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     duration_seconds = max((segment.end for segment in result.segments), default=0.0)
     metadata: dict[str, Any] = {
@@ -892,6 +929,8 @@ def build_result_metadata(
         }
     if profile_identity is not None:
         metadata["profile"] = profile_identity
+    if chapter_windows is not None:
+        metadata["chapter_windows"] = chapter_windows
     return metadata
 
 
@@ -952,8 +991,9 @@ def with_current_stt_runtimes(capabilities: dict[str, Any]) -> dict[str, Any]:
     resolves and its model directory is complete, so a worker whose model went
     away gets whisper.cpp claims from the next poll on. Transcription profiles
     (``ad-analysis-v1``) are advertised under ``profiles`` by the same check, and
-    only while the drift check's window runtime (``whisper-cli`` and the pinned
-    turbo model) resolves too; a worker without them never claims a profile job.
+    only while the window runtime of the drift check and the chapter windows
+    (``whisper-cli`` and the pinned turbo model) and ffprobe resolve too; a worker
+    without them never claims a profile job.
     """
     backends = {str(name) for name in capabilities.get("backends", [])}
     models = {str(name) for name in capabilities.get("models", [])}

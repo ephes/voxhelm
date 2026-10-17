@@ -52,7 +52,9 @@ it receives the spliced words with the job. So the endpoint is the function
 
 If a producer later needs windows of an episode it holds, a
 producer-authenticated synchronous route over a staged upload can wrap the
-same function; that is a new decision.
+same function; that is a new decision. (Delve's chapter windows, slice 10b, did not take
+that route: they run inside the profile job as a separate function with the
+research's 120 s DTW recipe, `2026-10-17_chapter_windows.md`, D-29.)
 
 ## Design
 

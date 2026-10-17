@@ -48,6 +48,12 @@ from jobs.services import (
 )
 from jobs.staging import delete_staged_media, release_staged_media_claims_for_job
 from transcriptions import windows
+from transcriptions.chapter_windows import (
+    CHAPTER_WINDOWS_ARTIFACT_FORMAT,
+    CHAPTER_WINDOWS_ARTIFACT_NAME,
+    CHAPTER_WINDOWS_CONTENT_TYPE,
+    expected_chapter_windows_identity,
+)
 from transcriptions.errors import ApiError
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
@@ -642,6 +648,9 @@ def serialize_claim(claim: RemoteClaim) -> dict[str, Any]:
     if job.profile:
         # The worker runs the profile's fixed settings; a profile never has fallbacks.
         payload["job"]["profile"] = job.profile
+        marks = (job.output_data or {}).get("chapter_marks_ms")
+        if marks:
+            payload["job"]["chapter_marks_ms"] = list(marks)
     elif fallbacks:
         # Tried in order by the worker when the claimed backend turns out to be
         # unavailable there; older workers ignore the field.
@@ -1012,6 +1021,14 @@ def validate_remote_artifacts(
         raise ApiError(f"Profile jobs must include {WORDS_ARTIFACT_NAME}.")
     if has_words and not job.profile:
         raise ApiError("Words artifacts are only allowed for profile jobs.")
+    has_chapter_windows = any(
+        artifact["kind"] == JobArtifact.Kind.CHAPTER_WINDOWS for artifact in normalized
+    )
+    wants_chapter_windows = bool(job.profile and (job.output_data or {}).get("chapter_marks_ms"))
+    if wants_chapter_windows and not has_chapter_windows:
+        raise ApiError(f"Jobs with chapter marks must include {CHAPTER_WINDOWS_ARTIFACT_NAME}.")
+    if has_chapter_windows and not wants_chapter_windows:
+        raise ApiError("Chapter window artifacts are only allowed for jobs with chapter marks.")
     has_speaker_sidecar = any(
         artifact["kind"] == JobArtifact.Kind.TRANSCRIPT_SPEAKERS for artifact in normalized
     )
@@ -1046,6 +1063,9 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
     elif kind == JobArtifact.Kind.WORDS:
         if name != WORDS_ARTIFACT_NAME or format_name != WORDS_ARTIFACT_FORMAT:
             raise ApiError(f"Words artifact must be {WORDS_ARTIFACT_NAME}.")
+    elif kind == JobArtifact.Kind.CHAPTER_WINDOWS:
+        if name != CHAPTER_WINDOWS_ARTIFACT_NAME or format_name != CHAPTER_WINDOWS_ARTIFACT_FORMAT:
+            raise ApiError(f"Chapter window artifact must be {CHAPTER_WINDOWS_ARTIFACT_NAME}.")
     elif expected is not None:
         raise ApiError(f"Artifact format '{format_name}' does not match kind '{kind}'.")
     elif kind not in REMOTE_SIDE_ARTIFACT_KINDS:
@@ -1079,6 +1099,8 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
         raise ApiError("Speaker sidecar artifact must be exposed to the producer.")
     if kind == JobArtifact.Kind.WORDS and not exposed:
         raise ApiError("Words artifact must be exposed to the producer.")
+    if kind == JobArtifact.Kind.CHAPTER_WINDOWS and not exposed:
+        raise ApiError("Chapter window artifact must be exposed to the producer.")
     return {
         "name": name,
         "kind": kind,
@@ -1106,6 +1128,8 @@ def validate_remote_artifact_content_type(
         expected_content_type = SPEAKER_SIDECAR_CONTENT_TYPE
     elif kind == JobArtifact.Kind.WORDS:
         expected_content_type = WORDS_CONTENT_TYPE
+    elif kind == JobArtifact.Kind.CHAPTER_WINDOWS:
+        expected_content_type = CHAPTER_WINDOWS_CONTENT_TYPE
 
     if expected_content_type is not None and content_type != expected_content_type:
         raise ApiError(f"Artifact {name} content_type must be {expected_content_type}.")
@@ -1166,6 +1190,11 @@ def normalize_remote_result_metadata(
         metadata["diarization"] = sanitized_diarization
     if job.profile:
         metadata["profile"] = sanitize_profile_identity(result_metadata.get("profile"), job=job)
+        marks = (job.output_data or {}).get("chapter_marks_ms")
+        if marks:
+            metadata["chapter_windows"] = sanitize_chapter_windows_metadata(
+                result_metadata.get("chapter_windows"), marks=marks
+            )
     metadata["worker_id"] = worker_id
     metadata["attempt"] = job.attempt_count
     metadata["execution_mode"] = Job.ExecutionMode.REMOTE_PULL
@@ -1242,6 +1271,51 @@ def sanitize_drift_identity(value: object, *, profile: TranscriptionProfile) -> 
             "model_sha256": windows.WINDOW_MODEL_SHA256,
             "settings": windows.WINDOW_SETTINGS.record(),
         },
+    }
+
+
+def sanitize_chapter_windows_metadata(value: object, *, marks: list[int]) -> dict[str, Any]:
+    """The worker's chapter window record (D-29), which must name this control plane's rule.
+
+    The rule, engine, model, its SHA-256 and every clip and decoding setting must equal
+    the pinned ones; only the worker's ``whisper-cli`` version is taken from it. One
+    window per mark, at most that many transcribed, and a non-negative time.
+    """
+    if not isinstance(value, dict):
+        raise ApiError("Jobs with chapter marks must include result_metadata.chapter_windows.")
+    identity = value.get("identity")
+    expected = expected_chapter_windows_identity()
+    if not isinstance(identity, dict) or {key: identity.get(key) for key in expected} != expected:
+        raise ApiError(
+            "result_metadata.chapter_windows.identity does not match the pinned chapter windows."
+        )
+    count, ok = value.get("windows"), value.get("ok")
+    seconds = safe_worker_metadata_number(value.get("seconds"))
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count != len(marks)
+        or isinstance(ok, bool)
+        or not isinstance(ok, int)
+        or not 0 <= ok <= count
+        or seconds is None
+    ):
+        raise ApiError("result_metadata.chapter_windows must count one window per chapter mark.")
+    raw_version = identity.get("cli_version")
+    cli_version = (safe_worker_metadata_string(raw_version) if raw_version else "") or ""
+    return {
+        "identity": {
+            "rule": expected["rule"],
+            "engine": expected["engine"],
+            "cli": expected["cli"],
+            "cli_version": cli_version,
+            "model": expected["model"],
+            "model_sha256": expected["model_sha256"],
+            "settings": expected["settings"],
+        },
+        "windows": count,
+        "ok": ok,
+        "seconds": seconds,
     }
 
 

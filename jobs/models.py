@@ -143,6 +143,7 @@ class JobArtifact(models.Model):
         TRANSCRIPT_PODLOVE = "transcript_podlove", "Transcript Podlove"
         TRANSCRIPT_SPEAKERS = "transcript_speakers", "Transcript speaker suggestions"
         WORDS = "words", "Profile words"
+        CHAPTER_WINDOWS = "chapter_windows", "Profile chapter windows"
         SPEECH_WAV = "speech_wav", "Speech WAV"
         SPEECH_MP3 = "speech_mp3", "Speech MP3"
         SPEECH_OGG = "speech_ogg", "Speech OGG"

@@ -205,6 +205,7 @@ Active top-level spec set:
 - [`2026-10-16_ad_analysis_profile.md`](./2026-10-16_ad_analysis_profile.md)
 - [`2026-10-16_window_transcription.md`](./2026-10-16_window_transcription.md)
 - [`2026-10-16_drift_check.md`](./2026-10-16_drift_check.md)
+- [`2026-10-17_chapter_windows.md`](./2026-10-17_chapter_windows.md)
 - [`remote-transcription-workers.md`](./remote-transcription-workers.md)
 - [`README.md`](./README.md)
 

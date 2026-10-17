@@ -36,7 +36,11 @@ adds per-window records to the words artifact (`drift`) and the drift rule and
 retry model hash to the identity, and the profile needs the turbo window
 runtime as well. Because nothing of this profile had been deployed or served,
 `ad-analysis-v1` was amended in place instead of becoming a new name (D-28);
-from its first deploy on any change is a new name.
+from its first deploy on any change is a new name. Amended 2026-10-17 by slice
+10b (`2026-10-17_chapter_windows.md`, D-29), again before any deploy: a job may
+carry `chapter_marks_ms` and then gets a `chapter_windows.json` artifact and
+`result.metadata.chapter_windows`; ffprobe joins the profile's runtime. A job
+without marks is unchanged.
 
 ## Design
 
