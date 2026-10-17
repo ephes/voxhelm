@@ -2,8 +2,8 @@
 
 Status: 2026-10-15, implemented (Voxhelm 0.1.9, ops-library 2.38.0) and
 verified locally (see "Local verification"); deployed and switched on the
-same day (verification steps 2 and 3's switch done, staging re-runs
-pending). Evidence:
+same day; all verification steps done, and all 196 Django Chat episodes
+re-transcribed on staging on 2026-10-16 (see "Verification"). Evidence:
 `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot".
 Follow-on (2026-10-16): the `ad-analysis-v1` profile runs the same backend
 with its own fixed settings and no fallback
@@ -259,8 +259,25 @@ and the run time per job.
 Steps 2 and the switch in step 3 are done (2026-10-15): both workers run
 0.1.9 with `parakeet-mlx` 0.5.3 and the pinned model and advertise
 `["mlx","parakeet","whispercpp"]`; ops-control `8df1b9d` sets
-`VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet` on the control plane. The
-episode 219 and pilot re-runs on staging wait for the maintainer.
+`VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet` on the control plane.
+
+Steps 3 and 4 on Django Chat staging (2026-10-15/16, measured per second of
+speech against the approved mappings of 2026-10-14):
+
+- Episode 219: 104 of 3280 s (3.2 %) unnamed, under 1 % under another name.
+- The other 11 pilot episodes: agreement 95.1-98.5 %, better than the
+  whisper.cpp pilot in 8 of 10 comparable episodes; unnamed 0.5-3.1 %. The
+  repeated "Hello, Will." in two openings is in the audio (whisper.cpp hears
+  it too), not a pipeline artifact.
+- Bulk run, all 196 episodes (2026-10-16, `atlas` 106 jobs, `studio` 90):
+  every job on `parakeet` / `parakeet-tdt-0.6b-v3`, no whisper.cpp fallback;
+  two URL-fetch failures at the start were transient and re-ran cleanly.
+  Agreement median 97.3 %, minimum 94.0 %; other name median 2.6 %, maximum
+  5.8 %; unnamed median 1.5 %. The one outlier (68 % unnamed) was a guest
+  reference auto-seeded from a swapped old mapping, not an ASR problem; with
+  a listened-to reference it is 3.3 %, and a blind listening check of the five
+  episodes whose two guests had only same-episode auto-seeded references
+  found no swap.
 
 ## Local verification (2026-10-15)
 
