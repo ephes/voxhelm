@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import logging
 import mimetypes
 import queue
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -28,6 +30,8 @@ from urllib.request import (
 from django.conf import settings
 
 from transcriptions.errors import ApiError
+
+LOGGER = logging.getLogger(__name__)
 
 AUDIO_SUFFIXES: Final[dict[str, str]] = {
     ".flac": "audio/flac",
@@ -125,6 +129,19 @@ _THIS_NETWORK: Final = ipaddress.ip_network("0.0.0.0/8")
 _METADATA_ADDRESSES: Final = frozenset(
     ipaddress.ip_address(address) for address in ("fd00:ec2::254", "100.100.100.200", "192.0.0.192")
 )
+# Upstream statuses worth another try: request timeout, rate limiting, server errors.
+_TRANSIENT_HTTP_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
+_BATCH_FETCH_RETRY_DELAY_SECONDS: Final[float] = 5.0
+_BATCH_FETCH_MAX_RETRY_DELAY_SECONDS: Final[float] = 30.0
+_ELAPSED_BUDGET_MESSAGE: Final[str] = "URL fetch exceeded the configured elapsed budget."
+
+
+class TransientFetchError(ApiError):
+    """A URL fetch failure that another try may avoid (budget, network, 5xx).
+
+    Allowlist, SSRF, redirect-limit, media-type and size-limit rejections stay plain
+    ApiError: they fail the same way on every try.
+    """
 
 
 class _FetchDeadline:
@@ -140,7 +157,7 @@ class _FetchDeadline:
     def remaining(self) -> float:
         remaining = self.ends_at - time.monotonic()
         if remaining <= 0:
-            raise ApiError("URL fetch exceeded the configured elapsed budget.")
+            raise TransientFetchError(_ELAPSED_BUDGET_MESSAGE)
         return remaining
 
     def register(self, sock: socket.socket) -> None:
@@ -181,7 +198,7 @@ def _resolve_with_deadline(host: str, port: int) -> list[tuple[int, int, int, tu
     try:
         resolved = result.get(timeout=deadline.remaining())
     except queue.Empty as exc:
-        raise ApiError("URL fetch exceeded the configured elapsed budget.") from exc
+        raise TransientFetchError(_ELAPSED_BUDGET_MESSAGE) from exc
     deadline.remaining()
     if isinstance(resolved, Exception):
         raise resolved
@@ -269,7 +286,7 @@ def _guarded_create_connection(
     try:
         resolved = _resolve_with_deadline(host, port)
     except socket.gaierror as exc:
-        raise ApiError(f"URL fetch failed: could not resolve host ({exc}).") from exc
+        raise TransientFetchError(f"URL fetch failed: could not resolve host ({exc}).") from exc
     if not resolved:
         raise ApiError("URL fetch failed: host did not resolve.")
     for _family, _socktype, _proto, sockaddr in resolved:
@@ -388,12 +405,20 @@ def fetch_allowed_url_to_tempfile(
     detect_suffix: Callable[[str, str], str],
     unsupported_message: str,
     limit_message: str,
+    timeout_seconds: float | None = None,
 ) -> FetchedUrl:
-    """Download an allowlisted URL into a temp file; the shared SSRF-guarded fetcher."""
+    """Download an allowlisted URL into a temp file; the shared SSRF-guarded fetcher.
+
+    timeout_seconds is the elapsed budget for the whole fetch and defaults to
+    VOXHELM_URL_FETCH_TIMEOUT_SECONDS. Failures another try may fix raise
+    TransientFetchError; this function never retries by itself.
+    """
     validate_allowed_media_url(source_url)
     request = Request(source_url, headers={"User-Agent": "voxhelm/0.1", "Accept": accept})
     temp_path: Path | None = None
-    deadline = _FetchDeadline(settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS)
+    if timeout_seconds is None:
+        timeout_seconds = settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS
+    deadline = _FetchDeadline(timeout_seconds)
     marker = _FETCH_DEADLINE.set(deadline)
     deadline.timer.start()
     try:
@@ -422,21 +447,33 @@ def fetch_allowed_url_to_tempfile(
                     if total > max_bytes:
                         raise ApiError(limit_message)
                     handle.write(chunk)
+            # http.client's read1 reports a connection closed before Content-Length
+            # as a normal end of body; a truncated file must not pass as the media.
+            expected = response.headers.get("Content-Length")
+            if expected is not None and expected.isdigit() and total < int(expected):
+                raise TransientFetchError("URL fetch ended before the announced content length.")
             return FetchedUrl(path=temp_path, content_type=content_type, final_url=final_url)
     except HTTPError as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-        raise ApiError(f"URL fetch failed with HTTP {exc.code}.") from exc
+        error_class = TransientFetchError if exc.code in _TRANSIENT_HTTP_STATUSES else ApiError
+        raise error_class(f"URL fetch failed with HTTP {exc.code}.") from exc
     except URLError as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         if isinstance(exc.reason, ApiError):
             raise exc.reason from exc
-        raise ApiError(f"URL fetch failed: {exc.reason}.") from exc
+        # A certificate the host presents now fails the same way on every try.
+        error_class = (
+            ApiError
+            if isinstance(exc.reason, ssl.SSLCertVerificationError)
+            else TransientFetchError
+        )
+        raise error_class(f"URL fetch failed: {exc.reason}.") from exc
     except (OSError, http.client.HTTPException) as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-        raise ApiError(f"URL fetch failed: {exc}.") from exc
+        raise TransientFetchError(f"URL fetch failed: {exc}.") from exc
     except ApiError:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -453,15 +490,49 @@ def fetch_allowed_url_to_tempfile(
         _FETCH_DEADLINE.reset(marker)
 
 
+def _retry_sleep(seconds: float) -> None:
+    """Back off between batch fetch tries; split out so tests can skip the wait."""
+    time.sleep(seconds)
+
+
 def download_allowed_media(*, source_url: str) -> DownloadedMedia:
-    fetched = fetch_allowed_url_to_tempfile(
-        source_url=source_url,
-        accept="audio/*,video/*;q=1.0,*/*;q=0.1",
-        max_bytes=settings.VOXHELM_BATCH_MAX_DOWNLOAD_BYTES,
-        detect_suffix=detect_media_suffix,
-        unsupported_message="Unsupported remote media type for batch transcription.",
-        limit_message="Remote media exceeded the configured batch download limit.",
-    )
+    """Fetch batch media (job input or speaker reference) for the server or a remote worker.
+
+    Each try gets VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS. A TransientFetchError is
+    retried up to VOXHELM_BATCH_URL_FETCH_ATTEMPTS tries in total, so a slow or
+    dropped download does not use up a job attempt; any other error fails at once.
+    """
+    attempts = settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS
+    attempt = 1
+    while True:
+        try:
+            fetched = fetch_allowed_url_to_tempfile(
+                source_url=source_url,
+                accept="audio/*,video/*;q=1.0,*/*;q=0.1",
+                max_bytes=settings.VOXHELM_BATCH_MAX_DOWNLOAD_BYTES,
+                detect_suffix=detect_media_suffix,
+                unsupported_message="Unsupported remote media type for batch transcription.",
+                limit_message="Remote media exceeded the configured batch download limit.",
+                timeout_seconds=settings.VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS,
+            )
+            break
+        except TransientFetchError as exc:
+            if attempt >= attempts:
+                raise
+            delay = min(
+                _BATCH_FETCH_RETRY_DELAY_SECONDS * 2 ** (attempt - 1),
+                _BATCH_FETCH_MAX_RETRY_DELAY_SECONDS,
+            )
+            LOGGER.warning(
+                "batch media fetch failed, retrying try=%s/%s delay_seconds=%s host=%s detail=%s",
+                attempt,
+                attempts,
+                delay,
+                urlparse(source_url).hostname or "",
+                exc.message,
+            )
+            _retry_sleep(delay)
+            attempt += 1
     return DownloadedMedia(
         path=fetched.path,
         content_type=fetched.content_type,

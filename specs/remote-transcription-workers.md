@@ -77,7 +77,11 @@ max-attempt settings must be positive integers. URL inputs and known-speaker
 reference URLs are checked against `VOXHELM_ALLOWED_URL_HOSTS` during job
 submission so invalid remote jobs do not remain queued waiting for a worker to
 discover them. Remote claims revalidate both URL categories before handing a
-payload to a worker so stale jobs follow the current allowlist.
+payload to a worker so stale jobs follow the current allowlist. A worker
+fetches both with the batch limits (`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES`,
+`VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` per try) and retries a transient
+fetch failure inside the claimed attempt, up to
+`VOXHELM_BATCH_URL_FETCH_ATTEMPTS` tries (D-30), before it fails the attempt.
 
 Avoid mixing Django Tasks transcription and remote-pull transcription for the same job pool in the first slice. The goal is to prevent double execution, not to build a multi-scheduler fallback system immediately.
 

@@ -1045,10 +1045,32 @@ concurrency remains outside that scheduler's direct control.
 
 `VOXHELM_URL_FETCH_TIMEOUT_SECONDS` (default `60`, positive integer) is one
 elapsed budget for DNS, connection attempts, redirects, response headers and
-body download, shared by sync inputs, batch inputs and speaker references.
-Slow progress does not reset it. Expiry interrupts network sockets and removes
-partial temporary media; an OS DNS lookup may finish later in a daemon thread,
-which cannot open a connection or create a file.
+body download of a sync URL input (`POST /v1/audio/transcriptions` and the
+operator UI's sync route). Slow progress does not reset it. Expiry interrupts
+network sockets and removes partial temporary media; an OS DNS lookup may
+finish later in a daemon thread, which cannot open a connection or create a
+file. Sync URL inputs are limited to `VOXHELM_MAX_URL_DOWNLOAD_BYTES`
+(default 128 MiB) and are fetched once. Any URL fetch whose body ends before
+its announced `Content-Length` fails instead of passing a truncated file on.
+
+Batch media, meaning the URL input of a batch job and known-speaker reference
+audio, whether fetched by the Django Tasks worker or by a remote worker,
+uses `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (default `600`, positive
+integer) as the same kind of elapsed budget per try, and is limited to
+`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES` (default 512 MiB). The sync size limit does
+not apply to it. A try that fails transiently (the elapsed budget, a DNS,
+connection or read error, or HTTP 408, 425, 429, 500, 502, 503 or 504) is
+retried (as is a body shorter than its `Content-Length`) inside the same
+job attempt, up to `VOXHELM_BATCH_URL_FETCH_ATTEMPTS`
+tries in total (default `3`, positive integer), after 5 s, then 10 s, doubling
+up to 30 s. Each retry is logged at warning level with the host, never the
+full URL. Allowlist and resolved-address rejections, too many redirects,
+an unsupported media type, the size limit, a certificate verification failure
+and other HTTP statuses fail at once. Only a download that fails on every try
+fails the job attempt; a remote worker reports it as retryable as before. A
+remote worker keeps heartbeating its lease while it fetches and retries, so a
+batch fetch can hold a claim for up to about
+`attempts × budget` plus the backoff (about 30 minutes with the defaults).
 
 `VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS` (default `900`, positive integer) bounds
 each ffmpeg decode for whisper.cpp normalization, pyannote diarization and

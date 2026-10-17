@@ -272,6 +272,8 @@ speech against the approved mappings of 2026-10-14):
 - Bulk run, all 196 episodes (2026-10-16, `atlas` 106 jobs, `studio` 90):
   every job on `parakeet` / `parakeet-tdt-0.6b-v3`, no whisper.cpp fallback;
   two URL-fetch failures at the start were transient and re-ran cleanly.
+  (Most likely the 60 s fetch budget on large sources; D-30 gives batch
+  fetches their own budget and in-attempt retries.)
   Agreement median 97.3 %, minimum 94.0 %; other name median 2.6 %, maximum
   5.8 %; unnamed median 1.5 %. The one outlier (68 % unnamed) was a guest
   reference auto-seeded from a swapped old mapping, not an ASR problem; with

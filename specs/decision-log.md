@@ -738,6 +738,32 @@ capacity preservation takes precedence over automatic age-based recovery.
 
 ---
 
+## D-30: How long may a batch or remote worker fetch large URL media, and does a slow fetch cost a job attempt?
+
+**Status:** Implemented 2026-10-17 (not yet deployed).
+
+**Context:** All URL fetches shared one elapsed budget, `VOXHELM_URL_FETCH_TIMEOUT_SECONDS` (60 s, set to 60 in production too). A 128 MB python-podcast source (`pp_48.mp3`, job `4fe55e2d-4691-4681-b5d8-7f3fe482f4ef`) needs about 2.1 MB/s from CloudFront to fit; on `studio` the fetch ran out of budget on attempts 1 and 2 and succeeded on attempt 3 of 3, in under 35 s. Every budget expiry failed the whole remote attempt, so one more slow fetch would have failed the job for good. Of python-podcast's 68 sources, 18 are at least 100 MB and the largest is 160 MB. The Django Chat bulk run (2026-10-16) also lost two attempts to URL fetches.
+
+**Options:**
+
+| Question | Options | Tradeoff |
+|----------|---------|----------|
+| Budget | A. A separate per-try budget for batch media, default 600 s / B. Raise the shared budget / C. A budget proportional to `Content-Length` | A: sync requests keep their short bound, batch media (at most 512 MiB) needs only about 0.9 MB/s, no env change. B: a sync request could hold its HTTP request for minutes. C: the length is known only after the headers, a missing header needs a fallback anyway, and a minimum-throughput rule is harder to state and test than a fixed bound |
+| Retry | A. Retry transient fetch failures inside the attempt / B. Server-side: fetch failures do not count against `max_attempts` / C. None | A: worker-local, no protocol or model change; a cold CDN edge or a dropped connection is usually fine a few seconds later. B: needs a failure category in the fail API and attempt accounting, and an endless loop guard; C: keeps losing attempts |
+
+**Accepted decision:** A and A.
+
+- `download_allowed_media` (batch job inputs and known-speaker reference audio, on the server's Django Tasks worker and on remote workers) uses `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (default 600, positive) per try and retries a `TransientFetchError` up to `VOXHELM_BATCH_URL_FETCH_ATTEMPTS` tries in total (default 3, positive), after 5 s, 10 s, doubling up to 30 s.
+- Transient: the elapsed budget, DNS resolution errors, connection and read errors, a body shorter than its `Content-Length` (before this change `http.client` passed such a truncated file on as complete, for sync inputs too) and HTTP 408, 425, 429, 500, 502, 503 and 504. Everything else stays a plain `ApiError` and fails at once: allowlist, scheme and resolved-address rejections, more than 5 redirects, an unsupported media type, the size limit, a certificate verification failure and other HTTP statuses.
+- Sync URL inputs (`transcriptions.input_media`) keep `VOXHELM_URL_FETCH_TIMEOUT_SECONDS` and one try. Size limits are unchanged: sync 128 MiB (`VOXHELM_MAX_URL_DOWNLOAD_BYTES`), batch and remote 512 MiB (`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES`).
+- A download that fails every try fails the attempt as before (retryable on a remote worker). Retries log the host and the error, never the URL.
+
+**Not decided here:** a separate failure category so the server does not count a fetch failure against `max_attempts` (option B; see BACKLOG), fetch throughput logging.
+
+**Blocks implementation:** No.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:
