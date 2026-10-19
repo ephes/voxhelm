@@ -740,7 +740,7 @@ capacity preservation takes precedence over automatic age-based recovery.
 
 ## D-30: How long may a batch or remote worker fetch large URL media, and does a slow fetch cost a job attempt?
 
-**Status:** Implemented 2026-10-17 (not yet deployed).
+**Status:** Implemented 2026-10-17; released as voxhelm 0.1.10 (0.1.9 plus only this fix) and deployed to the `studio` and `atlas` remote workers on 2026-10-19.
 
 **Context:** All URL fetches shared one elapsed budget, `VOXHELM_URL_FETCH_TIMEOUT_SECONDS` (60 s, set to 60 in production too). A 128 MB python-podcast source (`pp_48.mp3`, job `4fe55e2d-4691-4681-b5d8-7f3fe482f4ef`) needs about 2.1 MB/s from CloudFront to fit; on `studio` the fetch ran out of budget on attempts 1 and 2 and succeeded on attempt 3 of 3, in under 35 s. Every budget expiry failed the whole remote attempt, so one more slow fetch would have failed the job for good. Of python-podcast's 68 sources, 18 are at least 100 MB and the largest is 160 MB. The Django Chat bulk run (2026-10-16) also lost two attempts to URL fetches.
 
