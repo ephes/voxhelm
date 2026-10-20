@@ -9,6 +9,8 @@ Follow-on (2026-10-16): the `ad-analysis-v1` profile runs the same backend
 with its own fixed settings and no fallback
 (`2026-10-16_ad_analysis_profile.md`); the backend gained `run()` and a
 `local_attention` option for it, the invocation below is unchanged.
+German production run (2026-10-19/20): all 68 published python-podcast
+episodes re-transcribed on production (see "German: python-podcast").
 
 ## Why
 
@@ -281,6 +283,52 @@ speech against the approved mappings of 2026-10-14):
   episodes whose two guests had only same-episode auto-seeded references
   found no swap.
 
+## German: python-podcast (2026-10-19/20)
+
+All 68 published python-podcast episodes (German, 2018–2026, about 106 h of
+audio without the pilot) are re-transcribed on production with known-speaker
+jobs on `parakeet` / `parakeet-tdt-0.6b-v3`, and the public names are applied
+with `smooth=False` (only confident segments are named, uncertain ones stay
+empty). Worker versions: 0.1.10 (only D-30 on top of 0.1.9) and then 0.1.11.
+Every job succeeded on the first attempt with no whisper.cpp fallback. That
+includes the 160 MB pp05, which the 60 s fetch budget before D-30 would have
+cost attempts on. Speed: 10–15× real time per worker, `studio` and `atlas` in
+parallel.
+
+Measured per 100 ms of speech against ground truth from per-speaker stems
+(the loudest stem at least 15 dB above its floor and 8 dB above the second
+one). Only episodes whose master is exactly as long as the stems count, so 28
+episodes. The old public transcripts (MacWhisper/Groq whisper-v3 and
+whisper.cpp, smoothed names) are the comparison:
+
+| median over 28 episodes | right | wrong at a change (≤ 1 s) | wrong passage | unnamed | no segment |
+| --- | --- | --- | --- | --- | --- |
+| old public | 88.0 % | 4.9 % | 0.8 % (max 5.3) | 0 % | 6.9 % |
+| Parakeet, `smooth=False` | **92.2 %** | 1.9 % | 0.0 % (max 0.3) | 1.6 % (max 11.4) | 4.2 % |
+
+- 27 of 28 episodes got better, one is marginally worse (pp_50: 92.8 → 91.9
+  %). The lowest is an in-room episode where Johannes's mic picks up
+  crosstalk and the stem truth is weaker (pp_27: 75.0 → 77.4 %).
+- Pilot on the three multitrack gold episodes and five stem episodes
+  (2026-10-17): 91.3 % right with `smooth=False` against 89.6 % for the old
+  public version. Imported unchanged, the public names match the prediction
+  segment for segment.
+- Unnamed share across all new jobs: median 2.3 %, at most 13.8 %. The
+  higher shares come in episodes with several guests or crosstalk.
+- Readability: in the pilot, lines starting lowercase dropped from 57 % to
+  3 % and lines without final punctuation from 66 % to 3 %. Segments are
+  about twice as long.
+- Missing guest references can be found from the transcript itself: on pp04
+  two guests were 71 % unnamed. Their self-introductions settled who was who
+  ("Ich bin der Dodo …", "Ich bin ja Niklas"), and with references from
+  those labels the unnamed share is 10.5 %.
+- German word errors remain and were not measured as WER: "PiPe" for PyPy,
+  "Python Fu Light" for "Python Foo Light", "Nick" for Niklas. Short
+  interjections in crosstalk are dropped.
+
+Run record and per-episode numbers: `var/handoff/2026-10-19_python_podcast_parakeet_bulk/BULK_PLAN.md`
+(gitignored); in python-podcast `docs/known-speaker-runbook.rst`.
+
 ## Local verification (2026-10-15)
 
 Run on `atlas` through the worker code path (`transcribe_claim_audio` with
@@ -326,7 +374,8 @@ most 25.5 GB, within `atlas`'s 64 GB (whisper.cpp: 5.8 GB, about 525 s).
 
 - Misheard names stay ("John Gould" for "Jon Gould"); glossary correction is
   a separate step.
-- German and other non-English quality is less well measured than English.
+- German word errors remain (no WER measured); naming quality on German is
+  measured (see "German: python-podcast"), other languages are not.
 - Backchannels and very short interjections may be dropped by the ASR.
 - Punctuation drops out for stretches of some episodes (see "Local
   verification"); `--max-duration` only bounds the line length.
