@@ -10,8 +10,9 @@ transcription queue and MinIO-backed artifact manifests from trusted workers. Go
 production python-podcast known-speaker diarized transcript to execute on `atlas.local`.
 Server-side control-plane endpoints and remote dispatch mode are implemented as
 of 2026-05-30, and the checkout-runnable `voxhelm-remote-worker` command is
-implemented as of 2026-05-31. Public PyPI publication, deployment, edge
-protection, and the production proof remain open.
+implemented as of 2026-05-31. Public PyPI publication, deployment (LaunchDaemon
+workers on `atlas` and `studio`) and edge protection are done; the production
+proof below remains open.
 
 ### Implementation backlog
 

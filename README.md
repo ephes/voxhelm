@@ -906,11 +906,14 @@ Operational note: the application endpoints still require worker auth, but the
 macmini/Traefik edge must also block `/v1/internal/*` on public routes unless a
 deliberately private worker route is configured.
 
-Current implementation status: the studio control-plane endpoints and
-`remote_pull` dispatch switch are implemented, `voxhelm` is published to PyPI
-and installable as a `uv` tool (`uv tool install "voxhelm[diarization]"`), and a
-`voxhelm-remote-worker` is deployed on `atlas`. Edge protection and the
-production python-podcast proof remain follow-up work.
+Current implementation status: the studio control plane runs in `remote_pull`
+mode, and `voxhelm` is published to PyPI and installable as a `uv` tool
+(`uv tool install "voxhelm[diarization]"`). Two `voxhelm-remote-worker`
+instances, on `atlas` and on `studio`, run a pinned PyPI release as the system
+LaunchDaemon `de.wersdoerfer.voxhelm-remote-worker` (`RunAtLoad`, `KeepAlive`),
+installed by the ops-library `voxhelm_remote_worker_deploy` role. The
+macmini/Traefik edge blocks `/v1/internal/*`. The production python-podcast
+proof ([BACKLOG.md](BACKLOG.md)) remains follow-up work.
 
 ## Wyoming STT
 
