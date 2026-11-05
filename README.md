@@ -119,7 +119,17 @@ Outside `DJANGO_DEBUG=true` the app refuses to start without `DJANGO_SECRET_KEY`
 `uv run ruff format .`), mypy and pytest. GitHub Actions
 (`.github/workflows/ci.yml`) runs the same steps on macOS arm64 on every push and pull
 request; tests that need the real Kokoro models are skipped there, and no
-secrets or services are needed.
+secrets or services are needed. A separate CI job runs `pip-audit` over the locked
+dependencies (`uv export --locked --no-hashes --no-emit-project`, so optional extras
+are not included) and fails on any known vulnerability. It runs on macOS arm64 because
+pip-audit skips requirements whose environment markers do not match the machine it runs
+on, and the Darwin/arm64-only dependencies (mlx-whisper, piper-tts, torch and what they
+pull in) would otherwise go unaudited. Run the same audit locally on a Mac with:
+
+```bash
+uv export --locked --no-hashes --no-emit-project -o /tmp/voxhelm-requirements.txt
+uvx pip-audit==2.10.1 -r /tmp/voxhelm-requirements.txt --disable-pip --no-deps
+```
 
 ## Required Environment
 

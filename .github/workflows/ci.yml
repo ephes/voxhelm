@@ -5,6 +5,11 @@ name: CI
 # skip when the models are absent, so no secrets or services are needed.
 # Runs on macOS arm64 like production (macmini): mlx-whisper and piper-tts are
 # Darwin/arm64-only dependencies that mypy and the tests expect to be present.
+# The audit job runs pip-audit over the locked dependencies (default export, no
+# optional extras) and fails on any known vulnerability; it needs no secrets. It
+# also runs on macOS arm64 because pip-audit skips requirements whose environment
+# markers do not match the runner, and torch, mlx-whisper and their dependencies
+# are locked for Darwin/arm64 only.
 
 on:
   push:
@@ -54,3 +59,23 @@ jobs:
         run: uv run mypy .
       - name: Tests (just test)
         run: uv run pytest -q
+
+  audit:
+    name: Dependency audit (pip-audit, macOS arm64)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Audit locked dependencies
+        run: |
+          uv export --locked --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/requirements.txt" --disable-pip --no-deps
