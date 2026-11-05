@@ -36,21 +36,29 @@ proof below remains open.
 - [x] Add `VOXHELM_TRANSCRIPTION_EXECUTION_MODE=django_tasks|remote_pull`; in `remote_pull` mode, transcribe jobs
   are not enqueued to Django Tasks, startup requires complete shared S3 artifact settings, URL jobs are
   allowlist-checked before queueing, and remote lease/poll/attempt settings must be positive.
-- [ ] Add deployment/edge protection: block `/v1/internal/*` on public Traefik/macmini routes unless explicitly exposed on a private worker route.
-- [ ] Add easy worker packaging/onboarding:
+- [x] Add deployment/edge protection: block `/v1/internal/*` on public Traefik/macmini routes unless explicitly exposed on a private worker route.
+  Done in ops-library `10a448ed` (`voxhelm_ingress_deploy` router `voxhelm-internal-api` blocks the path unless
+  `voxhelm_ingress_internal_api_enabled`) and ops-control `12197e52` (`playbooks/deploy-voxhelm.yml` keeps it `false`).
+- [x] Add easy worker packaging/onboarding:
   - [x] expose a checkout-runnable `voxhelm-remote-worker` command;
   - [x] support checkout-based `uv run`;
   - [x] require only Voxhelm base URL, worker id/token, artifact credentials, model/cache settings, and optional HF token;
-  - [ ] publish/install/run paths with `uv tool install` or `uvx` from public PyPI;
-  - [ ] document a repeatable new-machine setup with local protected env file and manual `uvx`/`caffeinate` execution.
-- [ ] Add the `atlas.local` worker command/process:
+  - [x] publish/install/run paths with `uv tool install` or `uvx` from public PyPI; `voxhelm` is on PyPI (`868e7ee`),
+    and the ops-library `voxhelm_remote_worker_deploy` role (`10a448ed`) installs a pinned release with
+    `uv tool install` from `https://pypi.org/simple`;
+  - [x] document a repeatable new-machine setup with local protected env file and manual `uvx`/`caffeinate` execution
+    (README "Run a manual worker": `0198329` for the checkout command, plus the PyPI-source command and the
+    `chmod 600` env file step added with this backlog sync).
+- [x] Add the `atlas.local` worker command/process:
   - [x] claim one job at a time;
   - [x] materialize URL or staged-upload input;
   - [x] store source/extracted artifacts in MinIO under attempt-scoped prefixes;
   - [x] run local STT;
   - [x] render requested transcript formats;
   - [x] upload artifacts and post completion manifest;
-  - [ ] install and supervise the process on `atlas.local`.
+  - [x] install and supervise the process on `atlas.local`: LaunchDaemon `de.wersdoerfer.voxhelm-remote-worker` from
+    ops-library `voxhelm_remote_worker_deploy` (`10a448ed`), deployed by ops-control
+    `playbooks/deploy-voxhelm-remote-worker.yml` (`12197e52`, default target `atlas`).
 - [ ] Add remote known-speaker diarization support:
   - [x] choose Atlas-runs-known-speaker and document the choice;
   - [x] support `pyannote_known_speaker` payloads from django-cast/python-podcast;
@@ -102,8 +110,10 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [x] Apply `VOXHELM_TTS_MAX_INPUT_CHARS` to Wyoming `Synthesize` and answer `text_too_long`, then close the
   connection.
 - [x] Document that the unauthenticated Wyoming port is for the LAN / Home Assistant only.
-- [ ] Optionally make the ops-library `voxhelm_deploy` Wyoming bind host configurable (still `0.0.0.0`), and expose
-  `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` there if a non-default cap is needed.
+- [x] Optionally make the ops-library `voxhelm_deploy` Wyoming bind host configurable (still `0.0.0.0`), and expose
+  `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` there if a non-default cap is needed. The bind host is the role variable
+  `voxhelm_wyoming_stt_host` (default `0.0.0.0`, since ops-library `d7b45a39`); the cap is
+  `voxhelm_wyoming_stt_max_audio_seconds` (ops-library `7f100c93`).
 - [x] Bound the size of a single Wyoming event: the sidecar reads events through its own reader, refuses a declared
   `data_length` / `payload_length` over `VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES` /
   `VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES` (`event_too_large`) or a malformed one (`invalid_event`) before reading
@@ -134,29 +144,44 @@ clean contributor reference material are the preferred follow-up direction.
 
 ### Voxhelm repo
 
-- [ ] Clean up and commit the diarization implementation, including pyannote 4 `DiarizeOutput` unwrapping.
+- [x] Clean up and commit the diarization implementation, including pyannote 4 `DiarizeOutput` unwrapping
+  (`58f8154`: `transcriptions/diarization.extract_pyannote_annotation`, tests in `tests/test_diarization.py`).
 - [x] Resolve the pending `jobs` migration check:
   - `uv run python manage.py makemigrations --check --dry-run` reports "No changes detected" (verified 2026-10-06).
 - [x] Close the pre-existing batch job idempotency race: concurrent submissions with the same `task_ref` and normalized payload can both miss the dedup query and create duplicate jobs. Closed 2026-10-06 with a `Job.request_fingerprint` (SHA-256 of the normalized result-affecting request fields) and a partial unique constraint on `(producer, task_ref, request_fingerprint)` for non-failed jobs; a losing concurrent insert rolls back and returns the winning job. Migration `jobs.0008` backfills fingerprints and leaves any legacy duplicates unfingerprinted.
 - [x] Stop URL fetches from following redirects past the host allowlist (SSRF). Closed 2026-10-06: `jobs.media.fetch_allowed_url_to_tempfile` is the one fetcher for sync, batch, operator UI and remote workers; it re-validates every redirect hop (scheme + allowlist, max 5 hops), pins each connection to a validated resolved IP (link-local/metadata/multicast/reserved always refused; other non-public IPs only for `VOXHELM_PRIVATE_URL_HOSTS` or trusted HTTP hosts) and ignores proxy env vars.
 - [x] Stop TTS temp files leaking when synthesis fails. Closed 2026-10-06: the Piper backend (`PiperBackend.synthesize`) and the Kokoro WAV writer (`synthesis.kokoro._write_wav`) now delete their `NamedTemporaryFile(delete=False)` WAV before re-raising when synthesis, writing or the read-back fails, and `export_audio` deletes its conversion target when ffmpeg cannot be started (e.g. a missing binary). On success the WAV is still handed to the caller (`SynthesisResult.audio_path`), which removes it as before.
-- [ ] Deploy follow-up for the SSRF fix: add `VOXHELM_PRIVATE_URL_HOSTS` to the ops-library `voxhelm_deploy` and `voxhelm_remote_worker_deploy` env templates and list the tailnet-resolving allowlisted hosts (`s3.home.xn--wersdrfer-47a.de`, `macmini.tailde2ec.ts.net`) before deploying, otherwise those fetches are refused as non-public.
+- [x] Deploy follow-up for the SSRF fix: add `VOXHELM_PRIVATE_URL_HOSTS` to the ops-library `voxhelm_deploy` and `voxhelm_remote_worker_deploy` env templates and list the tailnet-resolving allowlisted hosts (`s3.home.xn--wersdrfer-47a.de`, `macmini.tailde2ec.ts.net`) before deploying, otherwise those fetches are refused as non-public.
+  Done in ops-library `7f100c93` (`voxhelm_private_url_hosts`) and `ea7dff75` (`voxhelm_remote_worker_private_url_hosts`);
+  ops-control `39e035c0` and `a5f350c7` list `s3.home.xn--wersdrfer-47a.de` for both. On the control plane
+  `macmini.tailde2ec.ts.net` is in `voxhelm_trusted_http_hosts`, which also admits non-public addresses.
+- [ ] Check whether remote workers need `macmini.tailde2ec.ts.net` as a private URL host: ops-control
+  `playbooks/deploy-voxhelm-remote-worker.yml` allowlists it but lists only the S3 host in
+  `voxhelm_remote_worker_private_url_hosts`, and the worker env sets no trusted HTTP hosts, so a worker would refuse
+  a URL on that host if it resolves to a tailnet address.
 - [ ] Keep `pyannote.audio` behind the optional `diarization` extra and verify fresh install with:
   - `uv sync --extra diarization`
 - [ ] Decide whether the current pyannote/torchcodec warning is acceptable in production logs. Voxhelm avoids torchcodec decoding by passing ffmpeg-decoded waveform data to pyannote, but pyannote still emits the import-time warning.
 - [x] Apply the D-09 retention policy to job intermediates. Closed 2026-10-06: `manage.py prune_job_artifacts [--dry-run]` deletes non-exposed `source` artifacts of terminal jobs older than `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` (default 24 h) and `extracted_audio` of terminal jobs (object first, then row; missing objects tolerated; failures keep the row and exit non-zero). Remote completions queue replaced `source`/`extracted_audio` objects (`PendingArtifactDeletion`, migration `jobs.0009`) and delete them instead of orphaning them; failed deletions are retried by the command. Transcript, speaker and speech artifacts are never pruned.
 - [x] Apply the D-09 90-day job metadata retention. Closed 2026-10-06: after pruning artifacts, `manage.py prune_job_artifacts [--dry-run]` deletes `Job` rows of terminal jobs that finished more than `VOXHELM_JOB_METADATA_RETENTION_SECONDS` ago (default 90 days, `0` disables) and own no artifact row, queued `PendingArtifactDeletion` or claimed staged upload; eligibility is re-checked per batch under the write lock. No migration needed.
 - [ ] Decide on archiving or deleting job metadata of jobs that still own indefinite transcript/speech artifacts (D-09 keeps those artifacts indefinitely and serves them through their job, so these job rows are currently never pruned).
-- [ ] Deploy follow-up for D-09 retention: add an hourly systemd timer (or cron) for `manage.py prune_job_artifacts` to the ops-library `voxhelm_deploy` role, and optionally `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` to the env template., and `VOXHELM_JOB_METADATA_RETENTION_SECONDS`.
+- [x] Deploy follow-up for D-09 retention: add an hourly systemd timer (or cron) for `manage.py prune_job_artifacts` to the ops-library `voxhelm_deploy` role, and optionally `VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS` and `VOXHELM_JOB_METADATA_RETENTION_SECONDS` to the env template.
+  Done as a launchd job (`studio` is macOS) in ops-library `7f100c93` (`voxhelm_prune_*`, retention variables) and
+  `00bdabb9` (optional daily time); ops-control `playbooks/deploy-voxhelm.yml` enables the real run (`875b31da`,
+  hourly since `e22736da`).
 - [ ] Add diarization quality metadata and warnings for pathological label distributions, including tiny clusters and
   distributions that contradict the requested speaker count.
 - [ ] Prefer `exclusive_speaker_diarization` for transcript alignment when pyannote returns it.
-- [ ] Add a non-default known-speaker postprocessor behind an explicit request flag. It should classify mastered
+- [x] Add a non-default known-speaker postprocessor behind an explicit request flag. It should classify mastered
   transcript segment windows against contributor reference embeddings, preserve anonymous pyannote labels as
-  fallback/debug metadata, and emit candidates, margins, confidence, and uncertainty flags.
-- [ ] Keep `pyannote/wespeaker-voxceleb-resnet34-LM` as the first known-speaker embedding model candidate based on
+  fallback/debug metadata, and emit candidates, margins, confidence, and uncertainty flags. Done in `d6429fb`
+  (`transcriptions/known_speaker.py`, `diarization.strategy=pyannote_known_speaker`, see
+  `specs/known-speaker-diarization.md`).
+- [x] Keep `pyannote/wespeaker-voxceleb-resnet34-LM` as the first known-speaker embedding model candidate based on
   the 2026-05-27 research spike; keep `pyannote/embedding` as a possible high-precision/lower-coverage alternative.
-- [ ] Document required Hugging Face access for the configured pyannote model and gated dependencies:
+  It is `DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL` in `transcriptions/known_speaker.py` (`d6429fb`).
+- [x] Document required Hugging Face access for the configured pyannote model and gated dependencies (README
+  "Speaker diarization"):
   - `pyannote/speaker-diarization-3.1`
   - `pyannote/speaker-diarization-community-1`
   - `pyannote/wespeaker-voxceleb-resnet34-LM`
@@ -164,31 +189,35 @@ clean contributor reference material are the preferred follow-up direction.
 
 ### ops-library
 
-- [ ] Extend `roles/voxhelm_deploy` defaults with diarization settings:
+- [x] Extend `roles/voxhelm_deploy` defaults with diarization settings (ops-library `5251abb3`):
   - `voxhelm_diarization_backend: "none"`
   - `voxhelm_pyannote_model: "pyannote/speaker-diarization-3.1"`
   - `voxhelm_huggingface_token: ""`
-- [ ] Render these into `/etc/voxhelm/voxhelm.env`:
+- [x] Render these into `/etc/voxhelm/voxhelm.env` (ops-library `5251abb3`, `templates/voxhelm.env.j2`):
   - `VOXHELM_DIARIZATION_BACKEND`
   - `VOXHELM_PYANNOTE_MODEL`
   - `VOXHELM_HUGGINGFACE_TOKEN`
   - optionally `HF_TOKEN` with the same value for library compatibility.
-- [ ] Make the role install optional dependencies when pyannote is enabled:
+- [x] Make the role install optional dependencies when pyannote is enabled (ops-library `5251abb3`, `61f717f8`:
+  `tasks/uv_sync_args.yml` adds `--extra diarization` when `voxhelm_diarization_backend` is `pyannote`):
   - current: `uv sync --frozen --no-dev`
   - needed: `uv sync --frozen --no-dev --extra diarization`
-- [ ] Ensure the token is only present in the protected env file, not inline in command lines, plists, or task logs.
-- [ ] Ensure app and worker restart when the env file or dependency set changes.
+- [x] Ensure the token is only present in the protected env file, not inline in command lines, plists, or task logs.
+  Only `templates/voxhelm.env.j2` renders it; `tasks/config.yml` writes the file `0640` with `no_log: true`.
+- [x] Ensure app and worker restart when the env file or dependency set changes: `tasks/launchd.yml` forces a
+  restart of every service on `voxhelm_env_template` or `voxhelm_uv_sync` changes.
 
 ### ops-control
 
-- [ ] Add `huggingface_token` to `secrets/prod/voxhelm.yml.example`.
-- [ ] Store the real token only in SOPS-encrypted `secrets/prod/voxhelm.yml`.
-- [ ] Pass the secret to `local.ops_library.voxhelm_deploy` in `playbooks/deploy-voxhelm.yml`:
+- [x] Add `huggingface_token` to `secrets/prod/voxhelm.yml.example` (ops-control `69a0fcc5`).
+- [x] Store the real token only in SOPS-encrypted `secrets/prod/voxhelm.yml` (ops-control `dabccecb`).
+- [x] Pass the secret to `local.ops_library.voxhelm_deploy` in `playbooks/deploy-voxhelm.yml` (ops-control `69a0fcc5`):
   - `voxhelm_diarization_backend: "pyannote"`
   - `voxhelm_pyannote_model: "pyannote/speaker-diarization-3.1"`
   - `voxhelm_huggingface_token: "{{ service_secrets.huggingface_token | default('') }}"`
-- [ ] Add deploy validation: if pyannote is enabled, fail clearly when the token is missing or still `CHANGEME`.
-- [ ] Add/keep a short diarization smoke-test command in docs or runbook.
+- [x] Add deploy validation: if pyannote is enabled, fail clearly when the token is missing or still `CHANGEME`
+  (ops-control `69a0fcc5` in `playbooks/deploy-voxhelm.yml`; ops-library `5251abb3` in `tasks/validate.yml`).
+- [x] Add/keep a short diarization smoke-test command in docs or runbook (ops-control `docs/VOXHELM.md`, `69a0fcc5`).
 
 ### django-cast
 

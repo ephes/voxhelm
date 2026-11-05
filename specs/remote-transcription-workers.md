@@ -4,8 +4,9 @@
 **Status:** Accepted implementation concept. Server-side worker auth, heartbeat,
 lease claim, completion/failure endpoints, and `remote_pull` dispatch mode are
 implemented as of 2026-05-30. The checkout-runnable `voxhelm-remote-worker`
-command is implemented as of 2026-05-31; public PyPI publication, deployment,
-edge protection, and production `atlas.local` validation remain pending.
+command is implemented as of 2026-05-31. Public PyPI publication, deployment
+(LaunchDaemon workers on `atlas` and `studio`) and edge protection are done;
+the production `atlas.local` proof remains pending (see `BACKLOG.md`).
 **Chosen architecture:** Option B -- internal HTTP pull-worker API.  
 **First worker target:** `atlas.local`.  
 **Goal-complete validation:** real production python-podcast known-speaker diarized transcript executed on `atlas.local`.
@@ -641,7 +642,7 @@ Before implementation/deployment, validate manually:
 ### RW-4: Remote transcription worker command and packaging
 
 - Implemented for repository checkouts: `voxhelm-remote-worker` heartbeats, claims one job at a time, materializes URL/staged-upload input, runs STT plus anonymous or Atlas-runs-known-speaker diarization, uploads source/transcript/sidecar artifacts, and reports completion/failure.
-- Still pending for full packaging: public PyPI publication and install/run validation with `uv tool install` or `uvx` on a new machine.
+- Packaging done: `voxhelm` is published to public PyPI, and the ops-library `voxhelm_remote_worker_deploy` role installs a pinned release with `uv tool install` on `atlas` and `studio`. The README documents the manual `uvx`/`caffeinate` run, from a checkout or from the published package, with an owner-only (`chmod 600`) env file.
 - Worker startup configuration stays in env file / CLI options for Voxhelm base URL, worker id/token, artifact credentials, model cache, backend/model, and optional Hugging Face token.
 - Default to one concurrent job per worker.
 - Include structured logs with worker ID and Voxhelm job ID.

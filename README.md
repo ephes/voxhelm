@@ -683,6 +683,11 @@ Production diarization requires all of the following:
 - accept Hugging Face access for `pyannote/speaker-diarization-3.1`,
   `pyannote/speaker-diarization-community-1`, and any gated dependency reported
   by pyannote during model loading
+- for known-speaker jobs (`diarization.strategy=pyannote_known_speaker`), also
+  make sure the token can download the embedding model, by default
+  `pyannote/wespeaker-voxceleb-resnet34-LM`; accept its terms if Hugging Face
+  asks. Embedding extraction loads it with the same token and fails when no
+  token is set
 
 The first successful run downloads model weights through the Hugging Face /
 pyannote cache path and can take time. Long podcast episodes are CPU-heavy;
@@ -896,6 +901,23 @@ running:
   --once
 ```
 
+The env file holds the worker token and the artifact credentials, so keep it
+readable only by the account that runs the worker:
+
+```bash
+chmod 600 "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env"
+```
+
+On a new machine without a checkout, run the published PyPI package instead
+of the local source; pin the release the control plane expects:
+
+```bash
+/usr/bin/caffeinate -i -m -s -- uvx --from "voxhelm[diarization]==<version>" \
+  voxhelm-remote-worker \
+  --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --once
+```
+
 The legacy `--token` flag still works and takes precedence over the environment,
 but is deprecated and prints a warning to stderr because command-line arguments
 can expose credentials in process listings. Use `VOXHELM_WORKER_TOKEN` in the
@@ -914,9 +936,10 @@ while local inference runs, uploads the source, optional extracted audio,
 requested transcript artifacts, and known-speaker `transcript.speakers.json`
 sidecar under the claimed attempt prefix, then posts the completion manifest.
 
-Operational note: the application endpoints still require worker auth, but the
-macmini/Traefik edge must also block `/v1/internal/*` on public routes unless a
-deliberately private worker route is configured.
+Operational note: the application endpoints still require worker auth, and the
+macmini/Traefik edge also blocks `/v1/internal/*` on public routes unless a
+deliberately private worker route is configured (ops-library
+`voxhelm_ingress_deploy`, `voxhelm_ingress_internal_api_enabled`).
 
 Current implementation status: the studio control plane runs in `remote_pull`
 mode, and `voxhelm` is published to PyPI and installable as a `uv` tool

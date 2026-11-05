@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Docs: `BACKLOG.md` ticks the items that are already done and cites the voxhelm,
+  ops-library or ops-control commit for each (edge block of `/v1/internal/*`, PyPI
+  packaging, the LaunchDaemon worker on `atlas`, the ops-library diarization, private
+  URL host, prune job and Wyoming settings, and the ops-control Hugging Face token wiring
+  and deploy check). It adds an open check: remote workers allowlist
+  `macmini.tailde2ec.ts.net` but do not list it as a private URL host.
+  `specs/remote-transcription-workers.md` no longer calls PyPI publication, deployment
+  and edge protection pending. The README's Hugging Face access notes now name the
+  known-speaker embedding model `pyannote/wespeaker-voxceleb-resnet34-LM`; its remote
+  worker section says the edge blocks `/v1/internal/*` (it said the edge "must" block it),
+  tells you to keep the worker env file at `chmod 600`, and shows the manual `uvx` run
+  from the published PyPI package next to the checkout one.
+
 - Security: the Wyoming sidecar now bounds the size of a single event. It reads events
   through its own reader, which checks the client-declared `data_length` and
   `payload_length` before reading the body; the `wyoming` library's reader buffered
