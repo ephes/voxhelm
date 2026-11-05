@@ -476,6 +476,15 @@ VOXHELM_WYOMING_STT_PROMPT = os.getenv("VOXHELM_WYOMING_STT_PROMPT", "").strip()
 VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS = int(
     os.getenv("VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS", "120")
 )
+# Per-event limits for the Wyoming sidecar, checked on the declared lengths before the
+# event body is read. An empty payload limit derives it from the STT audio cap.
+VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES = int(
+    os.getenv("VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES", "262144")
+)
+_wyoming_max_event_payload_bytes = os.getenv("VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES", "").strip()
+VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES = (
+    int(_wyoming_max_event_payload_bytes) if _wyoming_max_event_payload_bytes else None
+)
 VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = env_bool(
     "VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT",
     default=True,

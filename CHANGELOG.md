@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Security: the Wyoming sidecar now bounds the size of a single event. It reads events
+  through its own reader, which checks the client-declared `data_length` and
+  `payload_length` before reading the body; the `wyoming` library's reader buffered
+  any declared size, so any client on the unauthenticated port could make the process
+  allocate arbitrary memory. New settings `VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES`
+  (default 256 KiB) and `VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES` (default: the STT
+  audio cap in converted bytes, 3840000 for 120 s). Oversized events are answered with
+  an `error` event `event_too_large`, malformed ones (negative or non-integer lengths,
+  invalid header or data JSON) with `invalid_event`, and the connection is closed. The
+  handler now also closes the connection when its loop ends. Because the reader
+  replaces library internals, the `wyoming` requirement is narrowed to `>=1.8.0,<1.9`
+  and a test asserts the locked version (1.8.0).
+
 - Update the locked dependencies of the optional extras (mainly `diarization`) to fix
   their pip-audit findings: aiohttp 3.14.4 (with yarl 1.25.1), multidict 6.9.1,
   lightning 2.6.6, pytorch-lightning 2.6.6 and opentelemetry-api 1.45.1 (with the

@@ -221,6 +221,8 @@ export VOXHELM_WYOMING_STT_LANGUAGE=""
 export VOXHELM_WYOMING_STT_LANGUAGES="de,en"
 export VOXHELM_WYOMING_STT_PROMPT=""
 export VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS="120"
+export VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES="262144"
+export VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES=""
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"
@@ -942,7 +944,27 @@ hallucinations seen with the current `whisper.cpp` setup on `studio`.
 The Wyoming protocol has no authentication, and the sidecar binds
 `0.0.0.0:10300` by default. Expose the port only to the LAN or to Home
 Assistant, never to the internet. To bound memory use on the inference host,
-the sidecar enforces two input limits per connection:
+the sidecar enforces these input limits per connection:
+
+- Every event is checked before its body is read. The sidecar reads events
+  through its own bounded reader instead of the `wyoming` library's, which
+  would buffer whatever `data_length` / `payload_length` a client declares.
+  - `VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES` (default `262144`, 256 KiB, must be
+    positive) caps the declared `data_length` of one event. The default leaves
+    room for a `Synthesize` request at the default `VOXHELM_TTS_MAX_INPUT_CHARS`;
+    raise it together with that limit if needed.
+  - `VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES` (must be positive when set) caps
+    the declared `payload_length` of one event. Unset or empty, it equals the
+    whole STT audio cap in converted bytes
+    (`VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` × 32000, so 3840000 bytes for
+    120 s).
+  - An event over either limit, or with a header line over 64 KiB, is answered
+    with an `error` event (`code="event_too_large"`). A malformed event (a
+    negative or non-integer length, a header that is not a JSON object with a
+    `type`, or event data that is not a JSON object) is answered with
+    `code="invalid_event"`. In both cases the connection is closed. The length
+    and header checks run before any body byte is read; event data is read
+    (within the data limit) before it is parsed and checked.
 
 - `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default `120`, must be positive) caps
   the audio buffered for one transcription, measured after conversion to

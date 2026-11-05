@@ -2626,7 +2626,7 @@ requires-dist = [
     { name = "piper-tts", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=1.4.1,<2" },
     { name = "pyannote-audio", marker = "extra == 'diarization'", specifier = ">=4.0.4" },
     { name = "uvicorn", specifier = ">=0.35.0" },
-    { name = "wyoming", specifier = ">=1.8.0,<2" },
+    { name = "wyoming", specifier = ">=1.8.0,<1.9" },
 ]
 provides-extras = ["diarization", "kokoro", "routing"]
 

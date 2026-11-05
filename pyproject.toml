@@ -13,7 +13,7 @@ dependencies = [
   "mlx-whisper; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "piper-tts>=1.4.1,<2; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "uvicorn>=0.35.0",
-  "wyoming>=1.8.0,<2",
+  "wyoming>=1.8.0,<1.9",
 ]
 
 [project.scripts]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import signal
@@ -54,6 +55,7 @@ _CONVERTED_WIDTH = 2
 _CONVERTED_CHANNELS = 1
 _CONVERTED_BYTES_PER_SECOND = _CONVERTED_RATE * _CONVERTED_WIDTH * _CONVERTED_CHANNELS
 DEFAULT_MAX_AUDIO_SECONDS = 120
+DEFAULT_MAX_EVENT_DATA_BYTES = 256 * 1024
 
 _PIPER_ATTRIBUTION = Attribution(
     name="Piper",
@@ -87,10 +89,19 @@ class WyomingSttConfig:
     languages: tuple[str, ...]
     prompt: str | None
     max_audio_seconds: int = DEFAULT_MAX_AUDIO_SECONDS
+    max_event_data_bytes: int = DEFAULT_MAX_EVENT_DATA_BYTES
+    # None derives the per-event payload limit from the STT audio cap.
+    max_event_payload_bytes_override: int | None = None
 
     @property
     def max_audio_bytes(self) -> int:
         return self.max_audio_seconds * _CONVERTED_BYTES_PER_SECOND
+
+    @property
+    def max_event_payload_bytes(self) -> int:
+        if self.max_event_payload_bytes_override is not None:
+            return self.max_event_payload_bytes_override
+        return self.max_audio_bytes
 
     @property
     def uri(self) -> str:
@@ -169,6 +180,16 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         raise ImproperlyConfigured(
             "VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS must be a positive integer."
         )
+    max_event_data_bytes = settings.VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES
+    if max_event_data_bytes <= 0:
+        raise ImproperlyConfigured(
+            "VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES must be a positive integer."
+        )
+    max_event_payload_bytes = settings.VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES
+    if max_event_payload_bytes is not None and max_event_payload_bytes <= 0:
+        raise ImproperlyConfigured(
+            "VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES must be a positive integer."
+        )
     return WyomingSttConfig(
         host=settings.VOXHELM_WYOMING_STT_HOST,
         port=settings.VOXHELM_WYOMING_STT_PORT,
@@ -178,6 +199,8 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         languages=languages,
         prompt=settings.VOXHELM_WYOMING_STT_PROMPT or None,
         max_audio_seconds=max_audio_seconds,
+        max_event_data_bytes=max_event_data_bytes,
+        max_event_payload_bytes_override=max_event_payload_bytes,
     )
 
 
@@ -237,6 +260,90 @@ def build_wyoming_info(config: WyomingSttConfig) -> Info:
     )
 
 
+class WyomingEventRejected(Exception):
+    """A client event was refused before its body was read."""
+
+    def __init__(self, code: str, text: str) -> None:
+        super().__init__(text)
+        self.code = code
+        self.text = text
+
+
+def _declared_length(header: dict, key: str, limit: int) -> int:
+    value = header.get(key)
+    if value is None:
+        return 0
+    # bool is an int subclass; JSON true/false is not a length.
+    if type(value) is not int or value < 0:
+        raise WyomingEventRejected("invalid_event", f"Invalid {key} in event header.")
+    if value > limit:
+        raise WyomingEventRejected(
+            "event_too_large",
+            f"Event {key} {value} exceeds the configured limit of {limit} bytes.",
+        )
+    return value
+
+
+async def read_bounded_event(
+    reader: asyncio.StreamReader,
+    *,
+    max_data_bytes: int,
+    max_payload_bytes: int,
+) -> Event | None:
+    """Read one Wyoming event, refusing oversized or malformed ones before reading their body.
+
+    Mirrors ``wyoming.event.async_read_event`` (wyoming 1.8.0), whose ``readexactly`` calls
+    trust the client-declared ``data_length`` and ``payload_length``. The header line itself
+    is bounded by the stream reader's limit (64 KiB by default). Returns ``None`` when the
+    client disconnects, and raises ``WyomingEventRejected`` for an event that must be refused.
+    """
+    try:
+        json_line = await reader.readline()
+    except ValueError as exc:  # header line longer than the stream reader limit
+        raise WyomingEventRejected(
+            "event_too_large", "Event header exceeds the line length limit."
+        ) from exc
+    if not json_line:
+        return None
+
+    try:
+        header = json.loads(json_line)
+    except ValueError as exc:
+        raise WyomingEventRejected("invalid_event", "Event header is not valid JSON.") from exc
+    if not isinstance(header, dict) or not isinstance(header.get("type"), str):
+        raise WyomingEventRejected("invalid_event", "Event header has no valid type.")
+    data = header.get("data")
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise WyomingEventRejected("invalid_event", "Event data is not a JSON object.")
+
+    data_length = _declared_length(header, "data_length", max_data_bytes)
+    payload_length = _declared_length(header, "payload_length", max_payload_bytes)
+
+    try:
+        if data_length > 0:
+            data_bytes = await reader.readexactly(data_length)
+            try:
+                extra_data = json.loads(data_bytes)
+            except ValueError as exc:
+                raise WyomingEventRejected(
+                    "invalid_event", "Event data is not valid JSON."
+                ) from exc
+            if not isinstance(extra_data, dict):
+                raise WyomingEventRejected("invalid_event", "Event data is not a JSON object.")
+            data.update(extra_data)
+
+        payload: bytes | None = None
+        if payload_length > 0:
+            payload = await reader.readexactly(payload_length)
+    except asyncio.IncompleteReadError:
+        # The client disconnected in the middle of an event.
+        return None
+
+    return Event(type=header["type"], data=data, payload=payload)
+
+
 class WyomingSttEventHandler(AsyncEventHandler):
     def __init__(
         self,
@@ -257,6 +364,36 @@ class WyomingSttEventHandler(AsyncEventHandler):
         self.request_model = config.model
         self.request_language = config.language
         self.audio_shape = WyomingAudioShape()
+
+    async def run(self) -> None:
+        """Receive events like ``AsyncEventHandler.run``, but through the bounded reader.
+
+        Replaces the library loop (wyoming 1.8.0) so that a client-declared length can never
+        make the process buffer more than the configured per-event limits, and closes the
+        connection when the loop ends.
+        """
+        self._is_running = True
+        try:
+            while self._is_running:
+                try:
+                    event = await read_bounded_event(
+                        self.reader,
+                        max_data_bytes=self.config.max_event_data_bytes,
+                        max_payload_bytes=self.config.max_event_payload_bytes,
+                    )
+                except WyomingEventRejected as exc:
+                    _LOGGER.warning("Wyoming event rejected (%s): %s", exc.code, exc.text)
+                    await self.write_event(Error(text=exc.text, code=exc.code).event())
+                    break
+                if event is None:
+                    break
+                if not (await self.handle_event(event)):
+                    break
+        finally:
+            await self.disconnect()
+            # The library leaves the transport open when the loop ends; close it so a
+            # refused or finished client does not keep the socket.
+            self.writer.close()
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):

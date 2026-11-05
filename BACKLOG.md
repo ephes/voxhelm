@@ -104,8 +104,13 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [x] Document that the unauthenticated Wyoming port is for the LAN / Home Assistant only.
 - [ ] Optionally make the ops-library `voxhelm_deploy` Wyoming bind host configurable (still `0.0.0.0`), and expose
   `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` there if a non-default cap is needed.
-- [ ] A single oversized Wyoming event payload is still read fully by the `wyoming` library before the handler sees
-  it; bounding per-event size would need a custom reader.
+- [x] Bound the size of a single Wyoming event: the sidecar reads events through its own reader, refuses a declared
+  `data_length` / `payload_length` over `VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES` /
+  `VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES` (`event_too_large`) or a malformed one (`invalid_event`) before reading
+  the body, then closes the connection. The requirement is narrowed to `wyoming>=1.8.0,<1.9` and a test asserts 1.8.0, because the reader replaces library
+  internals.
+- [ ] Expose `VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES` and `VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES` in the ops-library
+  `voxhelm_deploy` role if non-default limits are needed.
 
 ## Operator UI hardening
 

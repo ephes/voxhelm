@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import io
+import json
 import wave
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,7 +13,7 @@ from django.core.exceptions import ImproperlyConfigured
 from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.error import Error
-from wyoming.event import Event, read_event
+from wyoming.event import Event, read_event, write_event
 from wyoming.info import Describe, Info
 from wyoming.tts import Synthesize
 
@@ -698,3 +701,262 @@ def test_wyoming_handler_passes_stripped_text_to_synthesis(monkeypatch, settings
     asyncio.run(run_flow())
 
     assert calls == ["hello"]
+
+
+# --- Per-event size limits (bounded reader) ---------------------------------------------
+
+
+class ClosingWriter(DummyWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def encode_events(*events: Event) -> bytes:
+    stream = io.BytesIO()
+    for event in events:
+        write_event(event, stream)
+    return stream.getvalue()
+
+
+def run_handler_on_stream(
+    raw: bytes,
+    *,
+    config: WyomingSttConfig | None = None,
+    eof: bool = True,
+) -> tuple[ClosingWriter, WyomingSttEventHandler]:
+    writer = ClosingWriter()
+    resolved_config = config or limit_config(max_audio_seconds=1)
+
+    async def run_flow() -> WyomingSttEventHandler:
+        reader = asyncio.StreamReader()
+        reader.feed_data(raw)
+        if eof:
+            reader.feed_eof()
+        handler = WyomingSttEventHandler(
+            resolved_config,
+            build_wyoming_info(resolved_config),
+            reader,
+            writer,
+        )
+        # Without EOF the loop would hang if the body were awaited; a refusal must return.
+        await asyncio.wait_for(handler.run(), timeout=5)
+        return handler
+
+    handler = asyncio.run(run_flow())
+    return writer, handler
+
+
+def header_line(header: dict) -> bytes:
+    return json.dumps(header).encode() + b"\n"
+
+
+def assert_single_error(writer: ClosingWriter, code: str) -> Error:
+    events = decode_all_events(writer)
+    assert len(events) == 1
+    assert Error.is_type(events[0].type)
+    error = Error.from_event(events[0])
+    assert error.code == code
+    assert writer.closed
+    return error
+
+
+def test_wyoming_library_version_is_pinned() -> None:
+    """`WyomingSttEventHandler.run` and `read_bounded_event` replace wyoming 1.8.0 internals.
+
+    On a library upgrade, re-check `AsyncEventHandler.run` and `async_read_event` (wire
+    format, `_is_running`), then widen the `<1.9` bound in pyproject.toml and bump this
+    version.
+    """
+    assert importlib.metadata.version("wyoming") == "1.8.0"
+
+
+def test_wyoming_config_derives_event_limits_from_audio_cap() -> None:
+    config = limit_config(max_audio_seconds=2)
+
+    assert config.max_event_data_bytes == 256 * 1024
+    assert config.max_event_payload_bytes == 2 * 16000 * 2
+
+
+def test_get_wyoming_stt_config_reads_event_limits(settings) -> None:
+    settings.VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES = 4096
+    settings.VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES = 8192
+
+    config = get_wyoming_stt_config()
+
+    assert config.max_event_data_bytes == 4096
+    assert config.max_event_payload_bytes == 8192
+
+
+def test_get_wyoming_stt_config_defaults_event_payload_limit_to_audio_cap(settings) -> None:
+    settings.VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS = 3
+    settings.VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES = None
+
+    config = get_wyoming_stt_config()
+
+    assert config.max_event_payload_bytes == 3 * 16000 * 2
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES", 0),
+        ("VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES", -1),
+        ("VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES", 0),
+        ("VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES", -1),
+    ],
+)
+def test_get_wyoming_stt_config_rejects_non_positive_event_limits(settings, name, value) -> None:
+    setattr(settings, name, value)
+
+    with pytest.raises(ImproperlyConfigured, match=name):
+        get_wyoming_stt_config()
+
+
+def test_wyoming_run_refuses_huge_declared_data_length() -> None:
+    # No body follows and the stream stays open: reading it would block forever.
+    raw = header_line({"type": "synthesize", "data_length": 10**12})
+
+    writer, _ = run_handler_on_stream(raw, eof=False)
+
+    error = assert_single_error(writer, "event_too_large")
+    assert "data_length" in (error.text or "")
+
+
+def test_wyoming_run_refuses_huge_declared_payload_length() -> None:
+    raw = header_line({"type": "audio-chunk", "payload_length": 10**12})
+
+    writer, _ = run_handler_on_stream(raw, eof=False)
+
+    error = assert_single_error(writer, "event_too_large")
+    assert "payload_length" in (error.text or "")
+
+
+def test_wyoming_run_refuses_payload_just_over_limit() -> None:
+    config = limit_config(max_audio_seconds=1)
+    raw = header_line(
+        {
+            "type": "audio-chunk",
+            "data": {"rate": 16000, "width": 2, "channels": 1},
+            "payload_length": config.max_event_payload_bytes + 1,
+        }
+    )
+
+    writer, _ = run_handler_on_stream(raw, config=config, eof=False)
+
+    assert_single_error(writer, "event_too_large")
+
+
+def test_wyoming_run_refuses_data_over_configured_limit() -> None:
+    config = replace(limit_config(), max_event_data_bytes=16)
+    raw = encode_events(Synthesize(text="this text is longer than sixteen bytes").event())
+
+    writer, _ = run_handler_on_stream(raw, config=config, eof=False)
+
+    assert_single_error(writer, "event_too_large")
+
+
+@pytest.mark.parametrize("key", ["data_length", "payload_length"])
+@pytest.mark.parametrize("value", [-1, 1.5, "10", True, [1]])
+def test_wyoming_run_refuses_invalid_declared_length(key, value) -> None:
+    raw = header_line({"type": "describe", key: value})
+
+    writer, _ = run_handler_on_stream(raw, eof=False)
+
+    assert_single_error(writer, "invalid_event")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"not json\n",
+        b"[1, 2]\n",
+        b'{"data": {}}\n',
+        b'{"type": "describe", "data": [1]}\n',
+        b'{"type": "describe", "data_length": 2}\n[]',
+        b'{"type": "describe", "data_length": 2}\n{x',
+    ],
+)
+def test_wyoming_run_refuses_malformed_event(raw) -> None:
+    writer, _ = run_handler_on_stream(raw)
+
+    assert_single_error(writer, "invalid_event")
+
+
+def test_wyoming_run_refuses_header_line_over_stream_limit() -> None:
+    raw = b'{"type": "describe", "pad": "' + b"x" * (2**16 + 10) + b'"}\n'
+
+    writer, _ = run_handler_on_stream(raw)
+
+    assert_single_error(writer, "event_too_large")
+
+
+def test_wyoming_run_stops_quietly_on_truncated_event() -> None:
+    raw = header_line({"type": "audio-chunk", "payload_length": 100}) + b"\x00" * 10
+
+    writer, _ = run_handler_on_stream(raw)
+
+    assert decode_all_events(writer) == []
+    assert writer.closed
+
+
+def test_wyoming_run_answers_describe_until_eof() -> None:
+    writer, _ = run_handler_on_stream(encode_events(Describe().event()))
+
+    events = decode_all_events(writer)
+    assert len(events) == 1
+    assert Info.is_type(events[0].type)
+    assert writer.closed
+
+
+def test_wyoming_run_transcribes_audio_round_trip(monkeypatch) -> None:
+    config = limit_config(max_audio_seconds=1)
+    monkeypatch.setattr(
+        "transcriptions.wyoming.transcribe_audio",
+        lambda audio_path, params: TranscriptionResult(
+            text="hallo welt", language="de", segments=[]
+        ),
+    )
+    # A chunk exactly at the per-event payload limit is accepted.
+    raw = encode_events(
+        Transcribe(language="de").event(),
+        AudioStart(rate=16000, width=2, channels=1).event(),
+        pcm_chunk(b"\x01\x00" * (config.max_event_payload_bytes // 2)),
+        AudioStop().event(),
+    )
+
+    writer, _ = run_handler_on_stream(raw, config=config)
+
+    events = decode_all_events(writer)
+    assert len(events) == 1
+    assert Transcript.is_type(events[0].type)
+    assert Transcript.from_event(events[0]).text == "hallo welt"
+    assert writer.closed
+
+
+def test_wyoming_run_synthesizes_audio_round_trip(monkeypatch, tmp_path: Path) -> None:
+    speech_path = tmp_path / "speech.wav"
+    with wave.open(str(speech_path), "wb") as wav_file:
+        wav_file.setframerate(22050)
+        wav_file.setsampwidth(2)
+        wav_file.setnchannels(1)
+        wav_file.writeframes(b"\x01\x00" * 2205)
+    texts: list[str] = []
+
+    def fake_synthesize(text: str, params: SynthesizeParams):
+        texts.append(text)
+        return type("SpeechResult", (), {"audio_path": speech_path})()
+
+    monkeypatch.setattr("transcriptions.wyoming.synthesize_text", fake_synthesize)
+    monkeypatch.setattr("transcriptions.wyoming.cleanup_paths", lambda *paths: None)
+
+    writer, _ = run_handler_on_stream(encode_events(Synthesize(text="Hello world").event()))
+
+    events = decode_all_events(writer)
+    assert texts == ["Hello world"]
+    assert AudioStart.is_type(events[0].type)
+    assert AudioChunk.is_type(events[1].type)
+    assert AudioStop.is_type(events[-1].type)
