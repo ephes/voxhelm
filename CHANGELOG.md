@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Reserve operator login capacity before password authentication. Failure windows
+  and other in-flight guesses survive concurrent successful logins; pending
+  checks retain their slots across expiry in the supported single-process scope.
+  Inactive/non-staff denials and authentication exceptions consume the failure
+  budget, including correct passwords for accounts without operator access.
+- Mark private producer job/result/staging/artifact and operator transcript/page
+  responses private/no-store, including errors and redirects, varying by bearer
+  authorization or session cookies so cached successes cannot bypass revocation.
+
 - Reject unsafe filesystem artifact keys and symlink aliases across store I/O,
   retaining fail-closed retention listing. Publish owner-only artifacts through
   flushed sibling temporary files and atomic replacement, preserving existing

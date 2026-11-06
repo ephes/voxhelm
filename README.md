@@ -310,16 +310,31 @@ ingress, which forwards `X-Forwarded-Proto: https`.
 - **Framing:** every response sends `X-Frame-Options: DENY`, including on the
   direct backend port. The ops-library Traefik headers middleware sets
   `customFrameOptionsValue: SAMEORIGIN`, which may replace it at the edge.
-- **Login throttle:** after `VOXHELM_LOGIN_MAX_FAILURES` failed sign-ins (default
-  5) from one client address or for one username, further attempts are refused
-  with HTTP 429 without checking the password until the window of
-  `VOXHELM_LOGIN_LOCKOUT_SECONDS` (default 900, starting at the first failure)
-  expires. A successful login resets the username counter. The client address is
-  `REMOTE_ADDR`, so behind Traefik all browsers share the proxy's address
-  bucket; `X-Forwarded-For` is not trusted because the backend port is also
-  reachable directly. Counters live in the default Django cache, which is
-  per-process local memory and matches the single uvicorn process; a restart
-  clears them.
+- **Login throttle:** `VOXHELM_LOGIN_MAX_FAILURES` (default 5) bounds completed
+  failures plus in-flight password checks for each client address and username.
+  Admission reserves both budgets before authentication; exhausted budgets return
+  HTTP 429 without checking a password. Failures expire after
+  `VOXHELM_LOGIN_LOCKOUT_SECONDS` (default 900, starting at the first completed
+  failure). Pending checks keep their slots across expiry until they finish.
+  Success clears username failures, preserves other pending checks and leaves
+  address failures intact. Denials for inactive or non-staff accounts (including
+  correct passwords) and authentication exceptions settle as failures too.
+  The client address is `REMOTE_ADDR`, so behind Traefik all browsers share the
+  proxy's address bucket; `X-Forwarded-For` is deliberately not trusted because
+  the backend port is also reachable directly. State lives in the default Django
+  cache and admission is serialized within one process, matching the single
+  uvicorn process. Restart or cache eviction clears state; a shared cache alone
+  does not extend this admission guarantee to multiple server processes.
+- **Private responses:** producer job submission/status/results, staging and
+  artifact responses send `Cache-Control: private, no-store` (plus Django's
+  never-cache directives) and `Vary: Authorization`, including errors. Operator
+  pages and transcript downloads use the same privacy policy with `Vary: Cookie`,
+  including access denials and login redirects. Downloads remain subject to
+  producer ownership, staff/operator ownership and artifact exposure checks;
+  these are private authenticated resources, not public media URLs. Cache
+  middleware must wrap the application in Django's documented order (update
+  first, fetch last). Previously cached copies should be purged when adopting
+  this policy if caching was enabled; headers cannot erase existing copies.
 
 ## OpenAI-Compatible API
 

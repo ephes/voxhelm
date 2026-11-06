@@ -311,6 +311,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "jobs.middleware.PrivateJobResponsesMiddleware",
 ]
 
 TEMPLATES = [
