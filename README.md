@@ -407,6 +407,24 @@ If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.
 
+### Private filesystem artifacts
+
+Filesystem keys must be nonempty relative paths without empty, `.` or `..`
+segments. All I/O rejects symlinks in keys (including aliases inside the root),
+using directory descriptors and no-follow opens. A configured root symlink is
+resolved once when the store is created. The configured root and its
+ancestors must be trusted administrator-owned paths; untrusted users must not
+be able to rename these directories. Retention still lists symlink entries so
+its existing ownership checks can refuse unsafe deletion.
+
+New artifact directories use mode 0700 and published objects use mode 0600.
+Writes use private sibling temporary files, flush them, and atomically replace
+the final object only after success. Readers see the previous complete object
+until replacement; failed writes clean temporary files and preserve old bytes.
+Existing directory modes are not changed. These guarantees apply to the
+filesystem store; S3 behavior is unchanged. Adoption requires an application or
+worker update; no deployment is performed by the change itself.
+
 ### Job artifact retention (D-09)
 
 Every batch transcription job keeps a job-owned copy of its input (`source`

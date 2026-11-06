@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reject unsafe filesystem artifact keys and symlink aliases across store I/O,
+  retaining fail-closed retention listing. Publish owner-only artifacts through
+  flushed sibling temporary files and atomic replacement, preserving existing
+  bytes on failure; create new artifact directories with mode 0700.
+
 - Serialize staged-input expiry deletion with job submission and recheck expiry
   and claim state under the database lock, so stale cleanup candidates cannot
   delete a newly active job's input. Failed object deletions remain retryable.

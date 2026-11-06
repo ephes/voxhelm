@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import uuid
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 
 import boto3
 from botocore.config import Config
@@ -42,78 +45,146 @@ class FilesystemArtifactStore:
     backend_name = "filesystem"
 
     def __init__(self, *, root: Path) -> None:
-        self.root = root
+        self.root = root.expanduser().resolve()
+
+    @staticmethod
+    def _parts(key: str) -> list[str]:
+        parts = key.split("/")
+        if any(part in {"", ".", ".."} for part in parts) or "\x00" in key:
+            raise ValueError("Artifact keys must be nonempty relative paths without dot segments.")
+        return parts
+
+    @contextmanager
+    def _parent(self, key: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
+        parts = self._parts(key)
+        # The configured root and its ancestors are trusted administrator-owned paths.
+        if create:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[:-1]:
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                child = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+                )
+                os.close(directory)
+                directory = child
+            yield directory, parts[-1]
+        finally:
+            os.close(directory)
+
+    @staticmethod
+    def _check_leaf(directory: int, name: str) -> None:
+        try:
+            mode = os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(mode):
+            raise ValueError("Artifact objects must be regular files, not aliases or directories.")
+
+    @contextmanager
+    def _reader(self, key: str) -> Iterator[BinaryIO]:
+        with self._parent(key) as (directory, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ValueError("Artifact objects must be regular files.")
+                yield source
+
+    @contextmanager
+    def _writer(self, key: str) -> Iterator[BinaryIO]:
+        with self._parent(key, create=True) as (directory, name):
+            self._check_leaf(directory, name)
+            temporary = f".artifact-{uuid.uuid4().hex}.tmp"
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                with os.fdopen(fd, "wb") as target:
+                    yield target
+                    target.flush()
+                    os.fsync(target.fileno())
+                self._check_leaf(directory, name)
+                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
 
     def put_file(self, *, key: str, source_path: Path, content_type: str) -> StoredArtifact:
         del content_type
-        target = self.root / key
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_path, target)
-        return StoredArtifact(
-            backend=self.backend_name,
-            key=key,
-            size_bytes=target.stat().st_size,
-        )
+        with source_path.open("rb") as source, self._writer(key) as target:
+            shutil.copyfileobj(source, target)
+            size = target.tell()
+        return StoredArtifact(backend=self.backend_name, key=key, size_bytes=size)
 
     def put_bytes(self, *, key: str, data: bytes, content_type: str) -> StoredArtifact:
         del content_type
-        target = self.root / key
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        return StoredArtifact(
-            backend=self.backend_name,
-            key=key,
-            size_bytes=len(data),
-        )
+        with self._writer(key) as target:
+            target.write(data)
+        return StoredArtifact(backend=self.backend_name, key=key, size_bytes=len(data))
 
     def read_bytes(self, *, key: str) -> bytes:
-        return (self.root / key).read_bytes()
+        with self._reader(key) as source:
+            return source.read()
 
     def download_file(self, *, key: str, destination_path: Path) -> None:
-        source = self.root / key
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination_path)
+        with self._reader(key) as source:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            with destination_path.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
 
     def stat(self, *, key: str) -> StoredArtifact:
-        target = self.root / key
-        return StoredArtifact(
-            backend=self.backend_name,
-            key=key,
-            size_bytes=target.stat().st_size,
-        )
+        with self._reader(key) as source:
+            size = os.fstat(source.fileno()).st_size
+        return StoredArtifact(backend=self.backend_name, key=key, size_bytes=size)
 
     def delete(self, *, key: str) -> None:
-        target = self.root / key
-        target.unlink(missing_ok=True)
+        try:
+            with self._parent(key) as (directory, name):
+                self._check_leaf(directory, name)
+                os.unlink(name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
 
     def list_keys(self, *, prefix: str) -> list[str]:
-        """Keys of every entry below ``prefix`` that is not a directory, symlinks included."""
-        base = prefix.strip("/")
-        directory = self.root / base
-        # Path.is_dir() reports an unsearchable parent as "missing"; only a directory
-        # that really does not exist may list as empty.
-        try:
-            if not stat.S_ISDIR(directory.stat().st_mode):
-                return []
-        except FileNotFoundError, NotADirectoryError:
-            return []
+        """List aliases for retention to refuse, without following them."""
+        base = prefix.removesuffix("/")
+        self._parts(base)
         keys: list[str] = []
 
         def raise_listing_error(error: OSError) -> None:
-            # os.walk skips unreadable directories by default; a directory that only
-            # looks empty would let cleanup drop the records of objects still in it.
             raise error
 
-        for current, dirnames, filenames in os.walk(
-            directory, followlinks=False, onerror=raise_listing_error
-        ):
-            relative = Path(current).relative_to(directory)
-            names = [
-                *filenames,
-                *(name for name in dirnames if (Path(current) / name).is_symlink()),
-            ]
-            for name in names:
-                keys.append("/".join(part for part in (base, *relative.parts, name) if part))
+        with ExitStack() as stack:
+            try:
+                directory, _ = stack.enter_context(self._parent(f"{base}/placeholder"))
+            except FileNotFoundError:
+                return []
+            for current, dirnames, filenames, current_fd in os.fwalk(
+                ".", dir_fd=directory, follow_symlinks=False, onerror=raise_listing_error
+            ):
+                relative = Path(current).parts
+                names = [
+                    *filenames,
+                    *(
+                        name
+                        for name in dirnames
+                        if stat.S_ISLNK(
+                            os.stat(name, dir_fd=current_fd, follow_symlinks=False).st_mode
+                        )
+                    ),
+                ]
+                for name in names:
+                    keys.append("/".join((base, *relative, name)))
         return sorted(keys)
 
 
