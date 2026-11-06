@@ -26,6 +26,7 @@ from jobs.fingerprints import stored_job_request_fingerprint
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
 from transcriptions.diarization import DiarizationParams, SpeakerTurn
+from transcriptions.errors import ApiError
 from transcriptions.service import TranscribeParams, TranscriptionResult, TranscriptionSegment
 
 
@@ -661,6 +662,52 @@ def stage_audio_directly() -> StagedMedia:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("chunks", [(b"123456",), (b"123", b"456")])
+def test_staging_rejects_actual_bytes_above_limit(
+    settings, monkeypatch, staging_temp_paths, chunks
+):
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 5
+    upload = SimpleUploadedFile("episode.mp3", b"x", content_type="audio/mpeg")
+    monkeypatch.setattr(upload, "chunks", lambda: iter(chunks))
+    published = []
+    real_put = FilesystemArtifactStore.put_file
+
+    def put(self, **kwargs):
+        published.append(kwargs)
+        return real_put(self, **kwargs)
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put)
+    with pytest.raises(ApiError, match="batch staging limit"):
+        jobs_staging.stage_uploaded_audio(producer="archive", upload=upload)
+
+    assert published == []
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+def test_staging_exact_byte_limit_uses_actual_size(settings, monkeypatch, staging_temp_paths):
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 5
+    upload = SimpleUploadedFile("episode.mp3", b"x", content_type="audio/mpeg")
+    monkeypatch.setattr(upload, "chunks", lambda: iter((b"123", b"45")))
+    registered_sizes = []
+    real_put = FilesystemArtifactStore.put_file
+
+    def put(self, **kwargs):
+        registered_sizes.append(StagedMedia.objects.get().size_bytes)
+        return real_put(self, **kwargs)
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put)
+    staged = jobs_staging.stage_uploaded_audio(producer="archive", upload=upload)
+
+    assert registered_sizes == [5]
+    assert staged.size_bytes == 5
+    assert (Path(settings.VOXHELM_ARTIFACT_ROOT) / staged.storage_key).read_bytes() == b"12345"
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
 def test_staging_keeps_object_and_row_on_success(settings, staging_temp_paths):
     staged = stage_audio_directly()
 
@@ -818,6 +865,43 @@ def test_staging_restores_cleanup_record_when_row_vanished_and_compensation_fail
 
     assert stored_staged_objects(settings) == []
     assert not StagedMedia.objects.exists()
+
+
+@pytest.mark.django_db
+def test_expiry_cleanup_rechecks_extended_expiry(settings, monkeypatch):
+    staged = stage_audio_directly()
+    StagedMedia.objects.filter(pk=staged.pk).update(expires_at=timezone.now())
+    real_lock = services.acquire_sqlite_write_lock
+
+    def extend_expiry():
+        StagedMedia.objects.filter(pk=staged.pk).update(
+            expires_at=timezone.now() + timedelta(hours=1)
+        )
+        real_lock()
+
+    monkeypatch.setattr(services, "acquire_sqlite_write_lock", extend_expiry)
+    jobs_staging.cleanup_expired_staged_media()
+    assert StagedMedia.objects.filter(pk=staged.pk).exists()
+    assert len(stored_staged_objects(settings)) == 1
+
+
+@pytest.mark.django_db
+def test_expiry_cleanup_retries_storage_failure(settings, monkeypatch):
+    staged = stage_audio_directly()
+    StagedMedia.objects.filter(pk=staged.pk).update(expires_at=timezone.now())
+
+    def fail_delete(self, *, key):
+        raise OSError("synthetic deletion failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", fail_delete)
+        jobs_staging.cleanup_expired_staged_media()
+    assert StagedMedia.objects.filter(pk=staged.pk).exists()
+    assert len(stored_staged_objects(settings)) == 1
+
+    jobs_staging.cleanup_expired_staged_media()
+    assert not StagedMedia.objects.filter(pk=staged.pk).exists()
+    assert stored_staged_objects(settings) == []
 
 
 @pytest.mark.django_db
@@ -2181,3 +2265,131 @@ def test_fingerprint_migration_backfills_and_tolerates_legacy_duplicates():
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
         executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+FILE_SQLITE_EXPIRY_DRIVER = """
+import sys
+import threading
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import patch
+
+import django
+
+root = Path(sys.argv[1])
+django.setup()
+
+from django.conf import settings
+from django.db import connections
+from django.db.models.query import QuerySet
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
+from django.utils import timezone
+from jobs import services, staging
+from jobs.models import StagedMedia
+
+settings.DATABASES["default"]["NAME"] = root / "expiry.db"
+connections.__dict__.pop("settings", None)
+settings.TASKS = {"default": {"BACKEND": "django_tasks.backends.dummy.DummyBackend"}}
+settings.VOXHELM_ARTIFACT_BACKEND = "filesystem"
+settings.VOXHELM_ARTIFACT_ROOT = root / "artifacts"
+settings.VOXHELM_TRANSCRIPTION_EXECUTION_MODE = "django_tasks"
+call_command("migrate", verbosity=0)
+staged = staging.stage_uploaded_audio(
+    producer="synthetic",
+    upload=SimpleUploadedFile("race.mp3", b"audio", content_type="audio/mpeg"),
+)
+now = timezone.now()
+StagedMedia.objects.filter(pk=staged.pk).update(expires_at=now + timedelta(seconds=1))
+validated, selected = threading.Event(), threading.Event()
+finish_submission, finish_cleanup = threading.Event(), threading.Event()
+errors = []
+real_get = services.get_staged_media_for_submission
+real_iter = QuerySet.__iter__
+
+def get(**kwargs):
+    result = real_get(**kwargs)
+    validated.set()
+    assert finish_submission.wait(10), "submission was not released"
+    return result
+
+def iterate(query):
+    result = real_iter(query)
+    if query.model is StagedMedia and threading.current_thread().name == "cleanup":
+        assert query._result_cache, "cleanup must enumerate an expired candidate"
+        selected.set()
+        assert finish_cleanup.wait(10), "cleanup was not released"
+    return result
+
+def submit():
+    services.create_job_from_payload(producer="synthetic", payload={
+        "job_type": "transcribe", "model": "auto",
+        "input": {"kind": "upload", "upload_id": str(staged.pk)},
+        "output": {"formats": ["text"]},
+    })
+
+def run(action):
+    try:
+        action()
+    except BaseException as exc:
+        errors.append(repr(exc))
+    finally:
+        connections.close_all()
+
+with patch.object(services, "get_staged_media_for_submission", get), \
+     patch.object(QuerySet, "__iter__", iterate), \
+     patch.object(staging.timezone, "now", return_value=now) as clock:
+    submission = threading.Thread(target=run, args=(submit,), name="submission")
+    cleanup = threading.Thread(
+        target=run, args=(staging.cleanup_expired_staged_media,), name="cleanup"
+    )
+    submission.start()
+    try:
+        assert validated.wait(10), errors
+        clock.return_value = now + timedelta(seconds=2)
+        cleanup.start()
+        assert selected.wait(10), errors
+        finish_submission.set()
+        submission.join(10)
+        assert not submission.is_alive(), "submission did not commit"
+    finally:
+        finish_submission.set()
+        finish_cleanup.set()
+        submission.join(10)
+        if cleanup.ident is not None:
+            cleanup.join(10)
+    assert not cleanup.is_alive(), "cleanup did not finish"
+    assert errors == [], errors
+
+current = StagedMedia.objects.get(pk=staged.pk)
+assert current.claimed_by_job_id is not None
+assert current.claimed_by_job.finished_at is None
+assert (settings.VOXHELM_ARTIFACT_ROOT / current.storage_key).read_bytes() == b"audio"
+# Once the owning job finishes, the expired input becomes eligible again.
+current.claimed_by_job.finished_at = now
+current.claimed_by_job.save(update_fields=["finished_at"])
+with patch.object(staging.timezone, "now", return_value=now + timedelta(seconds=2)):
+    staging.cleanup_expired_staged_media()
+assert not StagedMedia.objects.filter(pk=staged.pk).exists()
+assert not (settings.VOXHELM_ARTIFACT_ROOT / current.storage_key).exists()
+"""
+
+
+def test_expiry_cleanup_preserves_concurrently_claimed_input_on_file_sqlite(tmp_path):
+    """Use independent connections against the supported production database."""
+    repo_root = Path(__file__).resolve().parent.parent
+    driver = tmp_path / "expiry_driver.py"
+    driver.write_text(FILE_SQLITE_EXPIRY_DRIVER)
+    completed = subprocess.run(
+        [sys.executable, str(driver), str(tmp_path)],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "DJANGO_SETTINGS_MODULE": "tests.settings",
+            "PYTHONPATH": str(repo_root),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr

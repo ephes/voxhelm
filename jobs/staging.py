@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 
@@ -45,11 +46,12 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
     """
     cleanup_expired_staged_media()
     upload_size = upload.size or 0
+    limit_message = (
+        "Uploaded file exceeded the configured "
+        f"{settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_MIB} MiB batch staging limit."
+    )
     if upload_size > settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES:
-        raise ApiError(
-            "Uploaded file exceeded the configured "
-            f"{settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_MIB} MiB batch staging limit."
-        )
+        raise ApiError(limit_message)
 
     content_type = (getattr(upload, "content_type", "") or "").lower()
     original_filename = Path(upload.name or "upload").name or "upload"
@@ -61,8 +63,17 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             "Batch staged uploads currently support audio only. Use URL input for video."
         )
 
-    temp_path = write_uploaded_media_to_tempfile(upload.chunks(), suffix=suffix)
+    def bounded_chunks() -> Iterator[bytes]:
+        copied = 0
+        for chunk in upload.chunks():
+            copied += len(chunk)
+            if copied > settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES:
+                raise ApiError(limit_message)
+            yield chunk
+
+    temp_path = write_uploaded_media_to_tempfile(bounded_chunks(), suffix=suffix)
     try:
+        upload_size = temp_path.stat().st_size
         store = get_artifact_store()
         staged = StagedMedia(
             id=uuid.uuid4(),
@@ -85,7 +96,6 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             )
             staged.storage_backend = stored.backend
             staged.storage_key = stored.key
-            staged.size_bytes = stored.size_bytes
             # Retention counts from the finished upload; until here the row
             # carried the in-progress expiry.
             staged.expires_at = timezone.now() + timedelta(
@@ -132,14 +142,26 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
 
 
 def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> None:
+    from jobs.services import acquire_sqlite_write_lock
+
     now = timezone.now()
     expired = StagedMedia.objects.filter(expires_at__lte=now).filter(
         Q(claimed_by_job__isnull=True) | Q(claimed_by_job__finished_at__isnull=False)
     )
     if exclude_upload_id:
         expired = expired.exclude(id=exclude_upload_id)
-    for staged in expired:
-        delete_staged_media(staged=staged, missing_ok=True)
+    for upload_id in expired.values_list("pk", flat=True):
+        with transaction.atomic():
+            acquire_sqlite_write_lock()
+            staged = StagedMedia.objects.select_for_update().filter(pk=upload_id).first()
+            if staged is None or staged.expires_at > timezone.now():
+                continue
+            job = staged.claimed_by_job
+            if job is not None and job.finished_at is None:
+                continue
+            # Keep the lock through object deletion and row removal: submission
+            # must either claim first or observe that the upload is gone.
+            delete_staged_media(staged=staged, missing_ok=True)
 
 
 class StagedMediaAlreadyClaimed(ApiError):

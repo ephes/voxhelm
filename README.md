@@ -393,6 +393,16 @@ cleanup retries the object deletion. While the object is still uploading the
 registration carries a 24-hour in-progress expiry, so a concurrent cleanup never
 removes it; `VOXHELM_STAGED_INPUT_RETENTION_SECONDS` counts from the finished
 upload.
+The staging byte ceiling is checked against both the declared size and the
+actual chunks before they are written to the temporary file. An over-limit
+stream removes its partial file and publishes no object or staging row. An
+exact-limit stream is accepted; staging and job metadata use the copied size.
+Expiry cleanup re-fetches each candidate and rechecks expiry and its job claim
+inside the same database write/row lock used by submission, holding it through
+object deletion and row removal. A claim committed after candidate enumeration
+keeps the input while its job is active. Expired unclaimed inputs and inputs
+whose owning job has finished can be removed. Storage deletion failure keeps
+the row for a later cleanup retry.
 If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.

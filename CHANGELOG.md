@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Serialize staged-input expiry deletion with job submission and recheck expiry
+  and claim state under the database lock, so stale cleanup candidates cannot
+  delete a newly active job's input. Failed object deletions remain retryable.
+
+- Enforce the batch staging byte ceiling while copying upload chunks, before
+  object publication, and record the actual copied size even if the upload
+  declares a smaller size. Over-limit copies remove their temporary file.
+
 - Docs: `BACKLOG.md` ticks the items that are already done and cites the voxhelm,
   ops-library or ops-control commit for each (edge block of `/v1/internal/*`, PyPI
   packaging, the LaunchDaemon worker on `atlas`, the ops-library diarization, private
