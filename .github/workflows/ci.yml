@@ -57,6 +57,8 @@ jobs:
         run: uv run ruff format --check .
       - name: Typecheck (just typecheck)
         run: uv run mypy .
+      - name: Ensure ffmpeg for synthetic codec regressions
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Tests (just test)
         run: uv run pytest -q
 

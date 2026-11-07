@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Decode known-speaker source ranges before PCM materialization, preserving 16 kHz
+  sample rounding and EOF behavior. Reuse exact-URL source snapshots within local
+  and remote jobs, including the main input, and clean reference-owned files once.
+- Reload Kokoro sessions/voicepacks when artifact metadata changes, serialize cache
+  publication, evict old entries and close NumPy archives on success and failure.
+
 - Publish same-lease heartbeats monotonically, retaining the greater expiry and
   returning current lease data for delayed requests.
 - Bound retention selection/results to five finite per-phase batches, with a JSON

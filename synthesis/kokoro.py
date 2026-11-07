@@ -20,16 +20,19 @@ from __future__ import annotations
 
 import tempfile
 import wave
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from synthesis.service import (
+    ArtifactIdentity,
     BackendUnavailableError,
     InstalledVoice,
     SynthesisResult,
     SynthesizeParams,
+    piper_artifact_identity,
 )
 
 if TYPE_CHECKING:
@@ -169,8 +172,10 @@ _EXTRA_HINT = (
     "`uv sync --extra kokoro` (onnxruntime, phonemizer-fork, espeakng-loader, numpy)."
 )
 
-_SESSION_CACHE: dict[str, Any] = {}
-_VOICEPACK_CACHE: dict[str, Any] = {}
+_CACHE_LIMIT = 8
+_CACHE_LOCK = Lock()
+_SESSION_CACHE: OrderedDict[ArtifactIdentity, Any] = OrderedDict()
+_VOICEPACK_CACHE: OrderedDict[tuple[ArtifactIdentity, str], Any] = OrderedDict()
 # Serializes ONNX inference (see synthesize()).
 _KOKORO_LOCK = Lock()
 # espeak-ng, reached through phonemizer, keeps process-global state (the loaded
@@ -360,34 +365,49 @@ class KokoroBackend:
         _ESPEAK_READY = True
 
     def _session(self, model_path: str | Path) -> Any:
-        key = str(model_path)
-        cached = _SESSION_CACHE.get(key)
-        if cached is not None:
-            return cached
-        try:
-            import onnxruntime as ort
-        except ImportError as exc:
-            raise BackendUnavailableError(_EXTRA_HINT) from exc
-        session = ort.InferenceSession(key, providers=["CPUExecutionProvider"])
-        _SESSION_CACHE[key] = session
-        return session
+        with _CACHE_LOCK:
+            identity = piper_artifact_identity(Path(model_path))
+            cached = _SESSION_CACHE.get(identity)
+            if cached is not None:
+                _SESSION_CACHE.move_to_end(identity)
+                return cached
+            try:
+                import onnxruntime as ort
+            except ImportError as exc:
+                raise BackendUnavailableError(_EXTRA_HINT) from exc
+            session = ort.InferenceSession(str(identity[0]), providers=["CPUExecutionProvider"])
+            for existing in list(_SESSION_CACHE):
+                if existing[0] == identity[0]:
+                    del _SESSION_CACHE[existing]
+            _SESSION_CACHE[identity] = session
+            if len(_SESSION_CACHE) > _CACHE_LIMIT:
+                _SESSION_CACHE.popitem(last=False)
+            return session
 
     def _voicepack(self, voicepack_path: str | Path, voicepack_key: str) -> Any:
         np = _require_numpy()
-        cache_key = f"{voicepack_path}::{voicepack_key}"
-        cached = _VOICEPACK_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-        pack = np.load(voicepack_path)
-        if voicepack_key not in pack:
-            available = ", ".join(sorted(pack.keys()))
-            raise RuntimeError(
-                f"Voicepack key '{voicepack_key}' not found in '{voicepack_path}'. "
-                f"Available keys: {available}."
-            )
-        style = np.asarray(pack[voicepack_key], dtype=np.float32)
-        _VOICEPACK_CACHE[cache_key] = style
-        return style
+        with _CACHE_LOCK:
+            identity = piper_artifact_identity(Path(voicepack_path))
+            cache_key = (identity, voicepack_key)
+            cached = _VOICEPACK_CACHE.get(cache_key)
+            if cached is not None:
+                _VOICEPACK_CACHE.move_to_end(cache_key)
+                return cached
+            with np.load(identity[0]) as pack:
+                if voicepack_key not in pack:
+                    available = ", ".join(sorted(pack.keys()))
+                    raise RuntimeError(
+                        f"Voicepack key '{voicepack_key}' not found in '{voicepack_path}'. "
+                        f"Available keys: {available}."
+                    )
+                style = np.array(pack[voicepack_key], dtype=np.float32, copy=True)
+            for existing in list(_VOICEPACK_CACHE):
+                if existing[0][0] == identity[0] and existing[0] != identity:
+                    del _VOICEPACK_CACHE[existing]
+            _VOICEPACK_CACHE[cache_key] = style
+            if len(_VOICEPACK_CACHE) > _CACHE_LIMIT:
+                _VOICEPACK_CACHE.popitem(last=False)
+            return style
 
 
 def split_sentences(text: str) -> list[str]:
@@ -519,5 +539,6 @@ def _is_german(phoneme_language: str) -> bool:
 
 def reset_caches() -> None:
     """Clear session/voicepack caches. Intended for tests."""
-    _SESSION_CACHE.clear()
-    _VOICEPACK_CACHE.clear()
+    with _CACHE_LOCK:
+        _SESSION_CACHE.clear()
+        _VOICEPACK_CACHE.clear()
