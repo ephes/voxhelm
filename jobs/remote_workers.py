@@ -16,7 +16,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Case, F, IntegerField, Q, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Greatest
 from django.http import HttpRequest
 from django.utils import timezone
 
@@ -422,24 +422,33 @@ def heartbeat_remote_work(
     progress = normalize_progress(payload.get("progress"))
     now = timezone.now()
     lease_expires_at = now + timedelta(seconds=settings.VOXHELM_REMOTE_WORKER_LEASE_SECONDS)
-    updated = Job.objects.filter(
+    owned = Job.objects.filter(
         id=job_id,
         execution_mode=Job.ExecutionMode.REMOTE_PULL,
         state=Job.State.RUNNING,
         assigned_worker_id=worker_id,
         lease_token_hash=hash_lease_token(lease_token),
-        lease_expires_at__gt=now,
+    )
+    owned.filter(lease_expires_at__gt=now).filter(
+        Q(last_worker_heartbeat_at__lt=now) | Q(last_worker_heartbeat_at__isnull=True)
     ).update(
-        lease_expires_at=lease_expires_at,
+        lease_expires_at=Greatest("lease_expires_at", Value(lease_expires_at)),
         last_worker_heartbeat_at=now,
         worker_progress=progress,
     )
-    if updated != 1:
+    # A delayed same-lease request is successful without publishing old progress.
+    # Re-read all response fields together, checking ownership at response time.
+    current = (
+        owned.filter(lease_expires_at__gt=timezone.now())
+        .values("lease_expires_at", "last_worker_heartbeat_at")
+        .first()
+    )
+    if current is None:
         raise lease_conflict()
     return {
         "job_id": str(job_id),
-        "lease_expires_at": isoformat_or_none(lease_expires_at),
-        "server_time": isoformat_or_none(now),
+        "lease_expires_at": isoformat_or_none(current["lease_expires_at"]),
+        "server_time": isoformat_or_none(current["last_worker_heartbeat_at"]),
     }
 
 

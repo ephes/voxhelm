@@ -45,6 +45,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.db.models.functions import Coalesce
@@ -90,6 +91,7 @@ class PruneResult:
     staged_refused: int = 0
     staged_failed: int = 0
     jobs_deleted: list[Job] = field(default_factory=list)
+    next_cursor: dict[str, str | None] = field(default_factory=dict)
 
 
 class RefusedDeletion(Exception):
@@ -442,6 +444,28 @@ def delete_claimed_staged_upload(*, staged_pk: UUID, job_id: UUID) -> None:
         staged.delete()
 
 
+def delete_expired_staged_upload(*, staged_pk: UUID, now: datetime) -> None:
+    with transaction.atomic():
+        acquire_sqlite_write_lock()
+        staged = staged_candidates(now=now).select_for_update().filter(pk=staged_pk).first()
+        if staged is None:
+            return
+        if not staged_key_is_deletable(
+            identity=staged.storage_identity,
+            key=staged.storage_key,
+            staged_id=staged.pk,
+            filename=staged.original_filename,
+        ):
+            raise RefusedDeletion(staged.storage_key)
+        if not object_is_referenced(
+            identity=staged.storage_identity,
+            key=staged.storage_key,
+            exclude_staged_pk=staged.pk,
+        ):
+            delete_stored_object(identity=staged.storage_identity, key=staged.storage_key)
+        staged.delete()
+
+
 def delete_profile_task_results(jobs: Iterable[Job]) -> None:
     """Drop the task results of profile jobs whose rows are being deleted.
 
@@ -460,14 +484,60 @@ def delete_profile_task_results(jobs: Iterable[Job]) -> None:
         DBTaskResult.objects.filter(id__in=task_ids).delete()
 
 
-def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -> PruneResult:
+def validate_prune_cursor(cursor: dict[str, str | None]) -> None:
+    fields = {
+        "artifacts": JobArtifact,
+        "pending": PendingArtifactDeletion,
+        "prefixes": RemoteAttemptPrefix,
+        "staged": StagedMedia,
+        "jobs": Job,
+    }
+    if not isinstance(cursor, dict):
+        raise ValueError("Invalid retention cursor.")
+    for phase, value in cursor.items():
+        if phase not in fields or (value is not None and not isinstance(value, str)):
+            raise ValueError("Invalid retention cursor.")
+        if value is not None:
+            try:
+                fields[phase]._meta.pk.to_python(value)
+            except (ValidationError, ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid retention cursor for {phase}.") from exc
+
+
+def prune_job_artifacts(
+    *,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    batch_size: int = 100,
+    cursor: dict[str, str | None] | None = None,
+) -> PruneResult:
     """Delete expired intermediate artifacts: the stored object first, then the row.
 
     A failed object deletion keeps the row so the next run retries it. Pending
     deletions queued by remote completions are drained as well.
     """
     result = PruneResult()
-    candidates = list(expired_intermediate_artifacts(now=now))
+    if batch_size < 1:
+        raise ValueError("Batch size must be positive.")
+    now = now or timezone.now()
+    cursor = cursor if cursor is not None else {}
+    validate_prune_cursor(cursor)
+
+    def batch(query, phase):
+        # None marks a phase exhausted in this sweep. Advance even after failure;
+        # unresolved rows are retried when the caller starts the next sweep.
+        after = cursor.get(phase)
+        if phase in cursor and after is None:
+            result.next_cursor[phase] = None
+            return []
+        if after:
+            query = query.filter(pk__gt=after)
+        rows = list(query.order_by("pk")[: batch_size + 1])
+        selected = rows[:batch_size]
+        result.next_cursor[phase] = str(selected[-1].pk) if len(rows) > batch_size else None
+        return selected
+
+    candidates = batch(expired_intermediate_artifacts(now=now), "artifacts")
     if dry_run:
         for candidate in candidates:
             if job_key_is_deletable(
@@ -480,7 +550,7 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
             else:
                 result.refused.append(candidate)
         deletable_pending_pks: list[int] = []
-        for pending in PendingArtifactDeletion.objects.all():
+        for pending in batch(PendingArtifactDeletion.objects.all(), "pending"):
             if job_key_is_deletable(
                 identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
             ):
@@ -489,8 +559,11 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
             else:
                 result.pending_refused += 1
         deletable_prefix_pks: list[int] = []
-        for record in RemoteAttemptPrefix.objects.filter(
-            job_id__in=expired_profile_jobs(now=now).values("id")
+        for record in batch(
+            RemoteAttemptPrefix.objects.filter(
+                job_id__in=expired_profile_jobs(now=now).values("id")
+            ),
+            "prefixes",
         ):
             # The same listing and object checks the real run applies.
             try:
@@ -501,9 +574,7 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
                 result.attempt_prefixes_deleted += 1
                 deletable_prefix_pks.append(record.pk)
         deletable_staged_pks: list[UUID] = []
-        for staged in StagedMedia.objects.filter(
-            claimed_by_job__in=expired_profile_jobs(now=now).values("id")
-        ):
+        for staged in batch(staged_candidates(now=now), "staged"):
             if staged_key_is_deletable(
                 identity=staged.storage_identity,
                 key=staged.storage_key,
@@ -514,15 +585,18 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
                 deletable_staged_pks.append(staged.pk)
             else:
                 result.staged_refused += 1
-        result.jobs_deleted = list(
+        result.jobs_deleted = batch(
             expired_job_metadata(
                 now=now,
                 ignore_artifact_pks=[artifact.pk for artifact in result.deleted],
                 ignore_pending_pks=deletable_pending_pks,
                 ignore_attempt_prefix_pks=deletable_prefix_pks,
                 ignore_staged_pks=deletable_staged_pks,
-            )
+            ),
+            "jobs",
         )
+        if not any(result.next_cursor.values()):
+            result.next_cursor = {}
         return result
     for candidate in candidates:
         try:
@@ -547,18 +621,39 @@ def prune_job_artifacts(*, now: datetime | None = None, dry_run: bool = False) -
             continue
         if pruned is not None:
             result.deleted.append(pruned)
-    counts = drain_pending_artifact_deletions()
+    counts = drain_pending_artifact_deletions(
+        batch(PendingArtifactDeletion.objects.all(), "pending")
+    )
     result.pending_deleted = counts["resolved"]
     result.pending_refused = counts["refused"]
     result.pending_failed = counts["failed"]
-    prune_profile_leftovers(result=result, now=now)
+    prune_profile_leftovers(result=result, now=now, batch=batch)
     # Job rows go last, so a job whose intermediates were just pruned is eligible
     # in the same run.
-    result.jobs_deleted = prune_job_metadata(now=now)
+    for candidate in batch(expired_job_metadata(now=now), "jobs"):
+        with transaction.atomic():
+            acquire_sqlite_write_lock()
+            job = expired_job_metadata(now=now).select_for_update().filter(pk=candidate.pk).first()
+            if job is not None:
+                delete_profile_task_results([job])
+                Job.objects.filter(pk=job.pk).delete()
+                result.jobs_deleted.append(job)
+    if not any(result.next_cursor.values()):
+        result.next_cursor = {}
     return result
 
 
-def prune_profile_leftovers(*, result: PruneResult, now: datetime | None) -> None:
+def staged_candidates(*, now: datetime) -> QuerySet[StagedMedia]:
+    return StagedMedia.objects.filter(
+        Q(claimed_by_job__in=expired_profile_jobs(now=now).values("id"))
+        | (
+            Q(expires_at__lte=now)
+            & (Q(claimed_by_job__isnull=True) | Q(claimed_by_job__finished_at__isnull=False))
+        )
+    )
+
+
+def prune_profile_leftovers(*, result: PruneResult, now: datetime, batch) -> None:
     """The profile backstop's cleanup beyond artifact rows, before the job rows go.
 
     Objects attempts stored without a completion registering them, and staged uploads a
@@ -566,7 +661,7 @@ def prune_profile_leftovers(*, result: PruneResult, now: datetime | None) -> Non
     when the object deletion fails), of every profile job past its backstop.
     """
     expired_jobs = expired_profile_jobs(now=now).values("id")
-    for record in list(RemoteAttemptPrefix.objects.filter(job_id__in=expired_jobs)):
+    for record in batch(RemoteAttemptPrefix.objects.filter(job_id__in=expired_jobs), "prefixes"):
         try:
             clean_attempt_prefix(record_pk=record.pk)
         except RefusedDeletion as exc:
@@ -587,10 +682,9 @@ def prune_profile_leftovers(*, result: PruneResult, now: datetime | None) -> Non
             result.attempt_prefixes_failed += 1
         else:
             result.attempt_prefixes_deleted += 1
-    for staged in list(StagedMedia.objects.filter(claimed_by_job__in=expired_jobs)):
-        assert staged.claimed_by_job_id is not None
+    for staged in batch(staged_candidates(now=now), "staged"):
         try:
-            delete_claimed_staged_upload(staged_pk=staged.pk, job_id=staged.claimed_by_job_id)
+            delete_expired_staged_upload(staged_pk=staged.pk, now=now)
         except RefusedDeletion:
             logger.warning(
                 "Refusing to delete staged upload %s of job %s: not a voxhelm staged key.",
@@ -712,7 +806,9 @@ def drain_pending_artifact_deletions(
 ) -> dict[str, int]:
     """Process queued deletions; returns counts per outcome."""
     if pending is None:
-        pending_pks = list(PendingArtifactDeletion.objects.values_list("pk", flat=True))
+        pending_pks = list(
+            PendingArtifactDeletion.objects.order_by("pk").values_list("pk", flat=True)[:100]
+        )
     else:
         pending_pks = [item.pk for item in pending]
     counts = {"resolved": 0, "refused": 0, "failed": 0}
@@ -769,18 +865,26 @@ def expired_job_metadata(
     )
 
 
-def prune_job_metadata(*, now: datetime | None = None, batch_size: int = 500) -> list[Job]:
+def prune_job_metadata(
+    *, now: datetime | None = None, batch_size: int = 500, max_items: int = 500
+) -> list[Job]:
     """Delete expired job rows (D-09); returns the deleted jobs.
 
     Each batch re-evaluates eligibility under the database write lock inside its
     own transaction, so a job that gained an artifact, a queued deletion or a
     staged-upload claim meanwhile, or left its terminal state, is kept.
     """
+    if batch_size < 1 or max_items < 1:
+        raise ValueError("Metadata batch limits must be positive.")
     deleted: list[Job] = []
-    while True:
+    while len(deleted) < max_items:
         with transaction.atomic():
             acquire_sqlite_write_lock()
-            batch = list(expired_job_metadata(now=now).select_for_update()[:batch_size])
+            batch = list(
+                expired_job_metadata(now=now).select_for_update()[
+                    : min(batch_size, max_items - len(deleted))
+                ]
+            )
             if not batch:
                 return deleted
             delete_profile_task_results(batch)
@@ -788,6 +892,7 @@ def prune_job_metadata(*, now: datetime | None = None, batch_size: int = 500) ->
         deleted.extend(batch)
         if len(batch) < batch_size:
             return deleted
+    return deleted
 
 
 class JobNotDeletable(Exception):

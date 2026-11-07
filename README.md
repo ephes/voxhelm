@@ -470,6 +470,23 @@ Existing directory modes are not changed. These guarantees apply to the
 filesystem store; S3 behavior is unchanged. Adoption requires an application or
 worker update; no deployment is performed by the change itself.
 
+### Bounded cleanup progress
+
+Upload admission and upload-backed job submission try at most four expired staged
+uploads. Expiry removal is eventual; storage failures retain their retry rows.
+The maintenance command below also drains expired unclaimed/finished-job uploads.
+
+`prune_job_artifacts --batch-size 100` examines at most 100 rows in each of five
+phases (artifacts, pending deletions, attempt prefixes, staged uploads, job metadata),
+plus one lookahead row per phase. Results are bounded to this batch. The command saves the cursor in the database automatically, including on reported
+storage failures, so existing scheduled invocations resume without new arguments.
+An exhausted sweep resets to `{}` to retry failures/refusals and pick up rows inserted
+behind the cursor. `--cursor '<json>'` overrides the saved starting point; `{}` restarts
+a sweep. Run the command serially; overlapping runs may repeat work or rewind progress.
+A dry run starts at `{}`, uses the same limits and never updates saved progress; its cursor is for preview only. Do not pass a dry-run
+cursor to a deleting run. Each prefix still lists its own objects for the existing
+all-objects allowlist check. A sweep can leave newly eligible job rows for the next sweep.
+
 ### Job artifact retention (D-09)
 
 Every batch transcription job keeps a job-owned copy of its input (`source`
@@ -1004,6 +1021,10 @@ Override `VOXHELM_WORKER_UVX_SOURCE` for a package or git source instead of
 the local checkout, and include the `diarization` extra when processing
 speaker-label jobs. Use `just worker-loop` only when you want to keep polling
 manually until `Ctrl-C`.
+
+The server orders same-lease heartbeat publication by sampled time: delayed or
+equal-time beats return the current lease without replacing newer progress, and
+extensions never shorten a stored expiry. Rotated or expired leases still fail.
 
 Lease heartbeats own their active HTTP request: leaving a claim cancels the
 request, closes its streams and joins the heartbeat thread within five seconds.

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Publish same-lease heartbeats monotonically, retaining the greater expiry and
+  returning current lease data for delayed requests.
+- Bound retention selection/results to five finite per-phase batches, with a JSON
+  automatically saved database resume cursor that advances past failures/refusals; drain expired staged inputs
+  during maintenance. Upload admission tries at most four expired inputs.
+
 - Reject unrepresentable job numeric values and boolean synthesis speeds with
   controlled field-specific 400 responses before persistence.
 - Stream producer/operator artifacts in bounded chunks on WSGI and ASGI and

@@ -28,6 +28,8 @@ from transcriptions.errors import ApiError
 
 logger = logging.getLogger(__name__)
 
+ADMISSION_CLEANUP_LIMIT = 4
+
 # A registration whose object is still uploading must not look expired to the
 # cleanup of a concurrent request, however short the configured retention is.
 STAGED_UPLOAD_IN_PROGRESS_SECONDS = 24 * 60 * 60
@@ -44,7 +46,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
     Must not run inside a caller's transaction: a rollback there would drop the
     row and orphan the object. The durable registration block enforces this.
     """
-    cleanup_expired_staged_media()
+    cleanup_expired_staged_media(limit=ADMISSION_CLEANUP_LIMIT)
     upload_size = upload.size or 0
     limit_message = (
         "Uploaded file exceeded the configured "
@@ -141,7 +143,9 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
             )
 
 
-def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> None:
+def cleanup_expired_staged_media(
+    *, exclude_upload_id: str | None = None, limit: int = ADMISSION_CLEANUP_LIMIT
+) -> None:
     from jobs.services import acquire_sqlite_write_lock
 
     now = timezone.now()
@@ -150,7 +154,11 @@ def cleanup_expired_staged_media(*, exclude_upload_id: str | None = None) -> Non
     )
     if exclude_upload_id:
         expired = expired.exclude(id=exclude_upload_id)
-    for upload_id in expired.values_list("pk", flat=True):
+    if limit < 1:
+        raise ValueError("Cleanup limit must be positive.")
+    for upload_id in list(
+        expired.order_by("expires_at", "pk").values_list("pk", flat=True)[:limit]
+    ):
         with transaction.atomic():
             acquire_sqlite_write_lock()
             staged = StagedMedia.objects.select_for_update().filter(pk=upload_id).first()
