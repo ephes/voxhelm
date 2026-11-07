@@ -541,6 +541,10 @@ Committed `JobArtifact` rows also persist the winning non-secret store identity 
 
 ## Worker execution loop
 
+Worker-control JSON parsing treats integer digit limits and excessive nesting as
+invalid JSON, raising the same fixed WorkerError as malformed syntax. No response
+body is included in the diagnostic; response byte and elapsed budgets still apply.
+
 The first worker command should be a simple long-running loop:
 
 1. Send worker heartbeat.

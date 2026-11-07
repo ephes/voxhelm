@@ -73,6 +73,7 @@ from transcriptions.known_speaker import (
     KNOWN_SPEAKER_STRATEGY,
     MIN_MIXED_WINDOW_DURATION,
     MIN_MIXED_WINDOW_HOP,
+    REFERENCE_MAX_FRAMES,
     KnownSpeakerConfig,
     ReferenceAudio,
     build_speakers_artifact,
@@ -1406,10 +1407,13 @@ def load_reference_windows(
     try:
         if reference.get("kind") == "source_range":
             samples = decode_mono_16k(
-                sources[source_url], start=float(reference["start"]), end=float(reference["end"])
+                sources[source_url],
+                start=float(reference["start"]),
+                end=float(reference["end"]),
+                max_frames=REFERENCE_MAX_FRAMES,
             )
         else:
-            samples = decode_mono_16k(sources[source_url])
+            samples = decode_mono_16k(sources[source_url], max_frames=REFERENCE_MAX_FRAMES)
         return extract_reference_windows(samples, SAMPLE_RATE)
     finally:
         if not shared:

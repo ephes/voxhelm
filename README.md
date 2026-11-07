@@ -1289,3 +1289,11 @@ and reaps the converter; timeout, startup and nonzero-exit failures remove the
 owned output and raise a synthesis error (HTTP 500 `server_error` on the sync
 API, failed batch job). Callers still own and clean up the source WAV. WAV
 passthrough does not invoke ffmpeg or use this deadline.
+
+Known-speaker reference clips and source intervals are limited to ten minutes of
+decoded 16 kHz mono audio (9,600,000 frames, 19.2 MB PCM16 / 38.4 MB float32).
+Longer references fail before PCM reads or float conversion; ordinary full job
+audio has no reference frame ceiling. Decoder diagnostics are discarded in chunks; references
+have a combined 64 KiB stdout/stderr budget; overflow kills and reaps ffmpeg just
+like a decode timeout, without exposing tool output. Worker-control JSON integer
+and nesting limit failures produce the fixed invalid-JSON worker error.

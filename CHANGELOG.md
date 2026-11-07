@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Normalize worker-control JSON integer/nesting limit errors to safe WorkerError diagnostics.
+- Cap local/remote known-speaker references at ten decoded minutes, checking WAV
+  headers before PCM reads and float conversion without limiting ordinary job audio.
+- Bound and discard reference decoder diagnostics at 64 KiB; kill/reap on overflow and retain
+  deadline and temporary-file cleanup without exposing tool output.
+
 - Decode known-speaker source ranges before PCM materialization, preserving 16 kHz
   sample rounding and EOF behavior. Reuse exact-URL source snapshots within local
   and remote jobs, including the main input, and clean reference-owned files once.

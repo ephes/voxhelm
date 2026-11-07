@@ -98,6 +98,19 @@ Rules:
 
 ## Reference source lifetime and interval decoding
 
+Both local and remote reference loaders apply a 9,600,000-frame ceiling (ten
+minutes at 16 kHz; 19.2 MB PCM16 and 38.4 MB float32). This applies to complete
+clips and requested intervals, not ordinary full job audio. ffmpeg emits at most
+one frame past the ceiling so oversized inputs fail rather than silently truncate.
+The WAV channel/width/rate and frame count are validated before reading samples
+or converting to float32. Exactly-at-limit references pass.
+
+Decoding uses quiet ffmpeg output and drains/discards stdout and stderr with a
+combined 64 KiB byte budget for references. Full job audio drains and discards
+diagnostics without a byte ceiling. Overflow kills/reaps the decoder and returns a fixed
+KnownSpeakerError. Timeout, nonzero exit and overflow all remove temporary WAVs;
+raw diagnostics never appear in API errors.
+
 Local and remote workers materialize each exact reference URL once per job attempt.
 References to the job's original URL reuse its already downloaded source, including
 video sources before audio extraction. Query strings remain part of URL identity;
@@ -112,8 +125,8 @@ history; CPU work can therefore grow with the interval offset, while PCM storage
 and NumPy memory are bounded by the requested duration. Start/end use the same nearest-sample rounding
 at 16 kHz as the former array slice; ranges crossing EOF end at EOF and ranges beyond
 EOF are empty. Reference window selection receives only those interval samples.
-Whole `clip_artifact` references and the main job postprocessing decode remain whole
-sources. Decode deadlines and temporary-file cleanup apply to both paths.
+Whole `clip_artifact` references decode from the beginning within the reference
+ceiling; the main job postprocessing decode remains a whole source. Decode deadlines and temporary-file cleanup apply to both paths.
 
 ## Response
 
