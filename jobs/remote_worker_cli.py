@@ -6,6 +6,7 @@ import importlib.metadata
 import importlib.util
 import json
 import logging
+import math
 import os
 import platform
 import shlex
@@ -15,6 +16,7 @@ import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import IntEnum
 from http import HTTPStatus
 from pathlib import Path
 from time import monotonic, sleep
@@ -101,8 +103,25 @@ MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60
 
 
+MAX_WORKER_TIMING_SECONDS = 3600
+
+
+class WorkerOutcome(IntEnum):
+    NO_WORK = 0
+    SUCCEEDED = 1
+    FAILED = 2
+
+
 class WorkerError(RuntimeError):
     """Raised for worker-side job execution failures."""
+
+
+def validate_worker_timing(value: object, field: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise WorkerError(f"{field} must be a positive number at most 3600 seconds.")
+    if not 0 < value <= MAX_WORKER_TIMING_SECONDS or not math.isfinite(value):
+        raise WorkerError(f"{field} must be a positive number at most 3600 seconds.")
+    return value
 
 
 class WorkerHeartbeatShutdownError(WorkerError):
@@ -129,6 +148,10 @@ class WorkerConfig:
     poll_seconds: int = DEFAULT_POLL_SECONDS
     http_timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+
+    def __post_init__(self) -> None:
+        for field in ("poll_seconds", "http_timeout_seconds", "heartbeat_interval_seconds"):
+            validate_worker_timing(getattr(self, field), field)
 
 
 class WorkerClient:
@@ -574,14 +597,17 @@ def run_worker_once(
     config: WorkerConfig,
     client: WorkerClient,
     capabilities: dict[str, Any],
-) -> bool:
+) -> WorkerOutcome:
     heartbeat = client.heartbeat_worker(capabilities=capabilities, running_job_ids=[])
     poll_after = heartbeat.get("poll_after_seconds")
-    if isinstance(poll_after, int) and poll_after > 0:
+    if poll_after is not None:
+        if isinstance(poll_after, bool) or not isinstance(poll_after, int):
+            raise WorkerError("poll_after_seconds must be an integer from 1 to 3600.")
+        validate_worker_timing(poll_after, "poll_after_seconds")
         object.__setattr__(config, "poll_seconds", poll_after)
     claim = client.claim(capabilities=capabilities)
     if claim is None:
-        return False
+        return WorkerOutcome.NO_WORK
 
     job_id = require_string(claim.get("id"), "claim.id")
     LOGGER.info("claimed remote job job_id=%s worker_id=%s", job_id, config.worker_id)
@@ -605,7 +631,8 @@ def run_worker_once(
                 report_exc,
             )
             raise
-    return True
+        return WorkerOutcome.FAILED
+    return WorkerOutcome.SUCCEEDED
 
 
 def retryable_worker_error(exc: Exception) -> bool:
@@ -1362,7 +1389,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     setup_django_for_worker()
-    config = parse_worker_config(args)
+    try:
+        config = parse_worker_config(args)
+    except WorkerError as exc:
+        parser.error(str(exc))
     log_startup(config)
     log_parakeet_version()
     capabilities = build_capabilities()
@@ -1381,7 +1411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sleep(config.poll_seconds)
             continue
         if args.once:
-            return 0
+            return 1 if claimed == WorkerOutcome.FAILED else 0
         if not claimed:
             sleep(config.poll_seconds)
 

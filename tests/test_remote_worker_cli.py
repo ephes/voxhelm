@@ -772,3 +772,115 @@ def test_late_heartbeat_conflict_does_not_override_completion(monkeypatch, setti
     monkeypatch.setattr(client, "fail_job", lambda **kwargs: pytest.fail("duplicate report"))
     assert worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
     assert client.completed is not None
+
+
+@pytest.mark.parametrize("outcome", ["no_work", "success", "failure", "report_failure"])
+def test_once_exit_status_tracks_processing_outcome(monkeypatch, outcome):
+    client = RecordingClient()
+    reports = []
+    monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "synthetic-credential")
+    monkeypatch.setattr(worker_cli, "setup_django_for_worker", lambda: None)
+    monkeypatch.setattr(worker_cli, "log_parakeet_version", lambda: None)
+    monkeypatch.setattr(worker_cli, "build_capabilities", lambda: {})
+    monkeypatch.setattr(worker_cli, "with_current_stt_runtimes", lambda caps: caps)
+    monkeypatch.setattr(worker_cli, "WorkerClient", lambda **kwargs: client)
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(
+        client, "claim", lambda **kwargs: None if outcome == "no_work" else base_claim()
+    )
+
+    def process(*args, **kwargs):
+        if outcome in {"failure", "report_failure"}:
+            raise ValueError("synthetic inference failed")
+
+    def report(**kwargs):
+        reports.append(kwargs)
+        if outcome == "report_failure":
+            raise worker_cli.WorkerError("synthetic report failed")
+        return {}
+
+    monkeypatch.setattr(worker_cli, "process_claim", process)
+    monkeypatch.setattr(client, "fail_job", report)
+    result = worker_cli.main(
+        ["--base-url", "http://synthetic.invalid", "--worker-id", "synthetic", "--once"]
+    )
+    assert result == (1 if outcome in {"failure", "report_failure"} else 0)
+    assert bool(reports) == (outcome in {"failure", "report_failure"})
+
+
+@pytest.mark.parametrize(
+    "option", ["--poll-seconds", "--http-timeout-seconds", "--heartbeat-interval-seconds"]
+)
+@pytest.mark.parametrize("value", ["0", "-1", "3601", str(10**400)])
+def test_startup_rejects_bad_timing_before_runtime_or_network(monkeypatch, option, value):
+    monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "synthetic-credential")
+    monkeypatch.setattr(worker_cli, "setup_django_for_worker", lambda: None)
+    monkeypatch.setattr(worker_cli, "log_parakeet_version", lambda: pytest.fail("runtime probe"))
+    monkeypatch.setattr(
+        worker_cli, "WorkerClient", lambda **kwargs: pytest.fail("client constructed")
+    )
+    with pytest.raises(SystemExit) as error:
+        worker_cli.main(
+            [
+                "--base-url",
+                "http://synthetic.invalid",
+                "--worker-id",
+                "synthetic",
+                option,
+                value,
+                "--once",
+            ]
+        )
+
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("hint", [True, False, 0, -1, 3601, 10**400, 1.5, "5"])
+def test_invalid_server_poll_hint_never_claims(monkeypatch, hint):
+    client = RecordingClient()
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {"poll_after_seconds": hint})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: pytest.fail("invalid hint reached claim"))
+    with pytest.raises(worker_cli.WorkerError, match="poll_after_seconds"):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+
+@pytest.mark.parametrize("hint", [1, 5, 3600])
+def test_valid_server_poll_hint_is_used(monkeypatch, hint):
+    client = RecordingClient()
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {"poll_after_seconds": hint})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: None)
+    assert not worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+    assert client.config.poll_seconds == hint
+
+
+def test_continuous_worker_keeps_polling_after_reported_failure(monkeypatch):
+    client = RecordingClient()
+    calls = []
+    original_run = worker_cli.run_worker_once
+    monkeypatch.setenv("VOXHELM_WORKER_TOKEN", "synthetic-credential")
+    monkeypatch.setattr(worker_cli, "setup_django_for_worker", lambda: None)
+    monkeypatch.setattr(worker_cli, "log_parakeet_version", lambda: None)
+    monkeypatch.setattr(worker_cli, "build_capabilities", lambda: {})
+    monkeypatch.setattr(worker_cli, "with_current_stt_runtimes", lambda caps: caps)
+    monkeypatch.setattr(worker_cli, "WorkerClient", lambda **kwargs: client)
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: base_claim())
+    monkeypatch.setattr(client, "fail_job", lambda **kwargs: {})
+    monkeypatch.setattr(worker_cli, "sleep", lambda seconds: pytest.fail("unexpected idle wait"))
+
+    def process(*args, **kwargs):
+        raise ValueError("synthetic inference error")
+
+    def run(**kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return original_run(**kwargs)
+
+    monkeypatch.setattr(worker_cli, "process_claim", process)
+    monkeypatch.setattr(worker_cli, "run_worker_once", run)
+    assert (
+        worker_cli.main(["--base-url", "http://synthetic.invalid", "--worker-id", "synthetic"])
+        == 130
+    )
+    assert len(calls) == 2
