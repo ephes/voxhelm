@@ -266,8 +266,11 @@ def test_process_claim_uploads_known_speaker_sidecar(
         diarization: dict[str, Any],
         audio_path: Path,
         result: TranscriptionResult,
+        source_media: DownloadedMedia | None = None,
     ) -> tuple[TranscriptionResult, dict[str, Any]]:
-        del audio_path
+        assert source_media is not None
+        assert source_media.path == audio_path
+        assert source_media.source_url == "https://media.example.com/episode.mp3"
         assert diarization["strategy"] == "pyannote_known_speaker"
         return result, {
             "version": 1,

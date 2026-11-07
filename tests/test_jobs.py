@@ -1172,7 +1172,10 @@ class StubEmbeddingBackend:
 
 
 @pytest.mark.django_db
-def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypatch, tmp_path):
+@pytest.mark.parametrize("same_source", [False, True])
+def test_known_speaker_job_emits_speaker_suggestions(
+    client, settings, monkeypatch, tmp_path, same_source
+):
     import numpy
 
     configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
@@ -1181,19 +1184,23 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
     media_path.write_bytes(b"mp3-bytes")
     ref_path = tmp_path / "ref.mp3"
     ref_path.write_bytes(b"mp3-bytes")
-    monkeypatch.setattr(
-        "jobs.services.download_allowed_media",
-        lambda *, source_url: DownloadedMedia(
+    downloaded: list[str] = []
+
+    def download(*, source_url):
+        downloaded.append(source_url)
+        return DownloadedMedia(
             path=media_path if "episode" in source_url else ref_path,
             content_type="audio/mpeg",
-            source_url=source_url,
-        ),
-    )
+            # A redirect must not prevent reuse of the original request URL.
+            source_url="https://cdn.example.com/redirected.mp3",
+        )
+
+    monkeypatch.setattr("jobs.services.download_allowed_media", download)
     monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
     # Both job audio and reference decode to constant 0.1 -> stub tag 1 (Johannes).
     monkeypatch.setattr(
         "jobs.services.decode_mono_16k",
-        lambda path: numpy.full(2 * 16000, 0.1, dtype="float32"),
+        lambda path, **interval: numpy.full(2 * 16000, 0.1, dtype="float32"),
     )
     monkeypatch.setattr(
         "jobs.services.get_known_speaker_backend", lambda model: StubEmbeddingBackend()
@@ -1229,6 +1236,10 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
         },
     }
 
+    if same_source:
+        cast(Any, payload["diarization"])["known_speakers"][0]["references"][0]["audio"]["url"] = (
+            "https://media.example.com/episode.mp3"
+        )
     response = client.post(
         "/v1/jobs",
         data=json.dumps(payload),
@@ -1237,6 +1248,7 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
     )
     result = response.json()["result"]
     assert response.status_code == 201
+    assert len(downloaded) == (1 if same_source else 2)
     assert "speakers" in result["artifacts"]
     # Known-speaker summary is surfaced in result metadata without leaking refs.
     summary = result["metadata"]["diarization"]["known_speaker_summary"]

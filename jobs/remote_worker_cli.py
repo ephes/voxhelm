@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from http import HTTPStatus
 from pathlib import Path
@@ -33,6 +33,7 @@ from jobs.media import (
     extract_audio_from_video,
     is_video_path,
     reserve_temp_media_path,
+    validate_allowed_media_url,
 )
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions import formats as transcript_formats
@@ -62,7 +63,6 @@ from transcriptions.known_speaker import (
     known_speaker_config_from_mapping,
     resegmentation_enabled,
     run_known_speaker_postprocess,
-    slice_samples,
 )
 from transcriptions.profiles import (
     WORDS_ARTIFACT_FORMAT,
@@ -496,6 +496,10 @@ def process_claim(
                         diarization=diarization,
                         audio_path=audio_path,
                         result=result,
+                        source_media=replace(
+                            media,
+                            source_url=str(claim.get("input", {}).get("url") or media.source_url),
+                        ),
                     )
                 elif strategy == ANONYMOUS_STRATEGY:
                     heartbeater.update(phase="diarization")
@@ -794,9 +798,10 @@ def run_known_speaker_for_claim(
     diarization: dict[str, Any],
     audio_path: Path,
     result: TranscriptionResult,
+    source_media: DownloadedMedia | None = None,
 ) -> tuple[TranscriptionResult, dict[str, Any]]:
     config = known_speaker_config_from_claim(diarization)
-    references = known_speaker_references_from_claim(diarization)
+    references = known_speaker_references_from_claim(diarization, source_media=source_media)
     backend = get_known_speaker_backend(config.embedding_model)
     job_audio_samples = decode_mono_16k(audio_path)
     raw_turns = collect_anonymous_diarization_turns(diarization=diarization, audio_path=audio_path)
@@ -822,47 +827,65 @@ def collect_anonymous_diarization_turns(
         return []
 
 
-def known_speaker_references_from_claim(diarization: dict[str, Any]) -> list[ReferenceAudio]:
+def known_speaker_references_from_claim(
+    diarization: dict[str, Any], *, source_media: DownloadedMedia | None = None
+) -> list[ReferenceAudio]:
     known_speakers = diarization.get("known_speakers")
     if not isinstance(known_speakers, list):
         return []
     references: list[ReferenceAudio] = []
-    for speaker in known_speakers:
-        if not isinstance(speaker, dict):
-            continue
-        speaker_id = require_string(speaker.get("id"), "diarization.known_speakers[].id")
-        name = require_string(speaker.get("name"), "diarization.known_speakers[].name")
-        raw_references = speaker.get("references")
-        if not isinstance(raw_references, list):
-            continue
-        for raw_reference in raw_references:
-            if not isinstance(raw_reference, dict):
+    sources: dict[str, Path] = {}
+    if source_media is not None and source_media.source_kind == "url":
+        sources[source_media.source_url] = source_media.path
+    borrowed = set(sources.values())
+    try:
+        for speaker in known_speakers:
+            if not isinstance(speaker, dict):
                 continue
-            windows = load_reference_windows(raw_reference)
-            if windows:
-                references.append(ReferenceAudio(speaker_id=speaker_id, name=name, windows=windows))
-    return references
+            speaker_id = require_string(speaker.get("id"), "diarization.known_speakers[].id")
+            name = require_string(speaker.get("name"), "diarization.known_speakers[].name")
+            raw_references = speaker.get("references")
+            if not isinstance(raw_references, list):
+                continue
+            for raw_reference in raw_references:
+                if not isinstance(raw_reference, dict):
+                    continue
+                windows = load_reference_windows(raw_reference, sources=sources)
+                if windows:
+                    references.append(
+                        ReferenceAudio(speaker_id=speaker_id, name=name, windows=windows)
+                    )
+
+        return references
+    finally:
+        for path in set(sources.values()) - borrowed:
+            path.unlink(missing_ok=True)
 
 
-def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
+def load_reference_windows(
+    reference: dict[str, Any], *, sources: dict[str, Path] | None = None
+) -> list[Any]:
     audio = reference.get("audio")
     if not isinstance(audio, dict) or audio.get("kind") != "url":
         raise WorkerError("Remote known-speaker references must use URL audio.")
-    media = download_allowed_media(
-        source_url=require_string(audio.get("url"), "reference.audio.url")
-    )
+    source_url = require_string(audio.get("url"), "reference.audio.url")
+    # Apply the public URL policy even when reusing the already fetched input.
+    validate_allowed_media_url(source_url)
+    shared = sources is not None
+    sources = sources if sources is not None else {}
+    if source_url not in sources:
+        sources[source_url] = download_allowed_media(source_url=source_url).path
     try:
-        samples = decode_mono_16k(media.path)
+        if reference.get("kind") == "source_range":
+            samples = decode_mono_16k(
+                sources[source_url], start=float(reference["start"]), end=float(reference["end"])
+            )
+        else:
+            samples = decode_mono_16k(sources[source_url])
+        return extract_reference_windows(samples, SAMPLE_RATE)
     finally:
-        media.path.unlink(missing_ok=True)
-    if reference.get("kind") == "source_range":
-        samples = slice_samples(
-            samples,
-            SAMPLE_RATE,
-            float(reference.get("start", 0.0)),
-            float(reference.get("end", 0.0)),
-        )
-    return extract_reference_windows(samples, SAMPLE_RATE)
+        if not shared:
+            sources[source_url].unlink(missing_ok=True)
 
 
 def known_speaker_config_from_claim(diarization: dict[str, Any]) -> KnownSpeakerConfig:

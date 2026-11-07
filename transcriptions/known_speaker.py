@@ -504,9 +504,22 @@ def select_reference_window_bounds(
 # --------------------------------------------------------------------------- #
 
 
-def decode_mono_16k(audio_path: Path) -> Any:
+def decode_mono_16k(
+    audio_path: Path, *, start: float | None = None, end: float | None = None
+) -> Any:
     """Decode any audio file to a mono 16 kHz float32 numpy array in [-1, 1]."""
     numpy = importlib.import_module("numpy")
+    duration_args: list[str] = []
+    if start is not None and end is not None:
+        # Keep slice_samples' sample rounding, but bound the decode before PCM
+        # is written/read or converted to float32.
+        first = max(int(round(start * SAMPLE_RATE)), 0)
+        last = max(int(round(end * SAMPLE_RATE)), 0)
+        if last <= first:
+            return numpy.zeros(0, dtype="float32")
+        # Output seeking preserves codec priming and resampler history. ffmpeg
+        # may decode/discard preceding frames, but writes only the interval PCM.
+        duration_args = ["-ss", str(first / SAMPLE_RATE), "-t", str((last - first) / SAMPLE_RATE)]
     with tempfile.TemporaryDirectory(prefix="voxhelm-known-speaker-") as temp_dir:
         wav_path = Path(temp_dir) / "audio.wav"
         try:
@@ -517,6 +530,7 @@ def decode_mono_16k(audio_path: Path) -> Any:
                     "-y",
                     "-i",
                     str(audio_path),
+                    *duration_args,
                     "-ac",
                     "1",
                     "-ar",

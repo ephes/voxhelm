@@ -96,6 +96,25 @@ Rules:
   noise and merge two people (measured 2026-10-15 on Django Chat, see
   `2026-10-12_mixed_speaker_segments.md`, "Speaker count and ASR pilot").
 
+## Reference source lifetime and interval decoding
+
+Local and remote workers materialize each exact reference URL once per job attempt.
+References to the job's original URL reuse its already downloaded source, including
+video sources before audio extraction. Query strings remain part of URL identity;
+distinct URLs are independent snapshots. URL policy checks still apply on reuse.
+Reference-owned files are removed once reference windows are built, including on
+failure; the main input remains owned by its caller. There is no cross-job URL cache.
+
+For `source_range`, ffmpeg uses output seek and duration limits to write only the
+requested PCM interval before allocating NumPy samples. Output seeking may decode
+and discard preceding compressed frames to preserve codec priming and resampler
+history; CPU work can therefore grow with the interval offset, while PCM storage
+and NumPy memory are bounded by the requested duration. Start/end use the same nearest-sample rounding
+at 16 kHz as the former array slice; ranges crossing EOF end at EOF and ranges beyond
+EOF are empty. Reference window selection receives only those interval samples.
+Whole `clip_artifact` references and the main job postprocessing decode remain whole
+sources. Decode deadlines and temporary-file cleanup apply to both paths.
+
 ## Response
 
 A new exposed `speakers` artifact (`transcript.speakers.json`) carries the

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -82,7 +82,6 @@ from transcriptions.known_speaker import (
     known_speaker_config_from_mapping,
     resegmentation_enabled,
     run_known_speaker_postprocess,
-    slice_samples,
 )
 from transcriptions.profiles import (
     WORDS_ARTIFACT_FORMAT,
@@ -997,7 +996,12 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
         if transcription_diarization_enabled(job):
             if transcription_diarization_strategy(job) == KNOWN_SPEAKER_STRATEGY:
                 result, speakers_artifact = run_known_speaker_for_job(
-                    job=job, audio_path=audio_path, result=result
+                    job=job,
+                    audio_path=audio_path,
+                    result=result,
+                    source_media=replace(
+                        media, source_url=str(job.input_data.get("url") or media.source_url)
+                    ),
                 )
             else:
                 result = apply_speaker_labels(
@@ -1343,7 +1347,9 @@ def known_speaker_config_for_job(job: Job) -> KnownSpeakerConfig:
     return known_speaker_config_from_mapping(config_data)
 
 
-def build_known_speaker_references(job: Job) -> list[ReferenceAudio]:
+def build_known_speaker_references(
+    job: Job, *, source_media: DownloadedMedia | None = None
+) -> list[ReferenceAudio]:
     raw_diarization = job.output_data.get("diarization")
     known_speakers = None
     if isinstance(raw_diarization, dict):
@@ -1351,23 +1357,34 @@ def build_known_speaker_references(job: Job) -> list[ReferenceAudio]:
     if not isinstance(known_speakers, list):
         return []
     references: list[ReferenceAudio] = []
-    for speaker in known_speakers:
-        if not isinstance(speaker, dict):
-            continue
-        for raw_reference in speaker.get("references", []):
-            windows = load_reference_windows(raw_reference)
-            if windows:
-                references.append(
-                    ReferenceAudio(
-                        speaker_id=str(speaker.get("id")),
-                        name=str(speaker.get("name")),
-                        windows=windows,
+    sources: dict[str, Path] = {}
+    if source_media is not None and source_media.source_kind == "url":
+        sources[source_media.source_url] = source_media.path
+    borrowed = set(sources.values())
+    try:
+        for speaker in known_speakers:
+            if not isinstance(speaker, dict):
+                continue
+            for raw_reference in speaker.get("references", []):
+                windows = load_reference_windows(raw_reference, sources=sources)
+                if windows:
+                    references.append(
+                        ReferenceAudio(
+                            speaker_id=str(speaker.get("id")),
+                            name=str(speaker.get("name")),
+                            windows=windows,
+                        )
                     )
-                )
-    return references
+
+        return references
+    finally:
+        for path in set(sources.values()) - borrowed:
+            path.unlink(missing_ok=True)
 
 
-def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
+def load_reference_windows(
+    reference: dict[str, Any], *, sources: dict[str, Path] | None = None
+) -> list[Any]:
     from transcriptions.known_speaker import SAMPLE_RATE
 
     audio = reference.get("audio", {})
@@ -1379,16 +1396,24 @@ def load_reference_windows(reference: dict[str, Any]) -> list[Any]:
             "Only url-based known-speaker reference audio is supported for execution; "
             "deliver reference clips as source ranges into allowlisted audio."
         )
-    media = download_allowed_media(source_url=str(audio.get("url")))
+    source_url = str(audio.get("url"))
+    # Apply the public URL policy even when reusing the already fetched input.
+    validate_allowed_media_url(source_url)
+    shared = sources is not None
+    sources = sources if sources is not None else {}
+    if source_url not in sources:
+        sources[source_url] = download_allowed_media(source_url=source_url).path
     try:
-        samples = decode_mono_16k(media.path)
+        if reference.get("kind") == "source_range":
+            samples = decode_mono_16k(
+                sources[source_url], start=float(reference["start"]), end=float(reference["end"])
+            )
+        else:
+            samples = decode_mono_16k(sources[source_url])
+        return extract_reference_windows(samples, SAMPLE_RATE)
     finally:
-        media.path.unlink(missing_ok=True)
-    if reference.get("kind") == "source_range":
-        samples = slice_samples(
-            samples, SAMPLE_RATE, float(reference["start"]), float(reference["end"])
-        )
-    return extract_reference_windows(samples, SAMPLE_RATE)
+        if not shared:
+            sources[source_url].unlink(missing_ok=True)
 
 
 def run_known_speaker_for_job(
@@ -1396,9 +1421,10 @@ def run_known_speaker_for_job(
     job: Job,
     audio_path: Path,
     result: TranscriptionResult,
+    source_media: DownloadedMedia | None = None,
 ) -> tuple[TranscriptionResult, dict[str, Any]]:
     config = known_speaker_config_for_job(job)
-    references = build_known_speaker_references(job)
+    references = build_known_speaker_references(job, source_media=source_media)
     backend = get_known_speaker_backend(config.embedding_model)
     job_audio_samples = decode_mono_16k(audio_path)
     raw_turns = collect_anonymous_diarization_turns(job, audio_path)

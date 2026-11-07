@@ -115,6 +115,10 @@ Outside `DJANGO_DEBUG=true` the app refuses to start without `DJANGO_SECRET_KEY`
 (see "Operator UI security" below). The test suite and mypy use
 `tests/settings.py`, which supplies a fixed test-only key.
 
+Install `ffmpeg` on PATH before `just check`; the synthetic WAV/MP3/AAC regressions
+exercise real codec boundaries without downloading media or models. CI ensures it is
+installed before running tests.
+
 `just check` runs Ruff lint, a Ruff format check (`just format-check`; fix with
 `uv run ruff format .`), mypy and pytest. GitHub Actions
 (`.github/workflows/ci.yml`) runs the same steps on macOS arm64 on every push and pull
@@ -1263,6 +1267,21 @@ loaded voice regardless of its registry key; replacing or modifying either file
 reloads it on the next request. Publish complete model/config pairs while the
 worker is stopped to avoid requests observing a partially updated pair. Restart
 workers after changes on filesystems that do not reliably report metadata changes.
+
+Kokoro ONNX sessions and voicepack styles use the same canonical path/file metadata
+identity as Piper, with separate caches of at most eight entries each. Replacing a
+model or voicepack at the same path reloads it on the next synthesis; unchanged files
+reuse the loaded objects. Cache loading/publication is serialized separately from
+inference, and NumPy voicepack archives close after loading, including on errors.
+Publish complete model/voicepack pairs while workers are stopped; restart workers
+when filesystem metadata changes cannot be relied upon.
+
+Known-speaker references share one downloaded source per exact URL within a job
+attempt, including the original job URL. Source ranges are decoded by ffmpeg's seek
+and duration options before PCM allocation; only interval samples reach reference
+window extraction. Output seeking preserves codec priming/resampling and may decode
+and discard preceding frames; this bounds PCM memory rather than decode CPU time.
+See [reference ownership and decoding](specs/known-speaker-diarization.md#reference-source-lifetime-and-interval-decoding).
 
 MP3/OGG speech export runs ffmpeg with a positive integer deadline configured by
 `VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS` (default `300` seconds). Timeout kills
