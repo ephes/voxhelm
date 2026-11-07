@@ -203,3 +203,53 @@ def test_command_persists_cursor_through_failures_and_validates_before_deleting(
     assert visited == [row.pk for row in rows]
     call_command("prune_job_artifacts", dry_run=True, batch_size=2, stdout=StringIO())
     assert RetentionProgress.objects.get().cursor == {}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure", ["storage", "row_delete"])
+def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch, caplog, failure):
+    from django.db import DatabaseError
+
+    from jobs.artifacts import FilesystemArtifactStore
+
+    expired = timezone.now() - timedelta(days=1)
+    for n in range(6):
+        staging.stage_uploaded_audio(
+            producer="synthetic",
+            upload=SimpleUploadedFile(f"old-{n}.mp3", b"audio", content_type="audio/mpeg"),
+        )
+    StagedMedia.objects.update(expires_at=expired)
+    candidates = list(StagedMedia.objects.order_by("expires_at", "pk"))
+    failed = candidates[0]
+    real_delete = FilesystemArtifactStore.delete
+    real_row_delete = StagedMedia.delete
+    attempted = []
+
+    def delete_object(self, *, key):
+        attempted.append(key)
+        if key == failed.storage_key and failure == "storage":
+            raise OSError("synthetic-private-storage-error https://private.invalid/path")
+        return real_delete(self, key=key)
+
+    def delete_row(self, *args, **kwargs):
+        if self.pk == failed.pk and failure == "row_delete":
+            raise DatabaseError("synthetic-private-row-error https://private.invalid/path")
+        return real_row_delete(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", delete_object)
+        patch.setattr(StagedMedia, "delete", delete_row)
+        fresh = staging.stage_uploaded_audio(
+            producer="synthetic",
+            upload=SimpleUploadedFile("new.mp3", b"audio", content_type="audio/mpeg"),
+        )
+    assert attempted == [row.storage_key for row in candidates[:4]]
+    assert StagedMedia.objects.filter(pk=fresh.pk).exists()
+    assert StagedMedia.objects.filter(pk=failed.pk).exists()
+    assert StagedMedia.objects.filter(expires_at=expired).count() == 3
+    assert str(failed.pk) in caplog.text
+    assert "synthetic-private" not in caplog.text
+    assert "private.invalid" not in caplog.text
+    assert failed.storage_key not in caplog.text
+    staging.cleanup_expired_staged_media()
+    assert not StagedMedia.objects.filter(expires_at=expired).exists()

@@ -477,7 +477,11 @@ worker update; no deployment is performed by the change itself.
 ### Bounded cleanup progress
 
 Upload admission and upload-backed job submission try at most four expired staged
-uploads. Expiry removal is eventual; storage failures retain their retry rows.
+uploads. Each candidate has its own locked transaction and expiry/claim recheck.
+A storage or row deletion failure rolls back that candidate, retains its retry row,
+and continues the bounded pass so a healthy new upload can proceed. Warnings log
+only the upload ID, without storage keys or raw exception details. Expiry removal
+is eventual; maintenance retries failures.
 The maintenance command below also drains expired unclaimed/finished-job uploads.
 
 `prune_job_artifacts --batch-size 100` examines at most 100 rows in each of five
