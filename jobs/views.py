@@ -5,10 +5,12 @@ import logging
 from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from jobs.downloads import artifact_response
 from jobs.models import Job, JobArtifact
 from jobs.remote_workers import (
     claim_remote_work,
@@ -209,15 +211,11 @@ def delete_job(*, producer: str, job_id: UUID) -> JsonResponse | HttpResponse:
 
 
 @require_GET
-def job_artifact(request: HttpRequest, job_id: UUID, name: str) -> HttpResponse:
+def job_artifact(request: HttpRequest, job_id: UUID, name: str) -> HttpResponseBase:
     try:
         producer = require_bearer_token(request)
         job = get_object_or_404(Job, id=job_id, producer=producer)
         artifact = get_object_or_404(JobArtifact, job=job, name=name, exposed=True)
-        from jobs.artifacts import get_artifact_store_for_identity
-
-        store = get_artifact_store_for_identity(artifact.storage_identity)
-        data = store.read_bytes(key=artifact.storage_key)
-        return HttpResponse(data, content_type=artifact.content_type)
+        return artifact_response(request, artifact)
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)

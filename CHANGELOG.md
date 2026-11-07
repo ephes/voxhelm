@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Reject unrepresentable job numeric values and boolean synthesis speeds with
+  controlled field-specific 400 responses before persistence.
+- Stream producer/operator artifacts in bounded chunks on WSGI and ASGI and
+  close readers with responses. Return bounded 404/503 storage errors before
+  headers without leaking storage details; preserve artifact metadata for retry.
+
 - Claim local tasks once for their expected task ID and fence terminal/artifact
   publication against stale execution. Keep committed terminal job outcomes
   authoritative during task backend reconciliation.

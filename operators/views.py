@@ -10,11 +10,12 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseRedirect
+from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from jobs.artifacts import get_artifact_store_for_identity
+from jobs.downloads import artifact_response
 from jobs.models import Job, JobArtifact
 from jobs.services import (
     OPERATOR_TRANSCRIPTION_OUTPUT_FORMATS,
@@ -116,17 +117,13 @@ def logout_view(request: HttpRequest) -> HttpResponse:
 
 @login_required(login_url="/")
 @require_GET
-def operator_artifact(request: HttpRequest, job_id: UUID, format_name: str) -> HttpResponse:
+def operator_artifact(request: HttpRequest, job_id: UUID, format_name: str) -> HttpResponseBase:
     if not request.user.is_staff:
         return operator_access_forbidden()
     operator = cast(Any, request.user)
     job = get_object_or_404(Job, id=job_id, operator=operator, job_type=Job.JobType.TRANSCRIBE)
     artifact = get_object_or_404(JobArtifact, job=job, format=format_name, exposed=True)
-    store = get_artifact_store_for_identity(artifact.storage_identity)
-    return HttpResponse(
-        store.read_bytes(key=artifact.storage_key),
-        content_type=artifact.content_type,
-    )
+    return artifact_response(request, artifact)
 
 
 def get_selected_job(request: HttpRequest) -> Job | None:

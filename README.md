@@ -422,6 +422,19 @@ If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.
 
+Job numeric fields reject booleans and numbers that cannot be represented as
+finite floats with field-specific HTTP 400 errors before any job is saved.
+Ordinary finite numbers and existing synthesis speed bounds remain supported.
+
+Producer and operator artifact downloads stream bounded reads from the artifact's
+recorded filesystem/S3 store, including asynchronous reads under ASGI. Closing or
+cancelling the response closes the underlying reader. Authorization, private
+cache headers and recorded content types still apply. A missing stored object
+returns HTTP 404; other supported storage/configuration failures before response
+headers return HTTP 503 with a bounded JSON error and no storage details. Rows
+are kept for diagnosis and retry. A read failure after headers have been sent
+terminates the stream; it cannot change the HTTP status or become a JSON error.
+
 Local Django Tasks execution atomically claims a queued job for its expected
 task ID. Replayed, already running, terminal, or stale-task invocations return
 `execution: not_claimed` without consuming input or starting inference. The
@@ -490,7 +503,8 @@ uv run python manage.py prune_job_artifacts
 
 Deletion is allowlist-based: only an object voxhelm generated for that job is
 ever deleted, i.e. a key ending in exactly `jobs/<job_id>/<artifact name>` or
-`jobs/<job_id>/attempt-<n>/<artifact name>` below the artifact prefix it was
+`jobs/<job_id>/attempt-<n>/<artifact name>` or
+`jobs/<job_id>/allocation-<uuidhex>/<artifact name>` below the artifact prefix it was
 written under (so a later `VOXHELM_ARTIFACT_PREFIX` change does not block
 retention), with no empty, `.` or `..` segments; a staged upload's key must end in exactly
 `staged-inputs/<upload_id>/<filename>`. On the filesystem backend the resolved real path

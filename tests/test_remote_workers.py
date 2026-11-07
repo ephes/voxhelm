@@ -996,7 +996,7 @@ def test_remote_completion_persists_manifest_and_serves_existing_artifact_url(
 
     artifact_response = client.get(payload["result"]["artifacts"]["text"], **producer_headers())
     assert artifact_response.status_code == 200
-    assert artifact_response.content == b"remote transcript"
+    assert b"".join(artifact_response.streaming_content) == b"remote transcript"
 
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
     retry_response = client.post(
@@ -1127,7 +1127,7 @@ def test_remote_completion_uses_leased_artifact_snapshot_after_setting_change(
         **producer_headers(),
     )
     assert artifact_response.status_code == 200
-    assert artifact_response.content == b"remote transcript"
+    assert b"".join(artifact_response.streaming_content) == b"remote transcript"
 
 
 @pytest.mark.django_db

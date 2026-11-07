@@ -255,7 +255,7 @@ def test_local_profile_job_runs_parakeet_with_the_profile_settings_only(
 
     words_url = payload["result"]["artifacts"]["words"]
     assert words_url.endswith("/words.json")
-    document = json.loads(client.get(words_url, **producer_headers()).content)
+    document = json.loads(b"".join(client.get(words_url, **producer_headers()).streaming_content))
     assert document["schema_version"] == 1
     assert document["profile"] == AD_ANALYSIS_V1
     assert document["identity"] == identity
