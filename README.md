@@ -265,7 +265,7 @@ export VOXHELM_JOB_METADATA_RETENTION_SECONDS="7776000"
 export VOXHELM_TRANSCRIPTION_EXECUTION_MODE="django_tasks"
 export VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
 export VOXHELM_REMOTE_WORKER_LEASE_SECONDS="1800"
-export VOXHELM_REMOTE_WORKER_POLL_SECONDS="5"
+export VOXHELM_REMOTE_WORKER_POLL_SECONDS="5"  # integer 1..3600; server polling hint
 export VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS="3"
 export VOXHELM_BOOTSTRAP_OPERATOR_USERNAME="jochen"
 export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
@@ -982,6 +982,15 @@ revokes local ownership; subsequent phases and publication stop cooperatively,
 without completion or failure reporting for that revoked attempt. Transient
 errors (including 5xx) leave ownership intact. An in-progress model call cannot
 be interrupted; ownership is checked again before the next phase.
+
+`--once` exits zero for no work or a completed job, nonzero for failed
+processing (even when failure reporting succeeds), a failed control request,
+or a failed report. Continuous mode keeps polling after reported job failures.
+`--poll-seconds`, `--http-timeout-seconds`, and `--heartbeat-interval-seconds`
+accept integers from 1 to 3600 seconds and are checked before runtime probes or
+client construction. Server `poll_after_seconds` hints use the same integer
+range; invalid hints fail the poll before a claim. Direct Python configuration
+also permits finite positive fractional seconds up to 3600, excluding booleans.
 
 The worker defaults to one active job, periodically heartbeats the leased job
 while local inference runs, uploads the source, optional extracted audio,

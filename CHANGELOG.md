@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Return a failing one-shot worker status after processing errors even when the
+  failure was reported; validate worker timings and server polling hints before use.
+  The server now requires VOXHELM_REMOTE_WORKER_POLL_SECONDS to be an integer
+  from 1 to 3600 and refuses startup outside that range.
+
 - Cancel active lease-heartbeat HTTP requests on claim exit and stop subsequent
   worker phases/publication after definitive lease or authorization loss.
 

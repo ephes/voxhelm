@@ -2400,3 +2400,39 @@ def test_worker_endpoints_reject_non_ascii_bearer_token(client, settings, path):
 
     assert response.status_code == 401
     assert response.json()["error"]["type"] == "authentication_error"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "3601", "7200"])
+def test_server_rejects_poll_hint_outside_worker_domain(monkeypatch, value):
+    import runpy
+
+    monkeypatch.setenv("VOXHELM_REMOTE_WORKER_POLL_SECONDS", value)
+    with pytest.raises(ValueError, match="VOXHELM_REMOTE_WORKER_POLL_SECONDS"):
+        runpy.run_path("config/settings.py")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", [1, 3600])
+def test_server_heartbeat_hint_passes_worker_validation(client, settings, value):
+    from jobs.remote_worker_cli import validate_worker_timing
+
+    enable_remote_workers(settings)
+    settings.VOXHELM_REMOTE_WORKER_POLL_SECONDS = value
+    response = client.post(
+        "/v1/internal/workers/heartbeat",
+        data=json.dumps(
+            {
+                "worker_id": "atlas",
+                "hostname": "synthetic",
+                "concurrency": 1,
+                "running_job_ids": [],
+                "capabilities": plain_capabilities(),
+            }
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer atlas-token",
+    )
+    assert response.status_code == 200
+    hint = response.json()["poll_after_seconds"]
+    assert type(hint) is int
+    assert validate_worker_timing(hint, "poll_after_seconds") == value

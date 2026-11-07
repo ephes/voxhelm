@@ -133,9 +133,11 @@ def validate_bearer_token_labels(name: str, tokens: dict[str, str]) -> dict[str,
     return tokens
 
 
-def validate_positive_int(name: str, value: int) -> int:
+def validate_positive_int(name: str, value: int, *, maximum: int | None = None) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer.")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}.")
     return value
 
 
@@ -657,6 +659,7 @@ VOXHELM_REMOTE_WORKER_LEASE_SECONDS = validate_positive_int(
 VOXHELM_REMOTE_WORKER_POLL_SECONDS = validate_positive_int(
     "VOXHELM_REMOTE_WORKER_POLL_SECONDS",
     int(os.getenv("VOXHELM_REMOTE_WORKER_POLL_SECONDS", "5")),
+    maximum=3600,
 )
 VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = validate_positive_int(
     "VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS",
