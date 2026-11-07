@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pin historical request fingerprint bytes and optional-key omission with independent
+  golden tests; cover transcription matcher equivalence, upload metadata normalization
+  and synthesis's existing looser identity without changing persisted behavior.
+
 - Isolate truncated WAV diagnostics from completed HTTP transcriptions and skip
   audio metadata inspection when STT debug logging is disabled.
 - Protect real debug-log privacy, Unicode preview bounds and raw-preview gating

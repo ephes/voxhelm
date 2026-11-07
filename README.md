@@ -914,6 +914,21 @@ Workers at their advertised/requested active-claim capacity receive no new claim
 When a producer retries the same `task_ref`, Voxhelm reconciles any expired
 remote lease first: attempts that remain move back to `queued`, while exhausted
 attempts fail clearly.
+
+Persisted transcription request fingerprints are SHA-256 of compact JSON with
+recursively sorted keys and literal UTF-8 (no ASCII escaping). Identity covers
+job type, backend, model, language (empty becomes null), input, sorted output
+formats and diarization (absent becomes `{"enabled": false}`). Upload identity
+uses only `kind` and `upload_id`; filename, size and staging/storage metadata do
+not affect reuse. Priority, context and `task_ref` are outside the digest (reuse
+is already scoped to the producer and `task_ref`). Absent/empty `profile` and
+`chapter_marks_ms` keys are omitted for compatibility with historical digests;
+present profiles and ordered chapter marks are identity. Synthesis retains its
+looser rule: only job type enters the digest, so a non-failed job of that type
+with the same producer and `task_ref` can be reused despite payload changes.
+`uv run pytest tests/test_fingerprints.py` protects these persisted bytes with
+handwritten JSON/golden digests and a synthetic matcher-equivalence matrix.
+
 Claim responses snapshot the attempt-scoped artifact prefix and non-secret
 artifact-store identity on the job, and completion validates manifests against
 that leased snapshot even if `VOXHELM_ARTIFACT_PREFIX`, the filesystem root, or
