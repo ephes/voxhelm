@@ -53,6 +53,7 @@ from transcriptions.diarization import (
 from transcriptions.known_speaker import (
     ANONYMOUS_STRATEGY,
     KNOWN_SPEAKER_STRATEGY,
+    REFERENCE_MAX_FRAMES,
     SAMPLE_RATE,
     KnownSpeakerConfig,
     ReferenceAudio,
@@ -417,7 +418,7 @@ def parse_json_response(body: bytes) -> Any:
         return None
     try:
         return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise WorkerError("Voxhelm worker API returned invalid JSON.") from exc
 
 
@@ -878,10 +879,13 @@ def load_reference_windows(
     try:
         if reference.get("kind") == "source_range":
             samples = decode_mono_16k(
-                sources[source_url], start=float(reference["start"]), end=float(reference["end"])
+                sources[source_url],
+                start=float(reference["start"]),
+                end=float(reference["end"]),
+                max_frames=REFERENCE_MAX_FRAMES,
             )
         else:
-            samples = decode_mono_16k(sources[source_url])
+            samples = decode_mono_16k(sources[source_url], max_frames=REFERENCE_MAX_FRAMES)
         return extract_reference_windows(samples, SAMPLE_RATE)
     finally:
         if not shared:

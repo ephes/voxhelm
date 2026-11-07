@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
+import selectors
 import subprocess
 import tempfile
 import wave
@@ -38,6 +40,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any, Mapping, Protocol, Sequence
 
 from django.conf import settings
@@ -135,6 +138,9 @@ KNOWN_SPEAKER_NUMBER_OPTIONS = (
 REFERENCE_WINDOW_SECONDS = 5.0
 REFERENCE_MAX_WINDOWS = 16
 SAMPLE_RATE = 16_000
+# Ten minutes of mono PCM16 (19.2 MB), before float32 conversion (38.4 MB).
+REFERENCE_MAX_FRAMES = 600 * SAMPLE_RATE
+DECODE_DIAGNOSTIC_MAX_BYTES = 64 * 1024
 
 KNOWN_SPEAKER_SOURCE = "known_speaker_voiceprint"
 
@@ -504,29 +510,86 @@ def select_reference_window_bounds(
 # --------------------------------------------------------------------------- #
 
 
+def _run_audio_decode(
+    argv: list[str], *, timeout: float, diagnostic_limit: int | None = None
+) -> None:
+    """Drain both decoder pipes without retaining diagnostics, with byte/deadline caps."""
+    deadline = monotonic() + timeout
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        assert process.stdout is not None and process.stderr is not None
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                selector.register(process.stderr, selectors.EVENT_READ)
+                received = 0
+                while selector.get_map():
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(
+                            key.fd,
+                            min(8192, diagnostic_limit - received + 1)
+                            if diagnostic_limit is not None
+                            else 8192,
+                        )
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if diagnostic_limit is None:
+                            continue
+                        received += len(chunk)
+                        if received > diagnostic_limit:
+                            raise KnownSpeakerError(
+                                "Reference or segment audio decode exceeded "
+                                "the diagnostic byte limit."
+                            )
+                result = process.wait(timeout=max(0, deadline - monotonic()))
+                if result:
+                    raise subprocess.CalledProcessError(result, argv)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
 def decode_mono_16k(
-    audio_path: Path, *, start: float | None = None, end: float | None = None
+    audio_path: Path,
+    *,
+    start: float | None = None,
+    end: float | None = None,
+    max_frames: int | None = None,
 ) -> Any:
-    """Decode any audio file to a mono 16 kHz float32 numpy array in [-1, 1]."""
+    """Decode mono float32 PCM; reference callers supply a decoded-frame allowance."""
     numpy = importlib.import_module("numpy")
     duration_args: list[str] = []
+    frame_count = None
+    if max_frames is not None and max_frames < 1:
+        raise ValueError("Decoded frame allowance must be positive.")
     if start is not None and end is not None:
-        # Keep slice_samples' sample rounding, but bound the decode before PCM
-        # is written/read or converted to float32.
         first = max(int(round(start * SAMPLE_RATE)), 0)
         last = max(int(round(end * SAMPLE_RATE)), 0)
         if last <= first:
             return numpy.zeros(0, dtype="float32")
-        # Output seeking preserves codec priming and resampler history. ffmpeg
-        # may decode/discard preceding frames, but writes only the interval PCM.
-        duration_args = ["-ss", str(first / SAMPLE_RATE), "-t", str((last - first) / SAMPLE_RATE)]
+        duration_args = ["-ss", str(first / SAMPLE_RATE)]
+        frame_count = last - first
+    if max_frames is not None:
+        # One extra sample distinguishes an oversized clip from an exact fit,
+        # while also bounding the temporary PCM file, even for compressed inputs.
+        frame_count = min(frame_count, max_frames + 1) if frame_count else max_frames + 1
+    if frame_count is not None:
+        duration_args += ["-t", str(frame_count / SAMPLE_RATE)]
     with tempfile.TemporaryDirectory(prefix="voxhelm-known-speaker-") as temp_dir:
         wav_path = Path(temp_dir) / "audio.wav"
         try:
-            subprocess.run(
+            _run_audio_decode(
                 [
                     settings.VOXHELM_FFMPEG_BIN,
                     "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostats",
                     "-y",
                     "-i",
                     str(audio_path),
@@ -540,9 +603,7 @@ def decode_mono_16k(
                     str(wav_path),
                 ],
                 timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                diagnostic_limit=DECODE_DIAGNOSTIC_MAX_BYTES if max_frames is not None else None,
             )
         except subprocess.TimeoutExpired as exc:
             raise KnownSpeakerError(
@@ -551,11 +612,16 @@ def decode_mono_16k(
         except (OSError, subprocess.CalledProcessError) as exc:
             raise KnownSpeakerError("Could not decode reference or segment audio.") from exc
         with wave.open(str(wav_path), "rb") as wav_file:
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            frames = wav_file.readframes(wav_file.getnframes())
-    if channels != 1 or sample_width != 2:
-        raise KnownSpeakerError("Decoded known-speaker audio was not 16-bit mono PCM WAV.")
+            if (wav_file.getnchannels(), wav_file.getsampwidth(), wav_file.getframerate()) != (
+                1,
+                2,
+                SAMPLE_RATE,
+            ):
+                raise KnownSpeakerError("Decoded known-speaker audio was not 16-bit mono PCM WAV.")
+            frames_count = wav_file.getnframes()
+            if max_frames is not None and frames_count > max_frames:
+                raise KnownSpeakerError("Known-speaker reference exceeded the decoded frame limit.")
+            frames = wav_file.readframes(frames_count)
     return numpy.frombuffer(frames, dtype=numpy.dtype("<i2")).astype("float32") / 32768.0
 
 
