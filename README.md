@@ -1300,4 +1300,6 @@ Longer references fail before PCM reads or float conversion; ordinary full job
 audio has no reference frame ceiling. Decoder diagnostics are discarded in chunks; references
 have a combined 64 KiB stdout/stderr budget; overflow kills and reaps ffmpeg just
 like a decode timeout, without exposing tool output. Worker-control JSON integer
-and nesting limit failures produce the fixed invalid-JSON worker error.
+and nesting limit failures produce the fixed invalid-JSON worker error. Nesting
+limits vary between Python builds; regressions inject that parser failure rather
+than depending on a particular recursion threshold.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make the worker JSON recursion regression independent of Python build nesting limits.
+
 - Isolate each expired staged-upload cleanup failure so healthy admissions continue;
   preserve failed rows for retry and log only upload IDs without private error details.
 
