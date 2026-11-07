@@ -118,15 +118,16 @@ def _run_transcription(
                 cancel_event=cancel_event,
             ),
         )
-        emit_transcription_debug_log(
-            source="http.audio_transcriptions",
-            audio_shape=summarize_audio_file(parsed_request.input_path),
-            request_model=parsed_request.request_model,
-            request_language=parsed_request.language,
-            prompt=parsed_request.prompt,
-            result=result,
-            duration_ms=int((time.monotonic() - started_at) * 1000),
-        )
+        if settings.VOXHELM_STT_DEBUG_LOGGING:
+            emit_transcription_debug_log(
+                source="http.audio_transcriptions",
+                audio_shape=summarize_audio_file(parsed_request.input_path),
+                request_model=parsed_request.request_model,
+                request_language=parsed_request.language,
+                prompt=parsed_request.prompt,
+                result=result,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
         return result
     except InferenceCancelled:
         if not cancel_event.is_set():
