@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cancel active lease-heartbeat HTTP requests on claim exit and stop subsequent
+  worker phases/publication after definitive lease or authorization loss.
+
 - Reserve operator login capacity before password authentication. Failure windows
   and other in-flight guesses survive concurrent successful logins; pending
   checks retain their slots across expiry in the supported single-process scope.

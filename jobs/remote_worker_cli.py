@@ -13,7 +13,7 @@ import ssl
 import subprocess
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -105,6 +105,14 @@ class WorkerError(RuntimeError):
     """Raised for worker-side job execution failures."""
 
 
+class WorkerHeartbeatShutdownError(WorkerError):
+    """Heartbeat teardown failed; do not change an already published outcome."""
+
+
+class WorkerLeaseLost(WorkerError):
+    """The server definitively revoked this attempt."""
+
+
 class WorkerHttpError(RuntimeError):
     def __init__(self, *, status: int, detail: str) -> None:
         self.status = status
@@ -161,13 +169,19 @@ class WorkerClient:
         job_id: str,
         lease_token: str,
         progress: dict[str, Any],
+        stop_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         payload = {
             "worker_id": self.config.worker_id,
             "lease_token": lease_token,
             "progress": progress,
         }
-        return self._request_json("POST", f"/v1/internal/work/{job_id}/heartbeat", payload)
+        status, body = self._request(
+            "POST", f"/v1/internal/work/{job_id}/heartbeat", payload, stop_event=stop_event
+        )
+        if not isinstance(body, dict):
+            raise WorkerHttpError(status=status, detail="response was not a JSON object")
+        return body
 
     def complete_job(
         self,
@@ -214,12 +228,25 @@ class WorkerClient:
         method: str,
         path: str,
         payload: dict[str, Any],
+        *,
+        stop_event: threading.Event | None = None,
     ) -> tuple[int, Any]:
         loop = asyncio.new_event_loop()
         task = loop.create_task(self._request_async(method, path, payload))
+
+        async def cancel_on_stop() -> None:
+            assert stop_event is not None
+            while not stop_event.is_set():
+                await asyncio.sleep(0.05)
+            task.cancel()
+
+        watcher = loop.create_task(cancel_on_stop()) if stop_event is not None else None
         try:
             return loop.run_until_complete(task)
         finally:
+            if watcher is not None:
+                watcher.cancel()
+                loop.run_until_complete(asyncio.gather(watcher, return_exceptions=True))
             if not task.done():
                 task.cancel()
                 loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
@@ -293,7 +320,7 @@ class LeaseHeartbeater:
         client: WorkerClient,
         job_id: str,
         lease_token: str,
-        interval_seconds: int,
+        interval_seconds: float,
     ) -> None:
         self.client = client
         self.job_id = job_id
@@ -301,6 +328,8 @@ class LeaseHeartbeater:
         self.interval_seconds = max(interval_seconds, 1)
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._lost = threading.Event()
         self._progress: dict[str, Any] = {}
         self._thread = threading.Thread(target=self._run, name=f"voxhelm-lease-{job_id}")
 
@@ -311,30 +340,53 @@ class LeaseHeartbeater:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        if exc is not None:
+            self.check_ownership()
+        if self._thread.is_alive():
+            LOGGER.error("Lease heartbeat did not stop within five seconds.")
+            if exc is None:
+                raise WorkerHeartbeatShutdownError(
+                    "Lease heartbeat did not stop within five seconds."
+                )
 
     def update(self, *, phase: str, message: str = "") -> None:
+        self.check_ownership()
         progress = {"phase": phase}
         if message:
             progress["message"] = message
         with self._lock:
             self._progress = progress
         self._beat_once()
+        self.check_ownership()
+
+    def check_ownership(self) -> None:
+        if self._lost.is_set():
+            raise WorkerLeaseLost("Remote job lease or authorization was revoked.")
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             self._beat_once()
 
     def _beat_once(self) -> None:
-        with self._lock:
-            progress = dict(self._progress)
-        try:
-            self.client.heartbeat_job(
-                job_id=self.job_id,
-                lease_token=self.lease_token,
-                progress=progress,
-            )
-        except Exception as exc:
-            LOGGER.warning("job heartbeat failed job_id=%s detail=%s", self.job_id, exc)
+        with self._request_lock:
+            if self._stop.is_set() or self._lost.is_set():
+                return
+            with self._lock:
+                progress = dict(self._progress)
+            try:
+                self.client.heartbeat_job(
+                    job_id=self.job_id,
+                    lease_token=self.lease_token,
+                    progress=progress,
+                    stop_event=self._stop,
+                )
+            except asyncio.CancelledError:
+                if not self._stop.is_set():
+                    raise
+            except Exception as exc:
+                if isinstance(exc, WorkerHttpError) and exc.status in {401, 403, 404, 409}:
+                    self._lost.set()
+                LOGGER.warning("job heartbeat failed job_id=%s detail=%s", self.job_id, exc)
 
 
 def parse_json_response(body: bytes) -> Any:
@@ -368,6 +420,7 @@ def process_claim(
             media = materialize_input(claim)
             cleanup_paths.append(media.path)
 
+            heartbeater.check_ownership()
             store = get_artifact_store_for_identity(claim_artifact_store_identity(claim))
             artifact_prefix = require_string(claim.get("artifact_prefix"), "claim.artifact_prefix")
             artifacts = [
@@ -388,6 +441,7 @@ def process_claim(
                 heartbeater.update(phase="extract_audio")
                 audio_path = extract_audio_from_video(source_path=media.path)
                 cleanup_paths.append(audio_path)
+                heartbeater.check_ownership()
                 artifacts.append(
                     upload_file_artifact(
                         store=store,
@@ -437,9 +491,11 @@ def process_claim(
                     artifact_prefix=artifact_prefix,
                     formats=claim_output_formats(claim),
                     result=result,
+                    check_ownership=heartbeater.check_ownership,
                 )
             )
             if profile_run is not None:
+                heartbeater.check_ownership()
                 artifacts.append(
                     upload_bytes_artifact(
                         store=store,
@@ -458,6 +514,7 @@ def process_claim(
                 )
                 chapter_document = profile_run.chapter_windows_document()
                 if chapter_document is not None:
+                    heartbeater.check_ownership()
                     artifacts.append(
                         upload_bytes_artifact(
                             store=store,
@@ -473,6 +530,7 @@ def process_claim(
                         )
                     )
             if speakers_artifact_payload is not None:
+                heartbeater.check_ownership()
                 artifacts.append(
                     upload_bytes_artifact(
                         store=store,
@@ -529,6 +587,8 @@ def run_worker_once(
     LOGGER.info("claimed remote job job_id=%s worker_id=%s", job_id, config.worker_id)
     try:
         process_claim(claim, config=config, client=client)
+    except WorkerLeaseLost, WorkerHeartbeatShutdownError:
+        raise
     except Exception as exc:
         LOGGER.exception("remote job failed job_id=%s worker_id=%s", job_id, config.worker_id)
         try:
@@ -798,10 +858,12 @@ def upload_transcript_artifacts(
     artifact_prefix: str,
     formats: list[str],
     result: TranscriptionResult,
+    check_ownership: Callable[[], None] = lambda: None,
 ) -> list[dict[str, Any]]:
     transcript_formats.validate_timestamps(result)
     artifacts: list[dict[str, Any]] = []
     for output_format in formats:
+        check_ownership()
         try:
             name, kind, content_type = TRANSCRIPT_ARTIFACTS_BY_FORMAT[output_format]
         except KeyError as exc:

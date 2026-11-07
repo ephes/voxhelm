@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ class RecordingClient(worker_cli.WorkerClient):
         job_id: str,
         lease_token: str,
         progress: dict[str, Any],
+        stop_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         self.heartbeats.append({"job_id": job_id, "lease_token": lease_token, "progress": progress})
         return {}
@@ -567,3 +569,206 @@ def test_main_environment_token_does_not_warn(monkeypatch, tmp_path, capsys, use
     output = capsys.readouterr()
     assert output.err == ""
     assert "environment-secret" not in output.out
+
+
+@pytest.mark.parametrize("body_error", [False, True])
+def test_heartbeater_exit_cancels_active_http(monkeypatch, body_error):
+    import asyncio
+
+    started = threading.Event()
+    closed = threading.Event()
+    client = worker_cli.WorkerClient(config=RecordingClient().config)
+
+    import httpx
+
+    class BlockedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            started.set()
+            await asyncio.sleep(8)
+            yield b"{}"
+
+        async def aclose(self):
+            closed.set()
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        worker_cli.httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, stream=BlockedStream())
+            ),
+            **kwargs,
+        ),
+    )
+    heartbeater = worker_cli.LeaseHeartbeater(
+        client=client, job_id="synthetic-job", lease_token="synthetic-lease", interval_seconds=0.001
+    )
+    # Avoid sleeping for a full production interval in this synchronization test.
+    heartbeater.interval_seconds = 0.001
+    try:
+        with heartbeater:
+            assert started.wait(2)
+            if body_error:
+                raise ValueError("synthetic body failure")
+    except ValueError:
+        assert body_error
+    assert closed.is_set()
+    assert not heartbeater._thread.is_alive()
+    heartbeater._beat_once()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
+@pytest.mark.parametrize("loss_phase", ["transcribe", "during_inference"])
+def test_claim_stops_after_lease_loss(monkeypatch, settings, tmp_path, status, loss_phase):
+    configure_filesystem_store(settings, tmp_path / "artifacts")
+    install_fake_download(monkeypatch, tmp_path)
+    client = RecordingClient()
+    inferred = []
+    uploaded = []
+    revoked = threading.Event()
+
+    def beat(**kwargs):
+        if kwargs["progress"]["phase"] == loss_phase or revoked.is_set():
+            raise worker_cli.WorkerHttpError(status=status, detail="synthetic")
+        return {}
+
+    def infer(**kwargs):
+        inferred.append(True)
+        if loss_phase == "during_inference":
+            revoked.set()
+            # Simulate the periodic beat observing loss while the model call runs.
+            active[0]._beat_once()
+        return sample_transcription_result()
+
+    active = []
+    original_enter = worker_cli.LeaseHeartbeater.__enter__
+
+    def enter(heartbeater):
+        active.append(heartbeater)
+        return original_enter(heartbeater)
+
+    monkeypatch.setattr(worker_cli.LeaseHeartbeater, "__enter__", enter)
+    monkeypatch.setattr(client, "heartbeat_job", beat)
+    monkeypatch.setattr(worker_cli, "transcribe_claim_audio", infer)
+    original_upload = worker_cli.upload_transcript_artifacts
+
+    def upload(**kwargs):
+        uploaded.append(True)
+        return original_upload(**kwargs)
+
+    monkeypatch.setattr(worker_cli, "upload_transcript_artifacts", upload)
+    if status == 503:
+        worker_cli.process_claim(base_claim(), config=client.config, client=client)
+        assert client.completed is not None
+        assert inferred and uploaded
+    else:
+        with pytest.raises(worker_cli.WorkerError, match="revoked"):
+            worker_cli.process_claim(base_claim(), config=client.config, client=client)
+        assert bool(inferred) == (loss_phase == "during_inference")
+        assert not uploaded
+        assert client.completed is None
+
+
+def test_lost_lease_is_not_reported_as_failure(monkeypatch):
+    client = RecordingClient()
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: base_claim())
+    monkeypatch.setattr(client, "fail_job", lambda **kwargs: pytest.fail("stale failure report"))
+
+    def process(*args, **kwargs):
+        raise worker_cli.WorkerLeaseLost("synthetic revoked lease")
+
+    monkeypatch.setattr(worker_cli, "process_claim", process)
+    with pytest.raises(worker_cli.WorkerLeaseLost):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+
+@pytest.mark.parametrize(
+    "original_error", [None, ValueError("synthetic"), worker_cli.WorkerLeaseLost("revoked")]
+)
+def test_heartbeat_join_timeout_preserves_original_outcome(original_error):
+    from unittest.mock import Mock
+
+    beat = worker_cli.LeaseHeartbeater(
+        client=RecordingClient(), job_id="synthetic", lease_token="lease", interval_seconds=60
+    )
+    beat._thread = Mock()
+    beat._thread.is_alive.return_value = True
+    if original_error is None:
+        with pytest.raises(worker_cli.WorkerHeartbeatShutdownError):
+            beat.__exit__(None, None, None)
+    else:
+        # Context manager propagation preserves the body's existing exception.
+        beat.__exit__(type(original_error), original_error, None)
+    beat._thread.join.assert_called_once_with(timeout=5)
+
+
+def test_lease_loss_during_failed_inference_does_not_report_failure(
+    monkeypatch, settings, tmp_path
+):
+    configure_filesystem_store(settings, tmp_path / "artifacts")
+    install_fake_download(monkeypatch, tmp_path)
+    client = RecordingClient()
+    active = []
+    original_enter = worker_cli.LeaseHeartbeater.__enter__
+
+    def enter(beat):
+        active.append(beat)
+        return original_enter(beat)
+
+    def infer(**kwargs):
+        active[0]._lost.set()
+        raise ValueError("synthetic model failure after revocation")
+
+    monkeypatch.setattr(worker_cli.LeaseHeartbeater, "__enter__", enter)
+    monkeypatch.setattr(worker_cli, "transcribe_claim_audio", infer)
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: base_claim())
+    monkeypatch.setattr(client, "fail_job", lambda **kwargs: pytest.fail("stale failure report"))
+    with pytest.raises(worker_cli.WorkerLeaseLost):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+
+def test_heartbeat_shutdown_error_does_not_report_failure(monkeypatch):
+    client = RecordingClient()
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: base_claim())
+    monkeypatch.setattr(
+        client, "fail_job", lambda **kwargs: pytest.fail("duplicate failure report")
+    )
+
+    def process(*args, **kwargs):
+        raise worker_cli.WorkerHeartbeatShutdownError("synthetic")
+
+    monkeypatch.setattr(worker_cli, "process_claim", process)
+    with pytest.raises(worker_cli.WorkerHeartbeatShutdownError):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+
+def test_late_heartbeat_conflict_does_not_override_completion(monkeypatch, settings, tmp_path):
+    configure_filesystem_store(settings, tmp_path / "artifacts")
+    install_fake_download(monkeypatch, tmp_path)
+    client = RecordingClient()
+    active = []
+    original_enter = worker_cli.LeaseHeartbeater.__enter__
+    original_complete = client.complete_job
+
+    def enter(beat):
+        active.append(beat)
+        return original_enter(beat)
+
+    def complete(**kwargs):
+        result = original_complete(**kwargs)
+        # The server can reject an in-flight heartbeat after committing completion.
+        active[0]._lost.set()
+        return result
+
+    monkeypatch.setattr(worker_cli.LeaseHeartbeater, "__enter__", enter)
+    monkeypatch.setattr(worker_cli, "build_backend_service", lambda **kwargs: FakeSttService())
+    monkeypatch.setattr(client, "complete_job", complete)
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: base_claim())
+    monkeypatch.setattr(client, "fail_job", lambda **kwargs: pytest.fail("duplicate report"))
+    assert worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+    assert client.completed is not None
