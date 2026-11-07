@@ -136,7 +136,8 @@ def test_upload_transcription_uses_non_interactive_scheduler_lane(client, monkey
     assert lanes == ["non-interactive"]
 
 
-def test_upload_transcription_emits_debug_log(client, monkeypatch):
+def test_upload_transcription_emits_debug_log(client, monkeypatch, settings):
+    settings.VOXHELM_STT_DEBUG_LOGGING = True
     debug_calls: list[dict[str, object]] = []
     monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: DummyBackend())
     monkeypatch.setattr(

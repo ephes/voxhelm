@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Isolate truncated WAV diagnostics from completed HTTP transcriptions and skip
+  audio metadata inspection when STT debug logging is disabled.
+- Protect real debug-log privacy, Unicode preview bounds and raw-preview gating
+  with synthetic logging tests.
+
 - Make the worker JSON recursion regression independent of Python build nesting limits.
 
 - Isolate each expired staged-upload cleanup failure so healthy admissions continue;

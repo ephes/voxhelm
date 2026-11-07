@@ -33,7 +33,7 @@ def summarize_audio_file(audio_path: Path) -> dict[str, Any]:
             rate = wav_file.getframerate()
             width = wav_file.getsampwidth()
             channels = wav_file.getnchannels()
-    except (OSError, wave.Error) as exc:
+    except (OSError, EOFError, wave.Error) as exc:
         summary["wav_error"] = str(exc)
         return summary
 
