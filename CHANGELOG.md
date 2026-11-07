@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Isolate each expired staged-upload cleanup failure so healthy admissions continue;
+  preserve failed rows for retry and log only upload IDs without private error details.
+
 - Normalize worker-control JSON integer/nesting limit errors to safe WorkerError diagnostics.
 - Cap local/remote known-speaker references at ten decoded minutes, checking WAV
   headers before PCM reads and float conversion without limiting ordinary job audio.
