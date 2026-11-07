@@ -352,13 +352,22 @@ def test_poll_exception_log_does_not_echo_error_body(monkeypatch, caplog):
     assert "private.invalid" not in caplog.text
 
 
-@pytest.mark.parametrize(
-    "body",
-    [b'{"job":' + b"9" * 5000 + b"}", b"[" * 100000 + b"0" + b"]" * 100000],
-    ids=["integer-limit", "recursion-limit"],
-)
+@pytest.mark.parametrize("failure", ["integer-limit", "recursion-limit"])
 @pytest.mark.parametrize("through_client", [False, True])
-def test_json_parser_limits_are_safe_worker_errors(body, through_client):
+def test_json_parser_limits_are_safe_worker_errors(failure, through_client, monkeypatch):
+    body = b'{"job":' + b"9" * 5000 + b"}"
+    if failure == "recursion-limit":
+        # CPython builds/versions differ in which nesting depths they accept.
+        # Inject the parser failure rather than depending on a stack threshold.
+        body = b'{"job":{},"synthetic_parser_limit":true}'
+        original_loads = worker_cli.json.loads
+
+        def limited_loads(value, *args, **kwargs):
+            if value == body.decode():
+                raise RecursionError("synthetic-private-response")
+            return original_loads(value, *args, **kwargs)
+
+        monkeypatch.setattr(worker_cli.json, "loads", limited_loads)
     with pytest.raises(worker_cli.WorkerError, match="^Voxhelm worker API returned invalid JSON.$"):
         if through_client:
             with control_server(body=body) as url:
