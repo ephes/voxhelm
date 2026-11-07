@@ -861,7 +861,10 @@ def optional_positive_int(value: object, field_name: str) -> int | None:
 def require_non_negative_number(value: object, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError(f"{field_name} must be a number.")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError, ValueError:
+        raise ApiError(f"{field_name} must be a finite number.") from None
     if not math.isfinite(number):
         raise ApiError(f"{field_name} must be a finite number.")
     if number < 0:
@@ -920,9 +923,12 @@ def ensure_synthesis_model(value: object) -> str:
 def validate_speed(value: object) -> float:
     if value is None:
         return 1.0
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError("speed must be a number.")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError, ValueError:
+        raise ApiError("speed must be a finite number.") from None
     if not MIN_TTS_SPEED <= normalized <= MAX_TTS_SPEED:
         raise ApiError(f"speed must be between {MIN_TTS_SPEED} and {MAX_TTS_SPEED}.")
     return normalized

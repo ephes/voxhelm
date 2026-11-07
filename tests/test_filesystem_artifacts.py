@@ -124,3 +124,56 @@ def test_disappearing_entry_during_listing_is_not_reported_as_empty(tmp_path, mo
     with pytest.raises(FileNotFoundError):
         store.list_keys(prefix="job/")
     assert store.read_bytes(key="job/retained") == b"keep"
+
+
+@pytest.mark.parametrize("failure", ["raw", "buffer", "buffer_after_close", "fstat"])
+def test_reader_factory_closes_descriptor_on_initialization_failure(monkeypatch, tmp_path, failure):
+    import io
+    import os
+
+    from jobs.artifacts import FilesystemArtifactStore
+
+    store = FilesystemArtifactStore(root=tmp_path)
+    store.put_bytes(key="synthetic.bin", data=b"synthetic", content_type="application/octet-stream")
+    real_raw, real_buffer, real_fstat = io.FileIO, io.BufferedReader, os.fstat
+    descriptors, readers, replacements = [], [], []
+
+    def raw_open(fd, *args, **kwargs):
+        descriptors.append(fd)
+        if failure == "raw":
+            raise OSError("synthetic raw failure")
+        raw = real_raw(fd, *args, **kwargs)
+        readers.append(raw)
+        return raw
+
+    def buffered(raw, *args, **kwargs):
+        if failure == "buffer_after_close":
+            raw.close()
+            # A constructor can close the raw object before it raises. A later
+            # descriptor allocation must not be closed by numeric fd cleanup.
+            replacements.append(real_raw(tmp_path / "synthetic.bin", "rb"))
+            raise OSError("synthetic buffer_after_close failure")
+        if failure == "buffer":
+            raise OSError("synthetic buffer failure")
+        return real_buffer(raw, *args, **kwargs)
+
+    def fstat(fd):
+        raise OSError("synthetic fstat failure")
+
+    monkeypatch.setattr(io, "FileIO", raw_open)
+    monkeypatch.setattr(io, "BufferedReader", buffered)
+    if failure == "fstat":
+        monkeypatch.setattr(os, "fstat", fstat)
+    try:
+        with pytest.raises(OSError, match=failure):
+            store.open_reader(key="synthetic.bin")
+        assert len(descriptors) == 1
+        assert all(reader.closed for reader in readers)
+        if replacements:
+            assert real_fstat(replacements[0].fileno()).st_size == len(b"synthetic")
+        else:
+            with pytest.raises(OSError):
+                real_fstat(descriptors[0])
+    finally:
+        for replacement in replacements:
+            replacement.close()

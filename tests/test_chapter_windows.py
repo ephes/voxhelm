@@ -65,7 +65,7 @@ def chapter_document(client, payload: dict[str, Any]) -> dict[str, Any]:
     response = client.get(url, **producer_headers())
     assert response.status_code == 200
     assert response["Content-Type"] == "application/json"
-    return json.loads(response.content)
+    return json.loads(b"".join(response.streaming_content))
 
 
 def research_words(raw: bytes, t0: float) -> list[dict[str, Any]]:

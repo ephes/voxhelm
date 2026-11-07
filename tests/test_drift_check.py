@@ -360,7 +360,7 @@ def expected_flags(words: list[dict[str, Any]]) -> list[float]:
 def words_document(client, payload: dict[str, Any]) -> dict[str, Any]:
     response = client.get(payload["result"]["artifacts"]["words"], **producer_headers())
     assert response.status_code == 200
-    return json.loads(response.content)
+    return json.loads(b"".join(response.streaming_content))
 
 
 @pytest.mark.django_db
@@ -400,7 +400,7 @@ def test_local_german_job_splices_accepted_retries_and_returns_the_records(
     assert document["drift"]["summary"]["rejected"] == 1
     # The transcript artifacts stay Parakeet's sentences.
     transcript = client.get(payload["result"]["artifacts"]["json"], **producer_headers())
-    assert b"Django Chat" in transcript.content
+    assert b"Django Chat" in b"".join(transcript.streaming_content)
     assert list(window.temp_root.iterdir()) == []
 
 

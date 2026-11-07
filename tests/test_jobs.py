@@ -961,7 +961,7 @@ def test_staged_audio_job_executes_and_serves_artifacts(client, settings, monkey
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert artifact_response.status_code == 200
-    assert artifact_response.content.decode() == "Batch hello world"
+    assert b"".join(artifact_response.streaming_content).decode() == "Batch hello world"
 
 
 @pytest.mark.django_db
@@ -1146,14 +1146,14 @@ def test_immediate_backend_executes_job_and_serves_artifacts(
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert artifact_response.status_code == 200
-    assert artifact_response.content.decode() == "Batch hello world"
+    assert b"".join(artifact_response.streaming_content).decode() == "Batch hello world"
 
     json_response = client.get(
         payload["result"]["artifacts"]["json"],
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert json_response.status_code == 200
-    json_payload = json_response.json()
+    json_payload = json.loads(b"".join(json_response.streaming_content))
     assert json_payload["segments"][0]["text"] == "Batch hello"
     assert "speaker" not in json_payload["segments"][0]
 
@@ -1251,7 +1251,7 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
         result["artifacts"]["speakers"], HTTP_AUTHORIZATION="Bearer test-token"
     )
     assert speakers_response.status_code == 200
-    speakers_payload = speakers_response.json()
+    speakers_payload = json.loads(b"".join(speakers_response.streaming_content))
     assert speakers_payload["segments"][0]["speaker"] == "Johannes"
     assert speakers_payload["segments"][0]["raw_diarization_speaker"] == "Speaker 1"
     assert speakers_payload["segments"][0]["speaker_uncertain"] is False
@@ -1261,7 +1261,9 @@ def test_known_speaker_job_emits_speaker_suggestions(client, settings, monkeypat
     podlove_response = client.get(
         result["artifacts"]["podlove"], HTTP_AUTHORIZATION="Bearer test-token"
     )
-    assert podlove_response.json()["transcripts"][0]["speaker"] == ""
+    assert (
+        json.loads(b"".join(podlove_response.streaming_content))["transcripts"][0]["speaker"] == ""
+    )
 
 
 @pytest.mark.django_db
@@ -1339,7 +1341,7 @@ def test_transcription_job_accepts_dote_and_podlove_outputs(
 
     dote_response = client.get(result["artifacts"]["dote"], HTTP_AUTHORIZATION="Bearer test-token")
     assert dote_response.status_code == 200
-    dote_payload = dote_response.json()
+    dote_payload = json.loads(b"".join(dote_response.streaming_content))
     assert dote_payload["lines"][0]["startTime"] == "00:00:00,000"
     assert dote_payload["lines"][0]["speakerDesignation"] == ""
 
@@ -1348,7 +1350,7 @@ def test_transcription_job_accepts_dote_and_podlove_outputs(
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert podlove_response.status_code == 200
-    podlove_payload = podlove_response.json()
+    podlove_payload = json.loads(b"".join(podlove_response.streaming_content))
     assert podlove_payload["transcripts"][1]["text"] == "world"
     assert podlove_payload["transcripts"][1]["speaker"] == ""
     assert podlove_payload["transcripts"][1]["voice"] == ""
@@ -1412,7 +1414,7 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert json_response.status_code == 200
-    assert json_response.json()["segments"] == [
+    assert json.loads(b"".join(json_response.streaming_content))["segments"] == [
         {
             "id": 0,
             "seek": 0,
@@ -1433,7 +1435,10 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
 
     dote_response = client.get(result["artifacts"]["dote"], HTTP_AUTHORIZATION="Bearer test-token")
     assert dote_response.status_code == 200
-    assert [line["speakerDesignation"] for line in dote_response.json()["lines"]] == [
+    assert [
+        line["speakerDesignation"]
+        for line in json.loads(b"".join(dote_response.streaming_content))["lines"]
+    ] == [
         "Speaker 1",
         "Speaker 2",
     ]
@@ -1443,7 +1448,7 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert podlove_response.status_code == 200
-    podlove_payload = podlove_response.json()
+    podlove_payload = json.loads(b"".join(podlove_response.streaming_content))
     assert [line["speaker"] for line in podlove_payload["transcripts"]] == [
         "Speaker 1",
         "Speaker 2",
@@ -1455,7 +1460,7 @@ def test_diarized_transcription_job_labels_server_owned_artifacts(
 
     vtt_response = client.get(result["artifacts"]["vtt"], HTTP_AUTHORIZATION="Bearer test-token")
     assert vtt_response.status_code == 200
-    assert "Speaker" not in vtt_response.content.decode()
+    assert "Speaker" not in b"".join(vtt_response.streaming_content).decode()
 
 
 @pytest.mark.django_db
@@ -1777,7 +1782,7 @@ def test_synthesize_job_serves_audio_artifact(client, settings, monkeypatch, tmp
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert artifact_response.status_code == 200
-    assert artifact_response.content == b"RIFFspeech"
+    assert b"".join(artifact_response.streaming_content) == b"RIFFspeech"
 
 
 @pytest.mark.django_db

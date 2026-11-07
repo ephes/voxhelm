@@ -74,7 +74,8 @@ def test_same_bearer_cannot_reuse_cached_private_response(
     headers = {"HTTP_AUTHORIZATION": "Bearer test-token"}
     first = cached_responses.get(url, **headers)
     assert first.status_code == 200
-    assert b"private synthetic transcript" in first.content
+    body = b"".join(first.streaming_content) if first.streaming else first.content
+    assert b"private synthetic transcript" in body
     if revocation == "token":
         settings.VOXHELM_BEARER_TOKENS = {}
     else:
@@ -96,6 +97,7 @@ def test_operator_download_rechecks_access_with_same_cookie(
     url = f"/transcripts/{job.id}/artifacts/text"
     first = cached_responses.get(url)
     assert first.status_code == 200
+    assert b"private synthetic transcript" in b"".join(first.streaming_content)
     if revocation == "staff":
         get_user_model().objects.filter(pk=user.pk).update(is_staff=False)
     elif revocation == "ownership":

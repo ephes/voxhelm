@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import stat
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -29,6 +30,8 @@ class ArtifactStore(Protocol):
     def put_file(self, *, key: str, source_path: Path, content_type: str) -> StoredArtifact: ...
 
     def put_bytes(self, *, key: str, data: bytes, content_type: str) -> StoredArtifact: ...
+
+    def open_reader(self, *, key: str) -> BinaryIO: ...
 
     def read_bytes(self, *, key: str) -> bytes: ...
 
@@ -86,14 +89,27 @@ class FilesystemArtifactStore:
         if not stat.S_ISREG(mode):
             raise ValueError("Artifact objects must be regular files, not aliases or directories.")
 
-    @contextmanager
-    def _reader(self, key: str) -> Iterator[BinaryIO]:
+    def open_reader(self, *, key: str) -> BinaryIO:
         with self._parent(key) as (directory, name):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            with os.fdopen(fd, "rb") as source:
+            try:
+                raw = io.FileIO(fd, "rb", closefd=True)
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                source = io.BufferedReader(raw)
                 if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                     raise ValueError("Artifact objects must be regular files.")
-                yield source
+            except BaseException:
+                raw.close()
+                raise
+            return source
+
+    @contextmanager
+    def _reader(self, key: str) -> Iterator[BinaryIO]:
+        with self.open_reader(key=key) as source:
+            yield source
 
     @contextmanager
     def _writer(self, key: str) -> Iterator[BinaryIO]:
@@ -237,9 +253,13 @@ class S3ArtifactStore:
             size_bytes=len(data),
         )
 
-    def read_bytes(self, *, key: str) -> bytes:
+    def open_reader(self, *, key: str) -> BinaryIO:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read()
+        return response["Body"]
+
+    def read_bytes(self, *, key: str) -> bytes:
+        with closing(self.open_reader(key=key)) as source:
+            return source.read()
 
     def download_file(self, *, key: str, destination_path: Path) -> None:
         destination_path.parent.mkdir(parents=True, exist_ok=True)

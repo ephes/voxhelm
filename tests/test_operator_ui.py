@@ -383,7 +383,7 @@ def test_operator_artifact_uses_stored_artifact_identity(client, settings, tmp_p
     response = client.get(f"/transcripts/{job.id}/artifacts/text")
 
     assert response.status_code == 200
-    assert response.content == b"operator transcript"
+    assert b"".join(response.streaming_content) == b"operator transcript"
 
 
 @pytest.mark.django_db
