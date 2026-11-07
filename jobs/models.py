@@ -232,3 +232,10 @@ class RemoteAttemptPrefix(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class RetentionProgress(models.Model):
+    """Resume the bounded maintenance sweep across scheduled command runs."""
+
+    name = models.CharField(max_length=64, primary_key=True)
+    cursor = models.JSONField(default=dict)
