@@ -4,6 +4,7 @@ import json
 import math
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -11,7 +12,7 @@ from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 from django_tasks import default_task_backend
 from django_tasks.base import TaskResultStatus
@@ -27,7 +28,7 @@ from jobs.media import (
     is_video_path,
     validate_allowed_media_url,
 )
-from jobs.models import Job, JobArtifact, StagedMedia
+from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia
 from jobs.staging import (
     StagedMediaAlreadyClaimed,
     claim_staged_media_for_job,
@@ -953,6 +954,8 @@ def ensure_uuid_string(value: str, field_name: str) -> str:
 
 def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, Any]:
     job = initialize_running_job(job_id=job_id, task_result_id=task_result_id)
+    if job is None:
+        return {"job_id": job_id, "execution": "not_claimed"}
     media: DownloadedMedia | None = None
     staged_media: StagedMedia | None = None
     extracted_audio_path: Path | None = None
@@ -1113,6 +1116,8 @@ def prepare_transcription_input_media(*, job: Job) -> tuple[DownloadedMedia, Sta
 
 def execute_synthesis_job(*, job_id: str, task_result_id: str) -> dict[str, Any]:
     job = initialize_running_job(job_id=job_id, task_result_id=task_result_id)
+    if job is None:
+        return {"job_id": job_id, "execution": "not_claimed"}
     result = None
     exports: list[ExportedAudio] = []
     started = monotonic()
@@ -1149,46 +1154,53 @@ def execute_synthesis_job(*, job_id: str, task_result_id: str) -> dict[str, Any]
         cleanup_paths(*cleanup_targets)
 
 
-def initialize_running_job(*, job_id: str, task_result_id: str) -> Job:
-    job = Job.objects.get(id=job_id)
-    job.state = Job.State.RUNNING
-    job.started_at = timezone.now()
-    if not job.django_task_id:
-        job.django_task_id = task_result_id
-    job.error_detail = ""
-    job.save(
-        update_fields=[
-            "state",
-            "started_at",
-            "django_task_id",
-            "error_detail",
-            "updated_at",
-        ]
+def initialize_running_job(*, job_id: str, task_result_id: str) -> Job | None:
+    now = timezone.now()
+    claimed = Job.objects.filter(
+        Q(django_task_id=task_result_id) | Q(django_task_id=""),
+        id=job_id,
+        execution_mode=Job.ExecutionMode.DJANGO_TASKS,
+        state=Job.State.QUEUED,
+    ).update(
+        state=Job.State.RUNNING,
+        started_at=now,
+        django_task_id=task_result_id,
+        error_detail="",
+        updated_at=now,
     )
-    return job
+    return Job.objects.get(id=job_id) if claimed == 1 else None
+
+
+def local_execution_queryset(job: Job):
+    return Job.objects.filter(
+        id=job.id,
+        execution_mode=Job.ExecutionMode.DJANGO_TASKS,
+        state=Job.State.RUNNING,
+        django_task_id=job.django_task_id,
+    )
 
 
 def mark_job_succeeded(*, job: Job, metadata: dict[str, Any], result_text: str) -> None:
-    job.state = Job.State.SUCCEEDED
-    job.result_text = result_text
-    job.result_metadata = metadata
-    job.finished_at = timezone.now()
-    job.save(
-        update_fields=[
-            "state",
-            "result_text",
-            "result_metadata",
-            "finished_at",
-            "updated_at",
-        ]
+    now = timezone.now()
+    local_execution_queryset(job).update(
+        state=Job.State.SUCCEEDED,
+        result_text=result_text,
+        result_metadata=metadata,
+        finished_at=now,
+        updated_at=now,
     )
+    job.refresh_from_db()
 
 
 def mark_job_failed(*, job: Job, exc: Exception) -> None:
-    job.state = Job.State.FAILED
-    job.error_detail = str(exc)
-    job.finished_at = timezone.now()
-    job.save(update_fields=["state", "error_detail", "finished_at", "updated_at"])
+    now = timezone.now()
+    local_execution_queryset(job).update(
+        state=Job.State.FAILED,
+        error_detail=str(exc),
+        finished_at=now,
+        updated_at=now,
+    )
+    job.refresh_from_db()
 
 
 def build_transcription_result_metadata(
@@ -1553,24 +1565,15 @@ def create_or_replace_artifact(
     payload: bytes,
     exposed: bool,
 ) -> JobArtifact:
-    store = get_artifact_store()
-    key = build_artifact_key(job=job, name=name)
-    stored = store.put_bytes(key=key, data=payload, content_type=content_type)
-    artifact, _created = JobArtifact.objects.update_or_create(
+    return replace_artifact(
         job=job,
         name=name,
-        defaults={
-            "kind": kind,
-            "format": format_name,
-            "storage_backend": stored.backend,
-            "storage_key": stored.key,
-            "storage_identity": current_artifact_store_identity(),
-            "content_type": content_type,
-            "size_bytes": stored.size_bytes,
-            "exposed": exposed,
-        },
+        kind=kind,
+        format_name=format_name,
+        content_type=content_type,
+        payload=payload,
+        exposed=exposed,
     )
-    return artifact
 
 
 def create_or_replace_artifact_from_file(
@@ -1583,30 +1586,89 @@ def create_or_replace_artifact_from_file(
     source_path: Path,
     exposed: bool,
 ) -> JobArtifact:
-    store = get_artifact_store()
-    key = build_artifact_key(job=job, name=name)
-    stored = store.put_file(key=key, source_path=source_path, content_type=content_type)
-    artifact, _created = JobArtifact.objects.update_or_create(
+    return replace_artifact(
         job=job,
         name=name,
-        defaults={
-            "kind": kind,
-            "format": format_name,
-            "storage_backend": stored.backend,
-            "storage_key": stored.key,
-            "storage_identity": current_artifact_store_identity(),
-            "content_type": content_type,
-            "size_bytes": stored.size_bytes,
-            "exposed": exposed,
-        },
+        kind=kind,
+        format_name=format_name,
+        content_type=content_type,
+        source_path=source_path,
+        exposed=exposed,
     )
-    return artifact
+
+
+def replace_artifact(
+    *,
+    job: Job,
+    name: str,
+    kind: str,
+    format_name: str,
+    content_type: str,
+    exposed: bool,
+    payload: bytes | None = None,
+    source_path: Path | None = None,
+) -> JobArtifact:
+    from jobs.retention import process_pending_artifact_deletion
+
+    identity = current_artifact_store_identity()
+    store = get_artifact_store()
+    key = build_artifact_key(job=job, name=name)
+    try:
+        if source_path is not None:
+            stored = store.put_file(key=key, source_path=source_path, content_type=content_type)
+        else:
+            assert payload is not None
+            stored = store.put_bytes(key=key, data=payload, content_type=content_type)
+        with transaction.atomic():
+            acquire_sqlite_write_lock()
+            current = Job.objects.select_for_update().get(pk=job.pk)
+            if job.execution_mode == Job.ExecutionMode.DJANGO_TASKS and job.django_task_id:
+                if (
+                    current.state != Job.State.RUNNING
+                    or current.django_task_id != job.django_task_id
+                ):
+                    raise RuntimeError("Local task no longer owns artifact publication.")
+            previous = JobArtifact.objects.filter(job=job, name=name).first()
+            artifact, _ = JobArtifact.objects.update_or_create(
+                job=job,
+                name=name,
+                defaults={
+                    "kind": kind,
+                    "format": format_name,
+                    "storage_backend": stored.backend,
+                    "storage_key": stored.key,
+                    "storage_identity": identity,
+                    "content_type": content_type,
+                    "size_bytes": stored.size_bytes,
+                    "exposed": exposed,
+                },
+            )
+            if previous is not None:
+                pending = PendingArtifactDeletion.objects.create(
+                    job_id=job.id,
+                    kind=previous.kind,
+                    storage_backend=previous.storage_backend,
+                    storage_key=previous.storage_key,
+                    storage_identity=previous.storage_identity or identity,
+                )
+                transaction.on_commit(partial(process_pending_artifact_deletion, pending.pk))
+        return artifact
+    except Exception:
+        pending = PendingArtifactDeletion.objects.create(
+            job_id=job.id,
+            kind=kind,
+            storage_backend=store.backend_name,
+            storage_key=key,
+            storage_identity=identity,
+        )
+        process_pending_artifact_deletion(pending.pk)
+        raise
 
 
 def build_artifact_key(*, job: Job, name: str) -> str:
     safe_name = name.replace("/", "-")
     prefix = settings.VOXHELM_ARTIFACT_PREFIX.strip("/")
-    return f"{prefix}/jobs/{job.id}/{safe_name}"
+    return f"{prefix}/jobs/{job.id}/allocation-{uuid.uuid4().hex}/{safe_name}"
 
 
 def artifact_proxy_path(*, job: Job, artifact: JobArtifact) -> str:
@@ -1649,32 +1711,41 @@ def isoformat_or_none(value) -> str | None:
 
 
 def reconcile_job_state(job: Job) -> Job:
-    if reconcile_remote_job_state(job):
+    job.refresh_from_db()
+    if job.execution_mode == Job.ExecutionMode.REMOTE_PULL:
+        reconcile_remote_job_state(job)
+        return job
+    if job.state in {Job.State.SUCCEEDED, Job.State.FAILED, Job.State.CANCELED, Job.State.EXPIRED}:
         return job
     if not job.django_task_id or not default_task_backend.supports_get_result:
         return job
+    task_id, prior_state = job.django_task_id, job.state
     try:
-        task_result = default_task_backend.get_result(job.django_task_id)
+        task_result = default_task_backend.get_result(task_id)
     except TaskResultDoesNotExist:
         return job
-
     mapped_state = map_task_status(task_result.status)
-    updates: list[str] = []
-    if mapped_state and mapped_state != job.state:
-        job.state = mapped_state
-        updates.append("state")
+    updates: dict[str, Any] = {}
+    # Only the executor claims RUNNING and publishes success. The backend can
+    # resolve a crash, but cannot preempt the execution claim or invent success.
+    if mapped_state != Job.State.FAILED:
+        job.refresh_from_db()
+        return job
+    updates["state"] = Job.State.FAILED
     if task_result.started_at and job.started_at is None:
-        job.started_at = task_result.started_at
-        updates.append("started_at")
+        updates["started_at"] = task_result.started_at
     if task_result.finished_at and job.finished_at is None:
-        job.finished_at = task_result.finished_at
-        updates.append("finished_at")
+        updates["finished_at"] = task_result.finished_at
     if mapped_state == Job.State.FAILED and not job.error_detail and task_result.errors:
-        job.error_detail = task_result.errors[0].exception_class.__name__
-        updates.append("error_detail")
+        updates["error_detail"] = task_result.errors[0].exception_class.__name__
     if updates:
-        updates.append("updated_at")
-        job.save(update_fields=updates)
+        Job.objects.filter(
+            id=job.id,
+            execution_mode=Job.ExecutionMode.DJANGO_TASKS,
+            django_task_id=task_id,
+            state=prior_state,
+        ).update(**updates, updated_at=timezone.now())
+    job.refresh_from_db()
     return job
 
 

@@ -422,6 +422,23 @@ If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.
 
+Local Django Tasks execution atomically claims a queued job for its expected
+task ID. Replayed, already running, terminal, or stale-task invocations return
+`execution: not_claimed` without consuming input or starting inference. The
+executor alone sets running/success states; backend polling can resolve failed
+unfinished tasks, but cannot revive terminal jobs or take the execution claim.
+Success, failure and artifact publication check the same task ownership.
+
+Local artifacts use fresh `jobs/<job-id>/allocation-<uuidhex>/<filename>` keys.
+The artifact row switches references in a database transaction, preserving the
+previous bytes on metadata failure. Previous objects are queued for deletion
+only after commit; failed allocations are compensated through the same recorded
+store identity and reference checks. Deletion failures stay queued for the
+existing prune command to retry. Other references preserve shared objects.
+Retention accepts these allocation keys alongside existing local and remote
+attempt keys; download URLs and artifact names stay stable. Empty allocation
+directories may remain after object cleanup; retention removes stored objects.
+
 ### Private filesystem artifacts
 
 Filesystem keys must be nonempty relative paths without empty, `.` or `..`

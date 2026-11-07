@@ -146,7 +146,8 @@ def job_key_is_deletable(
     """Allowlist: only objects voxhelm itself generated for this job may be deleted.
 
     The key must end in exactly ``jobs/<job_id>/<file>`` (local execution) or
-    ``jobs/<job_id>/attempt-<n>/<file>`` (remote workers) below the artifact
+    ``jobs/<job_id>/attempt-<n>/<file>`` (remote workers) or
+    ``jobs/<job_id>/allocation-<uuidhex>/<file>`` (local replacements) below the artifact
     prefix that was configured when it was written, with no empty, ``.`` or
     ``..`` segments anywhere; ``<file>`` must match the artifact name
     when known. On the filesystem the resolved real path must equal the literal
@@ -160,7 +161,7 @@ def job_key_is_deletable(
         return False
     # The configured prefix may have changed since the object was written, so
     # any leading prefix is accepted; the job-specific tail is what is checked.
-    if len(parts) >= 4 and re.fullmatch(r"attempt-[0-9]+", parts[-2]):
+    if len(parts) >= 4 and re.fullmatch(r"attempt-[0-9]+|allocation-[0-9a-f]{32}", parts[-2]):
         rest = [parts[-4], parts[-3], parts[-1]]
     else:
         rest = parts[-3:]
