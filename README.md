@@ -974,6 +974,15 @@ the local checkout, and include the `diarization` extra when processing
 speaker-label jobs. Use `just worker-loop` only when you want to keep polling
 manually until `Ctrl-C`.
 
+Lease heartbeats own their active HTTP request: leaving a claim cancels the
+request, closes its streams and joins the heartbeat thread within five seconds.
+Heartbeats are serialized: a phase update waits for an already active beat
+(up to the configured HTTP budget). No heartbeat starts after shutdown. A definitive HTTP 401, 403, 404 or 409
+revokes local ownership; subsequent phases and publication stop cooperatively,
+without completion or failure reporting for that revoked attempt. Transient
+errors (including 5xx) leave ownership intact. An in-progress model call cannot
+be interrupted; ownership is checked again before the next phase.
+
 The worker defaults to one active job, periodically heartbeats the leased job
 while local inference runs, uploads the source, optional extracted audio,
 requested transcript artifacts, and known-speaker `transcript.speakers.json`
