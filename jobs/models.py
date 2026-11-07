@@ -197,10 +197,11 @@ class StagedMedia(models.Model):
 
 
 class PendingArtifactDeletion(models.Model):
-    """A stored object that lost its artifact row and still has to be deleted (D-09).
+    """A replaced or failed-allocation object still to be deleted (D-09).
 
-    Written in the same transaction that drops the row, so a failed or skipped
-    object deletion is retried by ``manage.py prune_job_artifacts``.
+    Replacements queue the old reference in the publication transaction; failed
+    allocations are queued after metadata rollback. Failed or skipped object
+    deletion is retried by ``manage.py prune_job_artifacts``.
     """
 
     job_id = models.UUIDField(null=True, blank=True)

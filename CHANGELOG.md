@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Claim local tasks once for their expected task ID and fence terminal/artifact
+  publication against stale execution. Keep committed terminal job outcomes
+  authoritative during task backend reconciliation.
+- Publish local artifact replacements under fresh allocation keys, preserving
+  previous objects on metadata failures and reference-checking queued cleanup
+  against each object's recorded store identity.
+
 - Return a failing one-shot worker status after processing errors even when the
   failure was reported; validate worker timings and server polling hints before use.
   The server now requires VOXHELM_REMOTE_WORKER_POLL_SECONDS to be an integer
