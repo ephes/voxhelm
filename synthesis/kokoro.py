@@ -393,14 +393,29 @@ class KokoroBackend:
             if cached is not None:
                 _VOICEPACK_CACHE.move_to_end(cache_key)
                 return cached
-            with np.load(identity[0]) as pack:
-                if voicepack_key not in pack:
-                    available = ", ".join(sorted(pack.keys()))
-                    raise RuntimeError(
-                        f"Voicepack key '{voicepack_key}' not found in '{voicepack_path}'. "
-                        f"Available keys: {available}."
-                    )
-                style = np.array(pack[voicepack_key], dtype=np.float32, copy=True)
+            try:
+                with np.load(identity[0], allow_pickle=False) as pack:
+                    if voicepack_key not in pack:
+                        raise BackendUnavailableError(
+                            "Voicepack is missing the configured style key."
+                        )
+                    raw_style = pack[voicepack_key]
+                    if (
+                        raw_style.ndim != 3
+                        or raw_style.shape[0] < 1
+                        or raw_style.shape[1:] != (1, 256)
+                        or raw_style.dtype.kind not in "fiu"
+                    ):
+                        raise BackendUnavailableError(
+                            "Voicepack must contain numeric styles shaped (rows, 1, 256)."
+                        )
+                    style = np.array(raw_style, dtype=np.float32, copy=True)
+                    if not np.isfinite(style).all():
+                        raise BackendUnavailableError("Voicepack styles must be finite.")
+            except (OSError, ValueError, TypeError) as exc:
+                raise BackendUnavailableError(
+                    "Voicepack could not be loaded as numeric styles."
+                ) from exc
             for existing in list(_VOICEPACK_CACHE):
                 if existing[0][0] == identity[0] and existing[0] != identity:
                     del _VOICEPACK_CACHE[existing]
@@ -494,8 +509,21 @@ def _run_inference(
         "style": np.asarray(style, dtype=np.float32),
         "speed": np.ones(1, dtype=np.float32) * speed,
     }
-    audio = session.run(None, inputs)[0]
-    return np.asarray(audio, dtype=np.float32).reshape(-1)
+    outputs = session.run(None, inputs)
+    if not outputs:
+        raise RuntimeError("Kokoro returned no audio output.")
+    audio = np.asarray(outputs[0])
+    # ONNX exports return a mono vector or a single batch of mono samples.
+    if (
+        audio.dtype.kind not in "fiu"
+        or audio.size == 0
+        or not (audio.ndim == 1 or (audio.ndim == 2 and audio.shape[0] == 1))
+    ):
+        raise RuntimeError("Kokoro audio must be a nonempty mono vector or single mono batch.")
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not np.isfinite(samples).all():
+        raise RuntimeError("Kokoro audio samples must be finite.")
+    return samples
 
 
 def _write_wav(audio: np.ndarray) -> Path:

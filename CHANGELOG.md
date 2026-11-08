@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject empty, nonfinite or malformed Kokoro inference audio before publishing
+  WAVs; validate installed style shape and finite values before caching voicepacks.
+
 - Cover deletion-before-commit process death and completed staged-upload cleanup
   retry convergence, preserving referenced objects and committed manifests.
 
