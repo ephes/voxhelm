@@ -1,5 +1,15 @@
 # Round 83 resume note
 
+## B07 finisher outcome (2026-11-08)
+
+Claude finisher reviewed the whole parked B07 diff against `ef4e7d1`. One finding,
+fixed: `AudioStart`/`AudioChunk` admitted 3-byte samples, but the bundled Wyoming
+converter (`pyaudioop`, Python 3.14) only supports 1, 2 and 4 bytes, so a 24-bit
+stream raised inside conversion instead of a clean `invalid_event`. Width 3 is now
+rejected at admission (regression added). A fuzz of 3000 random rate/width/channel
+chunkings confirmed the cumulative `ceil(N * 16000 / rate)` bound never undercounts
+the converter output. Re-review clean; merged to `main`. B08–B10 remain unstarted.
+
 ## Current continuation: B07 parked on 2026-11-08
 
 Branch: `fix/r83-b07-utterance-geometry`, based on current default `main`

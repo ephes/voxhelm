@@ -1132,7 +1132,8 @@ the sidecar enforces these input limits per connection:
   close the connection. Optional transcription model/language fields may be omitted.
 - Audio must start with `AudioStart`; each chunk must match its rate, sample
   width and channel count and contain whole frames. Supported PCM geometry is
-  8000–192000 Hz, 1–4 bytes per sample, mono or stereo. Unsupported geometry,
+  8000–192000 Hz, 1, 2 or 4 bytes per sample (the bundled
+  converter has no 24-bit support), mono or stereo. Unsupported geometry,
   mismatches and chunks before a start return `code="invalid_event"` and close
   the connection before conversion or inference. Each `Transcribe` or
   `AudioStart` discards prior audio and resets resampling history; history is

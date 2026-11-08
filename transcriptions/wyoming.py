@@ -388,7 +388,7 @@ def _validate_typed_event(event: Event) -> None:
         if not invalid:
             invalid = (
                 not 8000 <= data["rate"] <= 192000
-                or data["width"] not in (1, 2, 3, 4)
+                or data["width"] not in (1, 2, 4)
                 or data["channels"] not in (1, 2)
             )
     if (

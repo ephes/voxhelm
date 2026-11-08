@@ -1086,7 +1086,7 @@ def test_wyoming_chunk_geometry_rejected_before_conversion(monkeypatch, start, c
 
 @pytest.mark.parametrize(
     ("rate", "width", "channels"),
-    [(1, 2, 1), (192001, 2, 1), (16000, 5, 1), (16000, 2, 3)],
+    [(1, 2, 1), (192001, 2, 1), (16000, 3, 1), (16000, 5, 1), (16000, 2, 3)],
 )
 def test_wyoming_unsupported_audio_start_is_rejected(rate, width, channels) -> None:
     writer, handler = run_handler_on_stream(
