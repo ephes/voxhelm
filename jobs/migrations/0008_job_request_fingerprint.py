@@ -30,24 +30,64 @@ def _fingerprint(job):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+BACKFILL_BATCH_SIZE = 100
+
+
 def backfill_request_fingerprints(apps, schema_editor):
     Job = apps.get_model("jobs", "Job")
-    seen_active = set()
-    pending = []
-    # Materialize first: updating rows while a SQLite cursor is still iterating them is unsafe.
-    jobs = list(Job.objects.exclude(task_ref="").order_by("-created_at", "-id"))
-    for job in jobs:
-        fingerprint = _fingerprint(job)
-        if job.state != "failed":
-            key = (job.producer, job.task_ref, fingerprint)
-            if key in seen_active:
-                # Legacy duplicate created by the pre-constraint race. Leave it unfingerprinted so
-                # the constraint can be added; the newest matching job keeps the fingerprint.
+    jobs = Job.objects.using(schema_editor.connection.alias)
+    # Database-backed duplicate tracking avoids retaining all active keys in Python.
+    # Migration.atomic also rolls back the index and all batches on failure.
+    index = schema_editor.quote_name("jobs_fingerprint_backfill")
+    table = schema_editor.quote_name(Job._meta.db_table)
+    schema_editor.execute(
+        f"CREATE INDEX {index} ON {table} (producer, task_ref, request_fingerprint)"
+    )
+    last = None
+    while True:
+        page = jobs.exclude(task_ref="")
+        if last is not None:
+            created_at, pk = last
+            page = page.filter(
+                models.Q(created_at__lt=created_at) | models.Q(created_at=created_at, pk__lt=pk)
+            )
+        # Close the read cursor before writes, including on SQLite. Only fingerprint
+        # inputs are loaded, with at most one bounded page of JSON payloads alive.
+        batch = list(
+            page.only(
+                "id",
+                "created_at",
+                "producer",
+                "task_ref",
+                "state",
+                "job_type",
+                "backend",
+                "model",
+                "language",
+                "input_data",
+                "output_data",
+            ).order_by("-created_at", "-id")[:BACKFILL_BATCH_SIZE]
+        )
+        if not batch:
+            break
+        last = (batch[-1].created_at, batch[-1].pk)
+        for job in batch:
+            fingerprint = _fingerprint(job)
+            if (
+                job.state != "failed"
+                and jobs.filter(
+                    producer=job.producer,
+                    task_ref=job.task_ref,
+                    request_fingerprint=fingerprint,
+                )
+                .exclude(state="failed")
+                .exists()
+            ):
+                # The newest active duplicate, already written, keeps the fingerprint.
                 continue
-            seen_active.add(key)
-        job.request_fingerprint = fingerprint
-        pending.append(job)
-    Job.objects.bulk_update(pending, ["request_fingerprint"], batch_size=500)
+            jobs.filter(pk=job.pk).update(request_fingerprint=fingerprint)
+        del job, batch
+    schema_editor.execute(f"DROP INDEX {index}")
 
 
 class Migration(migrations.Migration):

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bind the historical fingerprint upgrade to the selected database and bound
+  payload reads to 100-job keyset pages with indexed duplicate tracking.
+
 - Cover deletion-before-commit process death and completed staged-upload cleanup
   retry convergence, preserving referenced objects and committed manifests.
 
