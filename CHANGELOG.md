@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Restrict remote fair sharing to peers capable of running current candidates;
+  sample admission time after worker serialization for capacity and full leases.
+
 - Pin historical request fingerprint bytes and optional-key omission with independent
   golden tests; cover transcription matcher equivalence, upload metadata normalization
   and synthesis's existing looser identity without changing persisted behavior.

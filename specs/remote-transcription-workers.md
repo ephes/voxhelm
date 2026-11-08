@@ -514,7 +514,7 @@ Server-side algorithm shape:
 1. Find an ordered candidate set with `execution_mode=remote_pull`, eligible type/capabilities, and either:
    - `state=queued`, or
    - `state=running` with `lease_expires_at < now` and `attempt_count < max_attempts`.
-   URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction only rechecks capacity and attempts bounded conditional updates for already-filtered candidates.
+   URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction samples the admission clock after acquiring the worker write lock, rechecks capacity and claimability at that instant, and issues a full lease from that instant. Fair sharing only yields to fresh peers whose advertised capabilities can execute at least one current candidate, using the same capability checks as claim selection.
    If the authenticated worker already has active leased jobs at the lower of
    its recorded concurrency and requested `max_jobs`, return no claim instead
    of handing out another lease.

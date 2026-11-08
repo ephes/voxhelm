@@ -323,6 +323,7 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
 
         with transaction.atomic():
             lock_worker_for_claim(worker_id=worker_id, now=now)
+            now = timezone.now()
             if not worker_has_claim_capacity(
                 worker_id=worker_id,
                 requested_max_jobs=max_jobs,
@@ -332,7 +333,9 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
             # Fair-share: yield this round to a fresh, idle, less-loaded peer so
             # both workers converge on ~50/50 instead of the fastest poller
             # winning every race. No eligible peer => never defers.
-            if worker_should_defer_for_fairness(worker_id=worker_id, now=now):
+            if worker_should_defer_for_fairness(
+                worker_id=worker_id, now=now, candidates=candidates
+            ):
                 return None
 
             for candidate in candidates:
@@ -747,11 +750,14 @@ def worker_recent_claim_load(*, worker_id: str, window_start: datetime) -> int:
     ).count()
 
 
-def worker_should_defer_for_fairness(*, worker_id: str, now: datetime) -> bool:
+def worker_should_defer_for_fairness(
+    *, worker_id: str, now: datetime, candidates: list[Job]
+) -> bool:
     """Return True if this worker should yield the next claim to a less-loaded peer.
 
     Defers only when another worker is enabled, freshly heartbeating (really
-    online), has spare capacity, and has handled strictly fewer recent claims.
+    online), can execute a current candidate, has spare capacity, and has
+    handled strictly fewer recent claims.
     With no such peer it never defers, so a lone worker keeps claiming everything
     and the fleet self-heals when a peer goes away.
     """
@@ -769,6 +775,16 @@ def worker_should_defer_for_fairness(*, worker_id: str, now: datetime) -> bool:
         worker_id=worker_id
     )
     for peer in peers:
+        if not isinstance(peer.capabilities, dict):
+            continue
+        try:
+            compatible = any(worker_can_run_job(job, peer.capabilities) for job in candidates)
+        except ApiError:
+            # A peer heartbeat is untrusted; malformed nested capabilities must
+            # not break another worker's otherwise valid claim.
+            continue
+        if not compatible:
+            continue
         peer_running = Job.objects.filter(
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
             state=Job.State.RUNNING,
