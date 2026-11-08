@@ -1,5 +1,17 @@
 # Round 84 resume note
 
+## B07 finisher outcome (2026-11-08)
+
+Claude finisher reviewed the whole parked B07 diff (rebased onto `main` after the
+round-83 Wyoming geometry merge). No correctness or security findings. One small
+diagnosability fix: an operational state read error now logs the path, error type
+and errno before refusing admission (the raised error hides them on purpose);
+regression asserts the log. Suggestion only, not changed: an unreadable *waiter*
+file also refuses admission, which is stricter than strictly needed for capacity
+safety. `just check`, the locked all-extras pip-audit and the full suite passed;
+merged to `main`. B08–B11 below remain unstarted.
+
+
 Work is parked on `fix/r84-b07-holder-safety`, based on `origin/main`
 `ef4e7d1b92c019d3c57d21bc7bdab5a0737e0ac7`. Nothing was merged.
 The fresh clone's origin is `git@github.com:ephes/voxhelm.git`.

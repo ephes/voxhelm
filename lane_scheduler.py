@@ -387,8 +387,14 @@ class LaneScheduler:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except OSError:
+        except OSError as exc:
             # An unreadable live holder still owns capacity. Never reclaim it.
+            _LOGGER.error(
+                "lane_scheduler cannot read state path=%s error=%s errno=%s",
+                path,
+                type(exc).__name__,
+                exc.errno,
+            )
             raise RuntimeError("Cannot read lane scheduler state; admission refused.") from None
         except UnicodeDecodeError, ValueError, RecursionError:
             return None

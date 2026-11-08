@@ -884,7 +884,7 @@ def test_failed_holder_publication_preserves_capacity(tmp_path, monkeypatch, fai
 
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("error", [PermissionError("private"), OSError(5, "I/O error")])
-def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, legacy, error):
+def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, caplog, legacy, error):
     scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
     holder = write_holder(
         scheduler, token="live", path=tmp_path / "holder.json" if legacy else None
@@ -901,5 +901,6 @@ def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, legacy,
     with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
         scheduler.acquire(lane=LANE_NON_INTERACTIVE)
     assert holder.read_bytes() == before
+    assert any("cannot read state" in record.message for record in caplog.records)
     assert waiter_count(scheduler) == 0
     assert holder_count(scheduler) == (0 if legacy else 1)
