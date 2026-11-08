@@ -960,3 +960,85 @@ def test_wyoming_run_synthesizes_audio_round_trip(monkeypatch, tmp_path: Path) -
     assert AudioStart.is_type(events[0].type)
     assert AudioChunk.is_type(events[1].type)
     assert AudioStop.is_type(events[-1].type)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "data"),
+    [
+        ("synthesize", {}),
+        ("synthesize", {"text": 42}),
+        ("synthesize", {"text": "hello", "voice": "voice"}),
+        ("synthesize", {"text": "hello", "voice": {"name": 42}}),
+        ("synthesize", {"text": "hello", "voice": {"language": []}}),
+        ("transcribe", {"name": 42}),
+        ("transcribe", {"language": []}),
+        ("audio-start", {"rate": 16000, "width": 2}),
+        ("audio-start", {"rate": True, "width": 2, "channels": 1}),
+        ("audio-start", {"rate": "16000", "width": 2, "channels": 1}),
+        ("audio-chunk", {"rate": 16000, "width": [], "channels": 1}),
+        ("audio-stop", {"timestamp": "now"}),
+    ],
+)
+def test_wyoming_typed_event_rejection_precedes_state_and_inference(
+    monkeypatch, event_type, data
+) -> None:
+    def unexpected_backend(*args, **kwargs):
+        pytest.fail("malformed event reached inference")
+
+    monkeypatch.setattr("transcriptions.wyoming.transcribe_audio", unexpected_backend)
+    monkeypatch.setattr("transcriptions.wyoming.synthesize_text", unexpected_backend)
+    raw = encode_events(Event(type=event_type, data=data), Describe().event())
+    writer, handler = run_handler_on_stream(raw)
+
+    assert_single_error(writer, "invalid_event")
+    assert handler.audio_buffer.getvalue() == b""
+    assert handler.audio_shape.input_rate is None
+    assert handler.request_model == limit_config().model
+
+
+@pytest.mark.parametrize("slow_phase", ["header", "data", "payload", "trickle"])
+def test_wyoming_event_deadline_covers_entire_read(monkeypatch, slow_phase) -> None:
+    """Advance the loop clock without depending on wall time or real sockets."""
+    writer = ClosingWriter()
+    config = limit_config()
+
+    async def run_flow() -> None:
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+
+        class TimedReader:
+            phase = "header"
+
+            async def delay(self, phase):
+                # Each individual trickled phase is short, but the whole event is not.
+                ticks = 12 if slow_phase == "trickle" else (40 if slow_phase == phase else 0)
+                for _ in range(ticks):
+                    clock[0] += 1
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+
+            async def readline(self):
+                await self.delay("header")
+                return header_line({"type": "describe", "data_length": 2, "payload_length": 2})
+
+            async def readexactly(self, count):
+                phase = "data" if self.phase == "header" else "payload"
+                self.phase = phase
+                await self.delay(phase)
+                return b"{}" if phase == "data" else b"ab"
+
+        handler = WyomingSttEventHandler(config, build_wyoming_info(config), TimedReader(), writer)
+
+        # One event suffices on the old code too, so a missing deadline fails without hanging.
+        async def finish(event):
+            return False
+
+        monkeypatch.setattr(handler, "handle_event", finish)
+        try:
+            await handler.run()
+        finally:
+            monkeypatch.undo()
+
+    asyncio.run(run_flow())
+    assert_single_error(writer, "event_timeout")

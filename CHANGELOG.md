@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject malformed Wyoming typed events before state changes or inference, and
+  close stalled/trickled event reads after a single 30-second elapsed deadline.
+
 - Cover deletion-before-commit process death and completed staged-upload cleanup
   retry convergence, preserving referenced objects and committed manifests.
 

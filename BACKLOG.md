@@ -105,6 +105,8 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 
 ## Wyoming input limits
 
+- [x] Validate consumed typed event fields before state changes/inference and close malformed clients.
+- [x] Bound complete event reads (header and both bodies) by one 30-second elapsed deadline.
 - [x] Cap buffered Wyoming STT audio with `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default 120 s, checked on the
   converted 16 kHz mono buffer) and answer `audio_too_long`, then close the connection.
 - [x] Apply `VOXHELM_TTS_MAX_INPUT_CHARS` to Wyoming `Synthesize` and answer `text_too_long`, then close the

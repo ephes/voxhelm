@@ -1123,6 +1123,13 @@ The Wyoming protocol has no authentication, and the sidecar binds
 Assistant, never to the internet. To bound memory use on the inference host,
 the sidecar enforces these input limits per connection:
 
+- A complete event (header, data and payload together) has a fixed 30-second
+  elapsed read deadline, including idle waits and trickled input. Expiry returns
+  `code="event_timeout"` and closes the connection.
+- Consumed synthesis, transcription and audio fields are type-checked before
+  state changes or inference. Missing required text/audio fields, malformed voice
+  objects and invalid scalar types return one `code="invalid_event"` error and
+  close the connection. Optional transcription model/language fields may be omitted.
 - Every event is checked before its body is read. The sidecar reads events
   through its own bounded reader instead of the `wyoming` library's, which
   would buffer whatever `data_length` / `payload_length` a client declares.
