@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound Pyannote decoding to two hours of 16 kHz mono PCM, reject invalid/truncated
+  WAVs before waveform allocation, and discard bounded decoder diagnostics.
+- Cache Pyannote pipelines only after successful device placement, allowing retries.
+
 - Bind Wyoming chunks to supported `AudioStart` PCM geometry (8–192 kHz, 1/2/4-byte
   samples, mono/stereo) and whole frames,
   check the cumulative resampled frame budget before conversion, and reset
