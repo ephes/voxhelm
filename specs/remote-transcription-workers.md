@@ -709,3 +709,15 @@ runtime is involved. These are coverage contracts for the existing locks.
 Counterfactual lock-removal cases run with these tests as sensitivity checks.
 Both participants must reach the ownership oracle before the expected failure;
 setup errors or timeouts do not count as detecting the missing lock.
+
+### Cleanup recovery regression contracts
+
+`uv run pytest tests/test_remote_recovery_contracts.py` kills a spawned cleanup
+process after confirmed object deletion and before database commit, for both an
+attempt prefix and a claimed staged input. Reopening and pruning must converge,
+including healthy independent candidates, without deleting a referenced canary.
+A separate complete/cleanup-failure/reopen/identical-retry journey preserves one
+committed result, manifest identities, input metadata and finish time, refuses
+changed metadata, and eventually removes only the owned staged input. Sensitivity
+checks remove reference protection, skip missing-object ownership cleanup, or
+bypass the idempotent-completion branch; each must fail its named oracle.
