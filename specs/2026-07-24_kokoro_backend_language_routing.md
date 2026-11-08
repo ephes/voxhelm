@@ -125,11 +125,11 @@ One new backend, one routing layer, minimal surgery elsewhere:
   **Style-vector indexing** follows the Martin reference implementation
   exactly: the style row is selected by the chunk's token count BEFORE
   boundary/padding tokens are added, and an index clamp to the pack's
-  length guards the edge. Installed packs must contain finite real numeric
-  float32-compatible styles shaped `(rows, 1, 256)` with at least one row;
-  invalid packs fail before caching. Inference audio must be a nonempty finite
-  mono vector or a single mono batch. A boundary test pins the indexing at the exact
+  length guards the edge; a boundary test pins the indexing at the exact
   chunk limit (no off-by-two, no out-of-range).
+  Installed packs must contain finite real numeric float32-compatible styles
+  shaped `(rows, 1, 256)` with at least one row; invalid packs fail before caching.
+  Inference audio must be a nonempty finite mono vector or a single mono batch.
   **Token limit & chunking (hard requirement):** Kokoro models accept ~510
   phoneme tokens per call, and the voicepack is length-indexed — the style
   vector is selected by the chunk's token count from the chosen voicepack
@@ -138,7 +138,11 @@ One new backend, one routing layer, minimal surgery elsewhere:
   budget (hard-splitting an over-long single sentence as last resort),
   select the per-chunk style vector from the configured `voicepack_key`
   entry by that chunk's token length, run inference per chunk, and
-  concatenate the PCM into one WAV. Unit tests cover the boundaries: text
+  append validated PCM chunks incrementally to one WAV. Reject nonblank
+  requests with no supported tokens, empty/nonfinite or non-mono inference
+  output, and voicepacks without finite numeric `(rows, 1, 256)` styles.
+  Cap output at 30 minutes of 24 kHz mono PCM, compute duration from written
+  frames and remove partial WAVs on failure or cancellation. Unit tests cover the boundaries: text
   just under the limit (single call), a two-sentence text crossing the
   limit (two calls, concatenated duration ≈ sum), and a single over-long
   sentence (hard split, no crash).

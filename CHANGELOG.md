@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refuse Kokoro requests with no supported speech tokens instead of returning
+  empty WAVs; write PCM chunks incrementally with a 30-minute total frame cap
+  and remove partial output after inference, cancellation or budget failure.
+
 - Reject empty, nonfinite or malformed Kokoro inference audio before publishing
   WAVs; validate installed style shape and finite values before caching voicepacks.
 
