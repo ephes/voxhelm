@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Group remote fair-share active/recent load counts in one query regardless of fleet size.
+
 - Restrict remote fair sharing to peers capable of running current candidates;
   sample admission time after worker serialization for capacity and full leases.
 

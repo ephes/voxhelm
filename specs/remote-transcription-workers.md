@@ -688,3 +688,7 @@ Before implementation/deployment, validate manually:
 - The worker never needs database credentials.
 - Adding another machine is documented and repeatable with `uv tool install`/`uvx` plus Voxhelm URL and credentials; no Django server/database setup is required on the worker host.
 - Existing local `studio` transcription operation can be restored by configuration if the remote worker is disabled.
+
+Fair-share admission groups active and recent load counts for compatible fresh
+peers in one Job query, preserving strict active-lease expiry and inclusive
+freshness/recent-load window boundaries.
