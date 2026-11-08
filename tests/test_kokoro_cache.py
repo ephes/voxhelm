@@ -22,7 +22,7 @@ def backend(tmp_path):
     model = tmp_path / "model.onnx"
     pack = tmp_path / "voices.npz"
     model.write_bytes(b"model-a")
-    np.savez(pack, synthetic=np.ones((512, 1), dtype="float32"))
+    np.savez(pack, synthetic=np.ones((512, 1, 256), dtype="float32"))
     config = kokoro.KokoroModelConfig("synthetic", model, pack, "synthetic", "en-us")
     return kokoro.KokoroBackend(models={"synthetic": config}), model, pack
 
@@ -36,7 +36,7 @@ def test_synthesis_reloads_replaced_artifacts_and_reuses_unchanged(tmp_path, mon
             loaded.append(Path(path).read_bytes())
 
         def run(self, _, inputs):
-            styles.append(float(inputs["style"][0]))
+            styles.append(float(inputs["style"][0, 0]))
             return [np.zeros(1, dtype="float32")]
 
     monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=Session))
@@ -53,7 +53,7 @@ def test_synthesis_reloads_replaced_artifacts_and_reuses_unchanged(tmp_path, mon
     synthesize()
     model.write_bytes(b"model-b-longer")
     replacement = tmp_path / "replacement.npz"
-    np.savez(replacement, synthetic=np.full((512, 1), 2, dtype="float32"))
+    np.savez(replacement, synthetic=np.full((512, 1, 256), 2, dtype="float32"))
     replacement.replace(pack)
     synthesize()
     assert loaded == [b"model-a", b"model-b-longer"]
@@ -115,7 +115,7 @@ def test_voice_archive_closes_on_all_paths(tmp_path, monkeypatch, failure):
         def __getitem__(self, key):
             if failure == "read":
                 raise RuntimeError("synthetic read failure")
-            return np.ones((512, 1))
+            return np.ones((512, 1, 256))
 
         def __enter__(self):
             return self
@@ -123,7 +123,7 @@ def test_voice_archive_closes_on_all_paths(tmp_path, monkeypatch, failure):
         def __exit__(self, *args):
             closed.append(True)
 
-    monkeypatch.setattr(np, "load", lambda *a: Archive())
+    monkeypatch.setattr(np, "load", lambda *a, **kw: Archive())
     if failure == "success":
         instance._voicepack(pack, "synthetic")
     else:
@@ -146,6 +146,6 @@ def test_caches_evict_old_entries_and_share_canonical_paths(tmp_path, monkeypatc
         path.write_bytes(b"synthetic")
         instance._session(path)
         other = tmp_path / f"pack-{n}.npz"
-        np.savez(other, synthetic=np.ones((512, 1)))
+        np.savez(other, synthetic=np.ones((512, 1, 256)))
         instance._voicepack(other, "synthetic")
     assert len(kokoro._SESSION_CACHE) == len(kokoro._VOICEPACK_CACHE) == 8

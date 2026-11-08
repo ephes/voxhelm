@@ -103,6 +103,16 @@ inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
 
+## Kokoro inference and installed style validation
+
+Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
+a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
+publication. Valid samples keep the existing clipping and 16-bit PCM conversion.
+Installed voicepacks must contain real numeric, finite float32-compatible styles
+shaped `(rows, 1, 256)`, with at least one row. Token counts still clamp to the
+last row. Invalid packs raise a controlled backend-unavailable error and are
+never cached; replacing the file allows a subsequent load to recover.
+
 ## Historical fingerprint upgrades
 
 Migration 0008 backfills only the database selected by `migrate --database`.

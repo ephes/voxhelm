@@ -125,7 +125,10 @@ One new backend, one routing layer, minimal surgery elsewhere:
   **Style-vector indexing** follows the Martin reference implementation
   exactly: the style row is selected by the chunk's token count BEFORE
   boundary/padding tokens are added, and an index clamp to the pack's
-  length guards the edge; a boundary test pins the indexing at the exact
+  length guards the edge. Installed packs must contain finite real numeric
+  float32-compatible styles shaped `(rows, 1, 256)` with at least one row;
+  invalid packs fail before caching. Inference audio must be a nonempty finite
+  mono vector or a single mono batch. A boundary test pins the indexing at the exact
   chunk limit (no off-by-two, no out-of-range).
   **Token limit & chunking (hard requirement):** Kokoro models accept ~510
   phoneme tokens per call, and the voicepack is length-indexed — the style

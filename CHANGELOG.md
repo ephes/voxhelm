@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject empty, nonfinite or malformed Kokoro inference audio before publishing
+  WAVs; validate installed style shape and finite values before caching voicepacks.
+
 - Bind the historical fingerprint upgrade to the selected database and bound
   payload reads to 100-job keyset pages with indexed duplicate tracking.
 
