@@ -904,3 +904,152 @@ def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, caplog,
     assert any("cannot read state" in record.message for record in caplog.records)
     assert waiter_count(scheduler) == 0
     assert holder_count(scheduler) == (0 if legacy else 1)
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_cancel_while_another_process_holds_control_lock(tmp_path, monkeypatch, registered):
+    import lane_scheduler
+
+    scheduler = LaneScheduler(root_dir=tmp_path / "state", stale_seconds=60)
+    scheduler._ensure_layout()
+    # Keep a registered request queued until the separate process takes control.lock.
+    other = write_holder(scheduler, token="other") if registered else None
+    cancel = threading.Event()
+    finished = threading.Event()
+    paused = threading.Event()
+    proceed = threading.Event()
+    attempted = threading.Event()
+    outcomes = []
+
+    def acquire():
+        try:
+            ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE, cancel_event=cancel)
+        except InferenceCancelled:
+            outcomes.append("cancelled")
+        else:
+            outcomes.append("admitted")
+            scheduler.release(ticket)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=acquire)
+    original_flock = lane_scheduler.fcntl.flock
+    acquisitions = 0
+
+    def flock(fd, operation):
+        nonlocal acquisitions
+        if threading.current_thread() is thread and operation & lane_scheduler.fcntl.LOCK_EX:
+            acquisitions += 1
+            if acquisitions == (2 if registered else 1):
+                paused.set()
+                assert proceed.wait(TIMEOUT)
+                attempted.set()
+        return original_flock(fd, operation)
+
+    monkeypatch.setattr(lane_scheduler.fcntl, "flock", flock)
+    ready = tmp_path / "locked"
+    release = tmp_path / "unlock"
+    if registered:
+        thread.start()
+        assert paused.wait(TIMEOUT)
+        assert waiter_count(scheduler) == 1
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import fcntl, sys, time
+from pathlib import Path
+with open(sys.argv[1], 'a+') as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    Path(sys.argv[2]).touch()
+    while not Path(sys.argv[3]).exists():
+        time.sleep(0.005)
+""",
+            str(scheduler.control_lock_path),
+            str(ready),
+            str(release),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert wait_until(ready.exists)
+        if not registered:
+            thread.start()
+        assert paused.wait(TIMEOUT)
+        proceed.set()
+        assert attempted.wait(TIMEOUT)
+        cancel.set()
+        # The control lock remains held throughout cancellation and waiter cleanup.
+        assert finished.wait(1.0), "cancellation waited for the external control lock"
+        assert outcomes == ["cancelled"]
+        assert waiter_count(scheduler) == 0
+        assert holder_count(scheduler) == (1 if registered else 0)
+    finally:
+        proceed.set()
+        release.touch()
+        try:
+            process.communicate(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=TIMEOUT)
+        if thread.is_alive():
+            thread.join(timeout=TIMEOUT)
+    assert process.returncode == 0
+    if other is not None:
+        other.unlink()
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    scheduler.release(ticket)
+
+
+def test_crashed_holder_reclaimed_even_if_its_pid_is_reused(tmp_path):
+    state = tmp_path / "state"
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, sys
+from pathlib import Path
+from lane_scheduler import LaneScheduler, LANE_NON_INTERACTIVE
+scheduler = LaneScheduler(root_dir=Path(sys.argv[1]), stale_seconds=60)
+ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+os._exit(0)
+""",
+            str(state),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=TIMEOUT,
+    )
+    scheduler = LaneScheduler(root_dir=state, stale_seconds=60)
+    [abandoned] = scheduler.holders_dir.glob("*.json")
+    payload = json.loads(abandoned.read_text())
+    # Deterministically model reuse by an unrelated live process, without OS PID assumptions.
+    payload["pid"] = os.getpid()
+    abandoned.write_text(json.dumps(payload))
+    with scheduler._control_lock():
+        assert scheduler._reclaim_holders() == (0, 0)
+    assert not abandoned.exists()
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    scheduler.release(ticket)
+
+
+def test_live_ticket_lock_protects_old_holder_independently_of_pid(tmp_path, caplog):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=1)
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    path = scheduler.holders_dir / f"{ticket.token}.json"
+    payload = json.loads(path.read_text())
+    # PID lookup is deliberately irrelevant for a new, lock-owned ticket.
+    payload.update(pid=-1, claimed_at=time.time() - 120)
+    path.write_text(json.dumps(payload))
+    observer = LaneScheduler(root_dir=tmp_path, stale_seconds=1)
+    try:
+        with observer._control_lock():
+            assert observer._reclaim_holders() == (1, 1)
+            assert observer._reclaim_holders() == (1, 1)
+        assert sum("retained old live holder" in r.message for r in caplog.records) == 1
+    finally:
+        scheduler.release(ticket)
+    assert not path.exists()

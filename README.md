@@ -1208,16 +1208,23 @@ Capacity is a small, bounded set of slots (decision D-24):
   a returned ticket. An operational state read error refuses admission and leaves
   existing holders untouched. Missing or malformed historical records retain the
   recovery policy below; fix filesystem access before retrying an I/O failure.
-- Each holder is recorded as its own file; a crashed holder is reclaimed when its
-  process is gone. Live holders retain capacity until release, regardless of age,
-  including legacy `holder.json` records. `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
+- Queued cancellation is checked every 50 ms while waiting for the control lock,
+  including initial waiter registration. Cancellation removes only the attempt's
+  waiter without waiting for that lock; no holder is published for it.
+- Each new ticket holds an OS file lock on its holder record until release.
+  Process death releases that lock, so a later admission reclaims the abandoned
+  holder even if its PID has been reused. Keep the returned ticket alive until
+  inference ends and call `release` (normally via `admit_local_inference`).
+  Live holders retain capacity regardless of age. `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`
   (default `1800`) is a warning threshold only: each scheduler instance logs an
   old live holder once while its file remains present (normally once per admission
   attempt, since callers create a scheduler for each attempt). A stuck live process
   must be stopped by the operator before its capacity can be reclaimed; deleting its
   holder file while inference runs can exceed the capacity bound.
-  PID liveness cannot detect PID reuse after a crash/reboot, or a leaked holder
-  inside a live daemon. To recover an orphan, stop all local inference consumers
+  Older records without the lock marker, including legacy `holder.json`, still
+  use PID liveness to protect in-flight work during upgrades; PID reuse can keep
+  those records reserved. A leaked ticket inside a live daemon also retains its
+  lock. To recover such an orphan, stop all local inference consumers
   (HTTP, Tasks workers and Wyoming), verify their inference subprocesses have also
   exited, and then remove the orphan holder files from the configured scheduler
   directory before restarting. Do not clear holder files on a running service.

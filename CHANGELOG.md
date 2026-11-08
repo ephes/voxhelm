@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Observe queued cancellation while waiting for the lane control lock, including
+  registration and cleanup. New admission tickets hold an OS file lock so abandoned
+  holders are reclaimed after process death even if their PID is reused; preserve
+  live PID-only records from older workers and never reclaim by age alone.
+
 - Bind Wyoming chunks to supported `AudioStart` PCM geometry (8–192 kHz, 1/2/4-byte
   samples, mono/stereo) and whole frames,
   check the cumulative resampled frame budget before conversion, and reset

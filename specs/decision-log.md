@@ -597,6 +597,15 @@ consumers and verify their inference children have exited before removing orphan
 holder files, then restart. Stronger process identity/leases remain future work;
 capacity preservation takes precedence over automatic age-based recovery.
 
+**Ownership amendment (2026-11-08, implementation only):** New tickets keep an
+exclusive OS lock on their holder JSON inode and mark the record `lock_owned`.
+An unlocked marked record is abandoned and reclaimed regardless of PID reuse;
+a locked record retains capacity regardless of age. Older unmarked records keep
+the PID policy above, including manual recovery after PID reuse. The returned
+ticket owns the descriptor through release. Queued cancellation polls the control
+lock every 50 ms, and removes its own waiter without reacquiring that lock.
+This adds no deployment claim.
+
 **Not decided here:** slot counts above `1 + 1`, a status API, importer-side scheduling, preemption, and any local `studio` pull worker (which must keep using this scheduler, see BACKLOG).
 
 **Blocks implementation:** No; the design review is complete and implementation follows `specs/2026-09-06_bounded_inference_slots.md`.
