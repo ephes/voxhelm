@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Retain ASGI download reader ownership through cancelled worker reads and close
+  once after settlement, including streams closed before their first read.
+- Preserve the primary artifact publication error when temporary cleanup also
+  fails, reporting cleanup separately without exposing private diagnostics.
+
 - Bind Wyoming chunks to supported `AudioStart` PCM geometry (8–192 kHz, 1/2/4-byte
   samples, mono/stereo) and whole frames,
   check the cumulative resampled frame budget before conversion, and reset

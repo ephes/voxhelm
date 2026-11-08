@@ -341,24 +341,26 @@ def test_header_and_close_failure_remain_a_safe_storage_response(client, monkeyp
 
 
 @pytest.mark.django_db(transaction=True)
-def test_asgi_cancellation_closes_an_active_storage_read(monkeypatch):
+def test_asgi_cancellation_closes_after_active_storage_read_settles(monkeypatch):
     import threading
 
     job, _ = artifact_fixture()
     started, released, finished = threading.Event(), threading.Event(), threading.Event()
+    closed = threading.Event()
 
     class BlockedReader(BoundedReader):
         def read(self, size=-1):
             started.set()
             try:
-                assert released.wait(3), "read was never closed"
+                assert released.wait(3), "read was never released"
                 return b""
             finally:
                 finished.set()
 
         def close(self):
-            released.set()
+            assert finished.is_set()
             super().close()
+            closed.set()
 
     reader = BlockedReader()
     install_store(
@@ -377,8 +379,10 @@ def test_asgi_cancellation_closes_an_active_storage_read(monkeypatch):
             consume.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(consume, 1)
+            assert not reader.closed
+            released.set()
+            assert await asyncio.to_thread(closed.wait, 2)
             assert reader.closed
-            assert await asyncio.to_thread(finished.wait, 2)
         finally:
             released.set()
             await iterator.aclose()
