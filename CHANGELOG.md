@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Retain ASGI download reader ownership through cancelled worker reads and close
+  once after settlement, including streams closed before their first read.
+- Preserve the primary artifact publication error when temporary cleanup also
+  fails, reporting cleanup separately without exposing private diagnostics.
+
 - Cover deletion-before-commit process death and completed staged-upload cleanup
   retry convergence, preserving referenced objects and committed manifests.
 

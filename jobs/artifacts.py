@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import shutil
 import stat
@@ -15,6 +16,8 @@ from typing import Any, BinaryIO, Protocol
 import boto3
 from botocore.config import Config
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -122,6 +125,7 @@ class FilesystemArtifactStore:
                 0o600,
                 dir_fd=directory,
             )
+            primary_error = False
             try:
                 with os.fdopen(fd, "wb") as target:
                     yield target
@@ -129,11 +133,18 @@ class FilesystemArtifactStore:
                     os.fsync(target.fileno())
                 self._check_leaf(directory, name)
                 os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+            except BaseException:
+                primary_error = True
+                raise
             finally:
                 try:
                     os.unlink(temporary, dir_fd=directory)
                 except FileNotFoundError:
                     pass
+                except OSError:
+                    if not primary_error:
+                        raise
+                    logger.warning("Artifact temporary cleanup failed after publication failure.")
 
     def put_file(self, *, key: str, source_path: Path, content_type: str) -> StoredArtifact:
         del content_type
@@ -224,7 +235,10 @@ class S3ArtifactStore:
             region_name=region_name,
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
-            config=Config(s3={"addressing_style": "path" if force_path_style else "auto"}),
+            config=Config(
+                read_timeout=60,
+                s3={"addressing_style": "path" if force_path_style else "auto"},
+            ),
         )
 
     def put_file(self, *, key: str, source_path: Path, content_type: str) -> StoredArtifact:

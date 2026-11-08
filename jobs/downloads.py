@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from threading import Lock
 from typing import BinaryIO
 
-from asgiref.sync import sync_to_async
 from botocore.exceptions import BotoCoreError, ClientError
 from django.core.handlers.asgi import ASGIRequest
-from django.http import FileResponse, HttpRequest
+from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
 
 from jobs import artifacts
@@ -17,12 +17,42 @@ from jobs.models import JobArtifact
 from transcriptions.views import openai_error_response
 
 
-async def read_chunks(reader: BinaryIO) -> AsyncIterator[bytes]:
-    try:
-        while chunk := await asyncio.to_thread(reader.read, 65536):
-            yield chunk
-    finally:
-        await sync_to_async(reader.close)()
+class _AsyncDownload:
+    """Keep ownership in the read worker after cancellation until the read settles."""
+
+    def __init__(self, reader: BinaryIO) -> None:
+        self.reader = reader
+        self.lock = Lock()
+        self.reading = False
+        self.closed = False
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            if not self.reading:
+                self.reader.close()
+
+    def _read(self) -> bytes:
+        with self.lock:
+            if self.closed:
+                return b""
+            self.reading = True
+        try:
+            return self.reader.read(65536)
+        finally:
+            with self.lock:
+                self.reading = False
+                if self.closed:
+                    self.reader.close()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            while chunk := await asyncio.to_thread(self._read):
+                yield chunk
+        finally:
+            self.close()
 
 
 def artifact_response(request: HttpRequest, artifact: JobArtifact) -> HttpResponseBase:
@@ -30,11 +60,11 @@ def artifact_response(request: HttpRequest, artifact: JobArtifact) -> HttpRespon
     try:
         store = artifacts.get_artifact_store_for_identity(artifact.storage_identity)
         reader = store.open_reader(key=artifact.storage_key)
-        response = FileResponse(reader, content_type=artifact.content_type)
         if isinstance(request, ASGIRequest):
-            # Django otherwise materializes a synchronous iterator under ASGI.
-            response.streaming_content = read_chunks(reader)
-        return response
+            # Register only the owner's closer; FileResponse would also register
+            # reader.close and race an in-flight worker after a disconnect.
+            return StreamingHttpResponse(_AsyncDownload(reader), content_type=artifact.content_type)
+        return FileResponse(reader, content_type=artifact.content_type)
     except (OSError, BotoCoreError, ClientError, ValueError, RuntimeError) as exc:
         if reader is not None:
             try:

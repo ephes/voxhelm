@@ -103,6 +103,19 @@ inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
 
+## Download and publication failure ownership
+
+ASGI artifact downloads read at most 64 KiB at a time. On disconnect, cancellation
+propagates immediately, while the active worker retains the reader until its read
+settles and closes it exactly once. Response closure also handles streams that
+never started. S3 reads use the transport's 60-second socket read timeout; local
+regular-file reads settle through the filesystem. Closing never races a read.
+
+If filesystem publication and temporary cleanup both fail, the original storage
+error propagates and a fixed cleanup warning is logged without paths or payloads.
+The previous destination and unrelated objects remain intact; the owned temporary
+file may need repair. A cleanup failure on its own still propagates normally.
+
 ## Local Development
 
 ```bash
@@ -436,7 +449,7 @@ Ordinary finite numbers and existing synthesis speed bounds remain supported.
 
 Producer and operator artifact downloads stream bounded reads from the artifact's
 recorded filesystem/S3 store, including asynchronous reads under ASGI. Closing or
-cancelling the response closes the underlying reader. Authorization, private
+cancelling the response closes the underlying reader once its active read settles. Authorization, private
 cache headers and recorded content types still apply. A missing stored object
 returns HTTP 404; other supported storage/configuration failures before response
 headers return HTTP 503 with a bounded JSON error and no storage details. Rows
@@ -473,7 +486,8 @@ its existing ownership checks can refuse unsafe deletion.
 New artifact directories use mode 0700 and published objects use mode 0600.
 Writes use private sibling temporary files, flush them, and atomically replace
 the final object only after success. Readers see the previous complete object
-until replacement; failed writes clean temporary files and preserve old bytes.
+until replacement; failed writes preserve old bytes and attempt temporary cleanup.
+If cleanup also fails, a fixed warning is logged and the original write error survives.
 Existing directory modes are not changed. These guarantees apply to the
 filesystem store; S3 behavior is unchanged. Adoption requires an application or
 worker update; no deployment is performed by the change itself.
