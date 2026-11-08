@@ -70,3 +70,10 @@ regression to fail on its own pre-fix baseline. Gates: `just check` (Ruff,
 format, mypy, pytest), plus the locked dependency audit described in README.
 Point `UV_CACHE_DIR` into the workspace `.cache/uv` when necessary. Do not use
 or wait for GitHub Actions. No work under `~/projects` is authorized.
+
+## Finisher outcome (round 84)
+
+B06 reviewed by the Claude finisher (Opus, one round): no Critical/Warning
+findings. Suggestion applied: typed-event rejections are now logged like
+read-level rejections. Checks rerun outside the sandbox before the `--no-ff`
+merge to `main`. B07-B10 remain open as listed above.

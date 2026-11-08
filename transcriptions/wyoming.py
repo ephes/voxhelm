@@ -451,6 +451,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
         try:
             _validate_typed_event(event)
         except WyomingEventRejected as exc:
+            _LOGGER.warning("Wyoming event rejected (%s): %s", exc.code, exc.text)
             await self.write_event(Error(text=exc.text, code=exc.code).event())
             return False
 
