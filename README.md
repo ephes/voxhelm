@@ -103,6 +103,14 @@ inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
 
+## Historical fingerprint upgrades
+
+Migration 0008 backfills only the database selected by `migrate --database`.
+It reads at most 100 jobs per keyset page, closes reads before SQLite writes,
+and uses a temporary indexed lookup instead of retaining all duplicate keys.
+The newest active matching job keeps its frozen fingerprint; failed jobs also
+receive fingerprints. The entire upgrade rolls back on failure.
+
 ## Download and publication failure ownership
 
 ASGI artifact downloads read at most 64 KiB at a time. On disconnect, cancellation

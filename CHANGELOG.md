@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bind the historical fingerprint upgrade to the selected database and bound
+  payload reads to 100-job keyset pages with indexed duplicate tracking.
+
 - Retain ASGI download reader ownership through cancelled worker reads and close
   once after settlement, including streams closed before their first read.
 - Preserve the primary artifact publication error when temporary cleanup also
