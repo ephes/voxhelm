@@ -872,7 +872,8 @@ fleet self-heals. Tunable via `VOXHELM_REMOTE_WORKER_BALANCE_ENABLED` (default
 `true`), `VOXHELM_REMOTE_WORKER_BALANCE_WINDOW_SECONDS` (recent-claim comparison
 window, default `3600`), and `VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS`
 (how recently a peer must have heartbeated to count, default `30`). This is
-control-plane-only behavior; workers need no changes. Capacity checks and new
+control-plane-only behavior; workers need no changes. Compatible fresh peers
+share one grouped active/recent Job count query instead of per-peer counts. Capacity checks and new
 lease expiry use the admission time sampled after acquiring the worker write lock,
 so lock contention does not consume the issued lease.
 
