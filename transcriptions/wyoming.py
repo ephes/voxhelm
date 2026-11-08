@@ -56,6 +56,7 @@ _CONVERTED_CHANNELS = 1
 _CONVERTED_BYTES_PER_SECOND = _CONVERTED_RATE * _CONVERTED_WIDTH * _CONVERTED_CHANNELS
 DEFAULT_MAX_AUDIO_SECONDS = 120
 DEFAULT_MAX_EVENT_DATA_BYTES = 256 * 1024
+EVENT_READ_TIMEOUT_SECONDS = 30
 
 _PIPER_ATTRIBUTION = Attribution(
     name="Piper",
@@ -290,6 +291,22 @@ async def read_bounded_event(
     max_data_bytes: int,
     max_payload_bytes: int,
 ) -> Event | None:
+    """Apply one elapsed deadline to the header and both bounded event bodies."""
+    try:
+        async with asyncio.timeout(EVENT_READ_TIMEOUT_SECONDS):
+            return await _read_bounded_event(
+                reader, max_data_bytes=max_data_bytes, max_payload_bytes=max_payload_bytes
+            )
+    except TimeoutError as exc:
+        raise WyomingEventRejected("event_timeout", "Event read deadline exceeded.") from exc
+
+
+async def _read_bounded_event(
+    reader: asyncio.StreamReader,
+    *,
+    max_data_bytes: int,
+    max_payload_bytes: int,
+) -> Event | None:
     """Read one Wyoming event, refusing oversized or malformed ones before reading their body.
 
     Mirrors ``wyoming.event.async_read_event`` (wyoming 1.8.0), whose ``readexactly`` calls
@@ -344,6 +361,41 @@ async def read_bounded_event(
     return Event(type=header["type"], data=data, payload=payload)
 
 
+def _validate_typed_event(event: Event) -> None:
+    """Check consumed fields before library dataclass parsing or handler state changes."""
+    data = event.data
+    invalid = False
+    if Synthesize.is_type(event.type):
+        invalid = not isinstance(data.get("text"), str)
+        voice = data.get("voice", {})
+        if not isinstance(voice, dict):
+            invalid = True
+        else:
+            invalid |= any(
+                value is not None and not isinstance(value, str)
+                for value in (voice.get(key) for key in ("name", "language", "speaker"))
+            )
+    elif Transcribe.is_type(event.type):
+        invalid = any(
+            value is not None and not isinstance(value, str)
+            for value in (data.get("name"), data.get("language"))
+        )
+    elif AudioStart.is_type(event.type) or AudioChunk.is_type(event.type):
+        invalid = any(
+            type(data.get(key)) is not int or data[key] <= 0
+            for key in ("rate", "width", "channels")
+        )
+    if (
+        AudioStart.is_type(event.type)
+        or AudioChunk.is_type(event.type)
+        or AudioStop.is_type(event.type)
+    ):
+        timestamp = data.get("timestamp")
+        invalid |= timestamp is not None and type(timestamp) is not int
+    if invalid:
+        raise WyomingEventRejected("invalid_event", "Invalid event fields.")
+
+
 class WyomingSttEventHandler(AsyncEventHandler):
     def __init__(
         self,
@@ -396,6 +448,12 @@ class WyomingSttEventHandler(AsyncEventHandler):
             self.writer.close()
 
     async def handle_event(self, event: Event) -> bool:
+        try:
+            _validate_typed_event(event)
+        except WyomingEventRejected as exc:
+            await self.write_event(Error(text=exc.text, code=exc.code).event())
+            return False
+
         if Describe.is_type(event.type):
             await self.write_event(self.info_event)
             return True
