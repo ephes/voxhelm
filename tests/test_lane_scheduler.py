@@ -816,3 +816,91 @@ def test_age_warning_tracks_presence_and_ignores_young_holders(tmp_path: Path, c
         write_holder(scheduler, token="holder", age_seconds=120, path=path)
         assert scheduler._reclaim_holders()[0] == 1
     assert sum("retained old live holder" in record.message for record in caplog.records) == 2
+
+
+@pytest.mark.parametrize("failure", ["write", "unlink", "log"])
+def test_failed_holder_publication_preserves_capacity(tmp_path, monkeypatch, failure):
+    import lane_scheduler
+
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    other = write_holder(scheduler, token="other", lane=LANE_INTERACTIVE)
+    original_write = scheduler._write_json
+    original_unlink = Path.unlink
+
+    def write(path, payload):
+        original_write(path, payload)
+        if path.parent == scheduler.holders_dir:
+            raise OSError("publication interrupted")
+
+    unlink_failed = False
+
+    def unlink(path, *args, **kwargs):
+        nonlocal unlink_failed
+        if path.parent == scheduler.waiters_dir and not unlink_failed:
+            unlink_failed = True
+            raise OSError("waiter removal failed")
+        return original_unlink(path, *args, **kwargs)
+
+    def log(*args, **kwargs):
+        raise RuntimeError("logging handler failed")
+
+    with monkeypatch.context() as patch:
+        if failure == "write":
+            patch.setattr(scheduler, "_write_json", write)
+        elif failure == "unlink":
+            patch.setattr(Path, "unlink", unlink)
+        else:
+            patch.setattr(lane_scheduler._LOGGER, "info", log)
+        if failure == "log":
+            ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+            scheduler.release(ticket)
+        else:
+            with pytest.raises(OSError):
+                scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+        assert sorted(scheduler.holders_dir.glob("*.json")) == [other]
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    scheduler.release(ticket)
+    # Another process must also be able to reuse the compensated slot.
+    script = tmp_path / "child.py"
+    script.write_text(CHILD_SCRIPT)
+    admitted = tmp_path / "admitted"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(REPO_ROOT),
+            str(tmp_path),
+            LANE_NON_INTERACTIVE,
+            str(admitted),
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=TIMEOUT,
+    )
+    assert admitted.exists()
+    assert other.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("error", [PermissionError("private"), OSError(5, "I/O error")])
+def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, caplog, legacy, error):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    holder = write_holder(
+        scheduler, token="live", path=tmp_path / "holder.json" if legacy else None
+    )
+    before = holder.read_bytes()
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == holder:
+            raise error
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
+        scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    assert holder.read_bytes() == before
+    assert any("cannot read state" in record.message for record in caplog.records)
+    assert waiter_count(scheduler) == 0
+    assert holder_count(scheduler) == (0 if legacy else 1)
