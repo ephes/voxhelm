@@ -555,7 +555,17 @@ transaction) and deleted right after the commit; a failed deletion stays queued
 and the next `prune_job_artifacts` run retries it. A completion retry from the
 same worker and lease still matches after pruning removed those intermediates.
 Each deletion re-checks its candidate, the allowlist and the references under
-the database write lock, so overlapping runs are safe.
+the database write lock, so overlapping runs are safe. If the cleanup process dies
+after object deletion but before commit, the ownership row rolls back; the next
+prune treats the missing object as deleted and removes that row. Independently
+referenced objects remain protected across this retry.
+
+Remote success is committed before staged-input cleanup. If that cleanup fails,
+the committed result and staged ownership remain available: an identical completion
+retry from the same worker and lease retries cleanup without republishing the
+manifest or changing the finish time. Changed result metadata is refused with a
+conflict. `tests/test_remote_recovery_contracts.py` covers these boundaries with
+process death, reopened connections and a portable synthetic object store.
 
 After the artifacts (and the queued deletions), the same command deletes old
 job metadata: the `Job` row of a terminal job that finished more than

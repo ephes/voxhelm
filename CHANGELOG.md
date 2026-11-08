@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cover deletion-before-commit process death and completed staged-upload cleanup
+  retry convergence, preserving referenced objects and committed manifests.
+
 - Cover remote worker capacity, durable attempt ownership and complete/fail
   settlement with real process races, plus lease timing after writer contention.
 
