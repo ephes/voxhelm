@@ -1130,6 +1130,13 @@ the sidecar enforces these input limits per connection:
   state changes or inference. Missing required text/audio fields, malformed voice
   objects and invalid scalar types return one `code="invalid_event"` error and
   close the connection. Optional transcription model/language fields may be omitted.
+- Audio must start with `AudioStart`; each chunk must match its rate, sample
+  width and channel count and contain whole frames. Supported PCM geometry is
+  8000–192000 Hz, 1–4 bytes per sample, mono or stereo. Unsupported geometry,
+  mismatches and chunks before a start return `code="invalid_event"` and close
+  the connection before conversion or inference. Each `Transcribe` or
+  `AudioStart` discards prior audio and resets resampling history; history is
+  preserved between chunks of the same utterance.
 - Every event is checked before its body is read. The sidecar reads events
   through its own bounded reader instead of the `wyoming` library's, which
   would buffer whatever `data_length` / `payload_length` a client declares.
@@ -1152,7 +1159,10 @@ the sidecar enforces these input limits per connection:
 
 - `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default `120`, must be positive) caps
   the audio buffered for one transcription, measured after conversion to
-  16 kHz, 16-bit, mono PCM. A chunk that would push the buffer past the cap is
+  16 kHz, 16-bit, mono PCM. Before conversion, cumulative whole input frames
+  bound the converted output using the sample-rate ratio rounded up to a whole
+  output frame. This admits the exact duration limit while conservatively
+  rejecting over-budget resampling before allocation. A chunk over the cap is
   answered with a Wyoming `error` event (`code="audio_too_long"`), the buffer is
   discarded, and the connection is closed without transcribing.
 - `Synthesize` requests use the same `VOXHELM_TTS_MAX_INPUT_CHARS` cap (default

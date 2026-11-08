@@ -105,6 +105,9 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 
 ## Wyoming input limits
 
+- [x] B07 implementation (parked pending Opus review): bind chunks to supported AudioStart geometry
+  and whole frames, preflight the cumulative converted frame budget, and reset resampler history
+  at Transcribe/AudioStart. See `RESUME-round83.md` for the blocked review and continuation steps.
 - [x] Validate consumed typed event fields before state changes/inference and close malformed clients.
 - [x] Bound complete event reads (header and both bodies) by one 30-second elapsed deadline.
 - [x] Cap buffered Wyoming STT audio with `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default 120 s, checked on the
