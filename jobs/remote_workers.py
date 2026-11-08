@@ -9,13 +9,13 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Case, F, IntegerField, Q, Value, When
+from django.db.models import Case, Count, F, IntegerField, Q, Value, When
 from django.db.models.functions import Coalesce, Greatest
 from django.http import HttpRequest
 from django.utils import timezone
@@ -167,6 +167,9 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
 SUMMARY_STRING_MAX_LENGTH = 256
 SPEAKER_SIDECAR_CONTENT_TYPE = "application/json"
 CLAIM_UPDATE_CANDIDATE_LIMIT = 10
+CLAIM_SCAN_LIMIT = 100
+CLAIM_SCAN_HEAD_LIMIT = 50
+CLAIM_SCAN_ROUNDS = 2
 WORKER_HEARTBEAT_JSON_MAX_DEPTH = 100
 
 
@@ -314,10 +317,12 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
     if max_jobs < 1:
         raise ApiError("max_jobs must be at least 1.")
     capabilities = optional_object(payload.get("capabilities"), "capabilities")
-    while True:
+    for _ in range(CLAIM_SCAN_ROUNDS):
         now = timezone.now()
         expire_exhausted_remote_leases(now)
-        candidates = remote_claim_candidates(now=now, capabilities=capabilities)
+        candidates = remote_claim_candidates(
+            worker_id=worker_id, now=now, capabilities=capabilities
+        )
         if not candidates:
             return None
 
@@ -384,7 +389,9 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
     return None
 
 
-def remote_claim_candidates(*, now: object, capabilities: dict[str, Any]) -> list[Job]:
+def remote_claim_candidates(
+    *, worker_id: str, now: object, capabilities: dict[str, Any]
+) -> list[Job]:
     candidates = (
         Job.objects.filter(
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
@@ -400,18 +407,49 @@ def remote_claim_candidates(*, now: object, capabilities: dict[str, Any]) -> lis
                 output_field=IntegerField(),
             )
         )
-        .order_by("priority_rank", "created_at")
+        .order_by("priority_rank", "created_at", "pk")
     )
 
+    cursor = Worker.objects.values_list("claim_scan_cursor", flat=True).get(worker_id=worker_id)
+    # Recheck the head every poll so new high-priority work can preempt a sweep.
+    head = list(candidates[:CLAIM_SCAN_HEAD_LIMIT])
+    continuation = candidates.exclude(pk__in=[job.pk for job in head])
+    if cursor:
+        continuation = continuation.filter(
+            Q(priority_rank__gt=cursor["priority"])
+            | Q(priority_rank=cursor["priority"], created_at__gt=cursor["created_at"])
+            | Q(
+                priority_rank=cursor["priority"],
+                created_at=cursor["created_at"],
+                pk__gt=cursor["id"],
+            )
+        )
+    tail_limit = CLAIM_SCAN_LIMIT - CLAIM_SCAN_HEAD_LIMIT
+    tail = list(continuation[:tail_limit])
+    if not tail and cursor:
+        # Wrap in this poll without hydrating more than the scan budget.
+        cursor = {}
+        tail = list(candidates.exclude(pk__in=[job.pk for job in head])[:tail_limit])
     eligible: list[Job] = []
-    for candidate in candidates.iterator(chunk_size=100):
-        if not remote_payload_is_claimable(candidate):
-            continue
-        if not worker_can_run_job(candidate, capabilities):
-            continue
-        eligible.append(candidate)
-        if len(eligible) >= CLAIM_UPDATE_CANDIDATE_LIMIT:
-            break
+    next_cursor = cursor
+    for index, candidate in enumerate([*head, *tail]):
+        if remote_payload_is_claimable(candidate) and worker_can_run_job(candidate, capabilities):
+            eligible.append(candidate)
+            if len(eligible) >= CLAIM_UPDATE_CANDIDATE_LIMIT:
+                break
+        elif not eligible and index >= len(head):
+            # Never skip an eligible candidate that was collected but not leased,
+            # including when capacity/fairness prevents this poll from claiming.
+            next_cursor = {
+                "priority": cast(Any, candidate).priority_rank,
+                "created_at": candidate.created_at.isoformat(),
+                "id": str(candidate.pk),
+            }
+    if not eligible and len(tail) < tail_limit:
+        next_cursor = {}
+    # Persist outside the claim transaction: no URL checks under its write lock,
+    # and any API process can continue this worker's next bounded scan.
+    Worker.objects.filter(worker_id=worker_id).update(claim_scan_cursor=next_cursor)
     return eligible
 
 
@@ -742,14 +780,6 @@ def lock_job_for_settlement(*, job_id: UUID, now: object) -> None:
     Job.objects.filter(id=job_id).update(updated_at=now)
 
 
-def worker_recent_claim_load(*, worker_id: str, window_start: datetime) -> int:
-    return Job.objects.filter(
-        execution_mode=Job.ExecutionMode.REMOTE_PULL,
-        assigned_worker_id=worker_id,
-        started_at__gte=window_start,
-    ).count()
-
-
 def worker_should_defer_for_fairness(
     *, worker_id: str, now: datetime, candidates: list[Job]
 ) -> bool:
@@ -769,11 +799,10 @@ def worker_should_defer_for_fairness(
     fresh_cutoff = now - timedelta(
         seconds=settings.VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS
     )
-    my_load = worker_recent_claim_load(worker_id=worker_id, window_start=window_start)
-
     peers = Worker.objects.filter(enabled=True, last_seen_at__gte=fresh_cutoff).exclude(
         worker_id=worker_id
     )
+    eligible_peers = []
     for peer in peers:
         if not isinstance(peer.capabilities, dict):
             continue
@@ -785,16 +814,26 @@ def worker_should_defer_for_fairness(
             continue
         if not compatible:
             continue
-        peer_running = Job.objects.filter(
+        eligible_peers.append(peer)
+    if not eligible_peers:
+        return False
+    active = Q(state=Job.State.RUNNING, lease_expires_at__gt=now)
+    recent = Q(started_at__gte=window_start)
+    loads = {
+        row["assigned_worker_id"]: row
+        for row in Job.objects.filter(
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
-            state=Job.State.RUNNING,
-            assigned_worker_id=peer.worker_id,
-            lease_expires_at__gt=now,
-        ).count()
-        if peer_running >= peer.concurrency:
-            continue
-        peer_load = worker_recent_claim_load(worker_id=peer.worker_id, window_start=window_start)
-        if peer_load < my_load:
+            assigned_worker_id__in=[worker_id, *(peer.worker_id for peer in eligible_peers)],
+        )
+        .filter(active | recent)
+        .order_by()
+        .values("assigned_worker_id")
+        .annotate(active=Count("pk", filter=active), recent=Count("pk", filter=recent))
+    }
+    my_load = loads.get(worker_id, {}).get("recent", 0)
+    for peer in eligible_peers:
+        peer_load = loads.get(peer.worker_id, {})
+        if peer_load.get("active", 0) < peer.concurrency and peer_load.get("recent", 0) < my_load:
             return True
     return False
 

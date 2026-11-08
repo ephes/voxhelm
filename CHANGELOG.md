@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Group remote fleet load counts and bound candidate hydration to resumable
+  100-job scans, preserving invalid-job checks and eventual tail acquisition.
+
 - Restrict remote fair sharing to peers capable of running current candidates;
   sample admission time after worker serialization for capacity and full leases.
 

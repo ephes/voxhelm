@@ -688,3 +688,22 @@ Before implementation/deployment, validate manually:
 - The worker never needs database credentials.
 - Adding another machine is documented and repeatable with `uv tool install`/`uvx` plus Voxhelm URL and credentials; no Django server/database setup is required on the worker host.
 - Existing local `studio` transcription operation can be restored by configuration if the remote worker is disabled.
+
+### Bounded remote claim scans
+
+Worker.claim_scan_cursor persists the last rejected priority/creation/ID tuple
+before the first eligible candidate. Each scan hydrates at most 100 jobs: the
+ordered head of 50 plus up to 50 after that cursor (excluding the head). It
+collects at most ten candidates and never advances past an unclaimed eligible
+job, including on capacity/fairness refusal. The head is checked every poll so
+new high-priority work there preempts the continuation. Work beyond an incompatible
+head can wait for compatible work remaining after the cursor. Empty
+continuations wrap in the same poll. Validation and invalid-job handling stay
+outside the claim write transaction. At most two scans run per poll if lease
+updates lose a race. Fair sharing uses one grouped active/recent Job count query
+for compatible fresh peers, with strict active-lease expiry and inclusive
+freshness/recent-load boundaries.
+
+Unfinished scan limitation: new compatible high-priority jobs beyond the first
+50 rows can remain hidden before the cursor while lower-priority arrivals keep
+the continuation nonempty. This scan change is parked pending that review warning.

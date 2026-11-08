@@ -874,7 +874,17 @@ window, default `3600`), and `VOXHELM_REMOTE_WORKER_BALANCE_PEER_FRESH_SECONDS`
 (how recently a peer must have heartbeated to count, default `30`). This is
 control-plane-only behavior; workers need no changes. Capacity checks and new
 lease expiry use the admission time sampled after acquiring the worker write lock,
-so lock contention does not consume the issued lease.
+so lock contention does not consume the issued lease. Fleet load counts use a
+single grouped query rather than per-peer queries.
+
+Each scan validates at most 100 queued/expired jobs: the first 50 in
+priority/creation-time/job-ID order, plus up to 50 after a worker-owned database
+cursor. The cursor advances only across rejected jobs before the first eligible
+candidate, preserving compatible FIFO order and allowing new high-priority jobs
+at the head to preempt each poll. It resumes across API processes and wraps at
+the end. Eligible work behind more than 50 incompatible head jobs is discovered
+by the continuation sweep; the delay also depends on compatible jobs remaining after the cursor. A lost conditional-claim race permits one additional scan
+(at most 200 examined jobs per poll).
 
 Configure `VOXHELM_WORKER_BASE_URL` (or `VOXHELM_BASE_URL`) with the canonical
 worker API origin (the final
@@ -1328,3 +1338,7 @@ like a decode timeout, without exposing tool output. Worker-control JSON integer
 and nesting limit failures produce the fixed invalid-JSON worker error. Nesting
 limits vary between Python builds; regressions inject that parser failure rather
 than depending on a particular recursion threshold.
+
+Unfinished scan limitation: new compatible high-priority jobs beyond the first
+50 rows can remain hidden before the cursor while lower-priority arrivals keep
+the continuation nonempty. This scan change is parked pending that review warning.
