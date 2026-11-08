@@ -2202,7 +2202,12 @@ def test_fairness_defers_when_fresh_idle_peer_is_less_loaded(settings):
     _make_worker("studio")
     _make_load_job("atlas")
     _make_load_job("atlas")  # atlas=2, studio=0
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is True
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is True
+    )
 
 
 @pytest.mark.django_db
@@ -2211,7 +2216,12 @@ def test_fairness_allows_when_worker_is_not_ahead(settings):
     _make_worker("studio")
     _make_load_job("studio")
     _make_load_job("studio")  # atlas=0, studio=2 -> atlas is behind
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
@@ -2220,7 +2230,12 @@ def test_fairness_allows_on_tie(settings):
     _make_worker("studio")
     _make_load_job("atlas")
     _make_load_job("studio")  # 1 vs 1
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
@@ -2229,7 +2244,12 @@ def test_fairness_ignores_stale_peer(settings):
     _make_worker("studio", seen_seconds_ago=600)  # peer not polling
     _make_load_job("atlas")
     _make_load_job("atlas")  # atlas ahead, but peer is gone
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
@@ -2239,7 +2259,12 @@ def test_fairness_ignores_busy_peer_with_no_spare_capacity(settings):
     _make_load_job("atlas")
     _make_load_job("atlas")  # atlas ahead
     _make_load_job("studio", state=Job.State.RUNNING, running_lease=True)  # studio busy 1/1
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
@@ -2249,14 +2274,24 @@ def test_fairness_disabled_never_defers(settings):
     _make_worker("studio")
     _make_load_job("atlas")
     _make_load_job("atlas")
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
 def test_fairness_no_peers_never_defers(settings):
     _make_worker("atlas")
     _make_load_job("atlas")
-    assert worker_should_defer_for_fairness(worker_id="atlas", now=timezone.now()) is False
+    assert (
+        worker_should_defer_for_fairness(
+            worker_id="atlas", now=timezone.now(), candidates=[Job(job_type="transcribe")]
+        )
+        is False
+    )
 
 
 @pytest.mark.django_db
