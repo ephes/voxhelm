@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound Pyannote decoding to two hours of 16 kHz mono PCM, reject invalid/truncated
+  WAVs before waveform allocation, and discard bounded decoder diagnostics.
+- Cache Pyannote pipelines only after successful device placement, allowing retries.
+
 - Observe queued cancellation while waiting for the lane control lock, including
   registration and cleanup. New admission tickets hold an OS file lock so abandoned
   holders are reclaimed after process death even if their PID is reused; preserve

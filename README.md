@@ -91,6 +91,14 @@ A Parakeet run that fails for any other reason fails the job. Other jobs, and
 jobs naming a concrete model, are never rerouted. See
 `specs/2026-10-15_parakeet_asr_backend.md`.
 
+Pyannote diarization accepts at most two decoded hours of 16 kHz, 16-bit mono
+PCM. Decode stops after one extra sample to detect oversized compressed inputs;
+WAV geometry, frame count and complete PCM bytes are checked before waveform
+allocation. Decoder stdout and diagnostics are discarded, with a 64 KiB stderr
+allowance and the configured decode deadline; failures expose only safe categories.
+Temporary decoded audio is removed on every exit. Pipeline initialization is
+cached only after successful device placement, so failed placement can be retried.
+
 ## WebVTT Output
 
 The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)
