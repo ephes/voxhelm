@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Observe queued cancellation while waiting for the lane control lock, including
+  registration and cleanup. New admission tickets hold an OS file lock so abandoned
+  holders are reclaimed after process death even if their PID is reused; preserve
+  live PID-only records from older workers and never reclaim by age alone.
+
 - Refuse Kokoro requests with no supported speech tokens instead of returning
   empty WAVs; write PCM chunks incrementally with a 30-minute total frame cap
   and remove partial output after inference, cancellation or budget failure.
