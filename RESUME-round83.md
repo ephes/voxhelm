@@ -1,5 +1,68 @@
 # Round 83 resume note
 
+## B07 finisher outcome (2026-11-08)
+
+Claude finisher reviewed the whole parked B07 diff against `ef4e7d1`. One finding,
+fixed: `AudioStart`/`AudioChunk` admitted 3-byte samples, but the bundled Wyoming
+converter (`pyaudioop`, Python 3.14) only supports 1, 2 and 4 bytes, so a 24-bit
+stream raised inside conversion instead of a clean `invalid_event`. Width 3 is now
+rejected at admission (regression added). A fuzz of 3000 random rate/width/channel
+chunkings confirmed the cumulative `ceil(N * 16000 / rate)` bound never undercounts
+the converter output. Re-review clean; merged to `main`. B08–B10 remain unstarted.
+
+## Current continuation: B07 parked on 2026-11-08
+
+Branch: `fix/r83-b07-utterance-geometry`, based on current default `main`
+`ef4e7d1b92c019d3c57d21bc7bdab5a0737e0ac7` in a fresh SSH clone at
+`/Users/jochen/workspaces/ws-cx-r83c-voxhelm/voxhelm`. Origin verified as
+`git@github.com:ephes/voxhelm.git`. B06 is already merged (see earlier history below).
+
+Reverified all three B07 slices against that main revision; none was already fixed.
+Implemented in report order:
+
+- `voxhelm-wyoming-chunk-shape-binding`: require AudioStart before chunks,
+  matching rate/width/channels, and whole frames; refuse before conversion/inference.
+- `voxhelm-wyoming-preconversion-frame-budget`: admit integer 8000–192000 Hz,
+  1–4 byte samples, mono/stereo; compare the cumulative resampled frame upper
+  bound with the utterance ceiling before converter entry.
+- `voxhelm-wyoming-utterance-resampler-reset`: reset converter, audio buffer and
+  shape at each Transcribe/AudioStart; retain converter state between chunks.
+
+README, BACKLOG and CHANGELOG Unreleased match the implementation. Fourteen
+synthetic regressions failed against unchanged main production code, including
+byte-for-byte resampler restart checks. Five additional accepted boundary cases
+cover 8000, 16000, 44100, 48000 and 192000 Hz. The Wyoming suite passed 87 tests.
+Full local validation passed: `just check` completed with Ruff lint/format clean,
+mypy clean on 123 source files, and **1600 passed, 6 skipped** in pytest.
+The skips are existing optional model/dependency cases; no models were downloaded.
+The locked all-extras dependency audit passed with no known vulnerabilities.
+
+The required Opus review was attempted with `--model claude-opus-5-5 --effort high`.
+The harness returned exit 2 / PROVIDER_ERROR / api_error; its provider text was
+"Failed to authenticate: OAuth session expired and could not be refreshed".
+No review verdict or findings exist; no merge was attempted. The review copy was
+removed and the manifest reports no skips, truncations or redactions. Artifacts:
+`../.cache/b07-review-1/`, `../.cache/b07-check.log`, `../.cache/b07-audit.log`.
+
+The owner explicitly required parking the branch with this note and stopping on
+OAuth failure. This parking commit is unreviewed and must not be merged yet.
+B08–B10 remain entirely unstarted and were not individually reverified in this run.
+Resume them in report order only after finishing B07.
+
+After restoring OAuth, review the **entire B07 diff** from the main base above.
+Because the work is now committed for parking, a default HEAD-only review would
+be empty: use `--baseline-ref ef4e7d1b92c019d3c57d21bc7bdab5a0737e0ac7` with a
+fresh run directory, `--record-baseline`, the same Opus model/effort and slice ID
+`r83-voxhelm-b07`. State explicitly that this is the first valid review of the
+whole parked bundle. Scope subsequent repair reviews to each recorded baseline.
+Follow the owner's four-round/recurring-finding stop rules.
+Before a clean merge, fetch and rebase if origin/main moved, then rerun checks;
+merge with --no-ff, run full local checks after merge, push main, verify with
+`git ls-remote`. Use `[skip ci]` in commits to suppress paid Actions. Do not
+run/wait for Actions, open PRs, deploy, release/tag, or delete remote branches.
+
+## Earlier B06 parking history (superseded by its finisher outcome below)
+
 Parked at the owner's explicit OAuth-failure stop condition. **Do not merge
 without a completed Opus review.** Origin is `git@github.com:ephes/voxhelm.git`;
 integration/default branch is `main`. Fresh clone began at

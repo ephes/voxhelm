@@ -1042,3 +1042,139 @@ def test_wyoming_event_deadline_covers_entire_read(monkeypatch, slow_phase) -> N
 
     asyncio.run(run_flow())
     assert_single_error(writer, "event_timeout")
+
+
+@pytest.mark.parametrize(
+    ("start", "chunk"),
+    [
+        (None, AudioChunk(rate=16000, width=2, channels=1, audio=b"\0\0")),
+        (
+            AudioStart(rate=16000, width=2, channels=1),
+            AudioChunk(rate=48000, width=2, channels=1, audio=b"\0\0"),
+        ),
+        (
+            AudioStart(rate=16000, width=2, channels=1),
+            AudioChunk(rate=16000, width=1, channels=1, audio=b"\0\0"),
+        ),
+        (
+            AudioStart(rate=16000, width=2, channels=1),
+            AudioChunk(rate=16000, width=2, channels=2, audio=b"\0" * 4),
+        ),
+        (
+            AudioStart(rate=16000, width=2, channels=1),
+            AudioChunk(rate=16000, width=2, channels=1, audio=b"\0"),
+        ),
+        (
+            AudioStart(rate=16000, width=2, channels=2),
+            AudioChunk(rate=16000, width=2, channels=2, audio=b"\0" * 6),
+        ),
+    ],
+)
+def test_wyoming_chunk_geometry_rejected_before_conversion(monkeypatch, start, chunk) -> None:
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid geometry reached conversion or inference")
+
+    monkeypatch.setattr("transcriptions.wyoming.AudioChunkConverter.convert", unexpected)
+    monkeypatch.setattr("transcriptions.wyoming.transcribe_audio", unexpected)
+    events = [] if start is None else [start.event()]
+    events.extend([chunk.event(), AudioStop().event()])
+    writer, handler = run_handler_on_stream(encode_events(*events))
+    assert_single_error(writer, "invalid_event")
+    assert handler.audio_buffer.getvalue() == b""
+    assert handler.audio_shape.input_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("rate", "width", "channels"),
+    [(1, 2, 1), (192001, 2, 1), (16000, 3, 1), (16000, 5, 1), (16000, 2, 3)],
+)
+def test_wyoming_unsupported_audio_start_is_rejected(rate, width, channels) -> None:
+    writer, handler = run_handler_on_stream(
+        encode_events(AudioStart(rate=rate, width=width, channels=channels).event())
+    )
+    assert_single_error(writer, "invalid_event")
+    assert handler.audio_shape.input_rate is None
+
+
+@pytest.mark.parametrize("prefix_frames", [0, 4000])
+def test_wyoming_frame_budget_precedes_conversion(monkeypatch, prefix_frames) -> None:
+    from wyoming.audio import AudioChunkConverter
+
+    convert = AudioChunkConverter.convert
+    converted_frames = []
+
+    def guarded_convert(self, chunk):
+        converted_frames.append(chunk.samples)
+        # Return cheap synthetic output even on the old code; no large allocation needed.
+        if chunk.samples > prefix_frames:
+            return AudioChunk(rate=16000, width=2, channels=1, audio=b"\0\0")
+        return convert(self, chunk)
+
+    monkeypatch.setattr(AudioChunkConverter, "convert", guarded_convert)
+    events = [AudioStart(rate=8000, width=2, channels=1).event()]
+    if prefix_frames:
+        events.append(
+            AudioChunk(rate=8000, width=2, channels=1, audio=b"\0\0" * prefix_frames).event()
+        )
+    events.append(
+        AudioChunk(rate=8000, width=2, channels=1, audio=b"\0\0" * (8001 - prefix_frames)).event()
+    )
+    writer, handler = run_handler_on_stream(encode_events(*events))
+    assert_single_error(writer, "audio_too_long")
+    assert converted_frames == ([prefix_frames] if prefix_frames else [])
+    assert handler.audio_buffer.getvalue() == b""
+
+
+@pytest.mark.parametrize("restart", ["audio-start", "transcribe"])
+def test_wyoming_utterance_restart_resets_resampler(restart) -> None:
+    from wyoming.audio import AudioChunkConverter
+
+    async def run_flow():
+        config = limit_config()
+        handler = WyomingSttEventHandler(
+            config, build_wyoming_info(config), asyncio.StreamReader(), DummyWriter()
+        )
+        start = AudioStart(rate=8000, width=2, channels=1).event()
+        await handler.handle_event(start)
+        await handler.handle_event(
+            AudioChunk(rate=8000, width=2, channels=1, audio=b"\xff\x1f" * 10).event()
+        )
+        if restart == "transcribe":
+            await handler.handle_event(Transcribe().event())
+        await handler.handle_event(start)
+        audio = b"\x00\x01\x00\x02" * 20
+        for part in (audio[:30], audio[30:]):
+            assert await handler.handle_event(
+                AudioChunk(rate=8000, width=2, channels=1, audio=part).event()
+            )
+        fresh = AudioChunkConverter(rate=16000, width=2, channels=1)
+        expected = fresh.convert(AudioChunk(rate=8000, width=2, channels=1, audio=audio)).audio
+        assert handler.audio_buffer.getvalue() == expected
+        assert handler.audio_shape.input_bytes == len(audio)
+
+    asyncio.run(run_flow())
+
+
+@pytest.mark.parametrize("rate", [8000, 16000, 44100, 48000, 192000])
+def test_wyoming_resampled_audio_at_duration_limit(rate) -> None:
+    from wyoming.audio import AudioChunkConverter
+
+    async def run_flow():
+        config = limit_config()
+        handler = WyomingSttEventHandler(
+            config, build_wyoming_info(config), asyncio.StreamReader(), DummyWriter()
+        )
+        assert await handler.handle_event(AudioStart(rate=rate, width=2, channels=1).event())
+        audio = b"\x00\x01" * rate
+        for part in (audio[:rate], audio[rate:]):
+            assert await handler.handle_event(
+                AudioChunk(rate=rate, width=2, channels=1, audio=part).event()
+            )
+        fresh = AudioChunkConverter(rate=16000, width=2, channels=1)
+        expected = fresh.convert(AudioChunk(rate=rate, width=2, channels=1, audio=audio)).audio
+        assert handler.audio_buffer.getvalue() == expected
+        assert len(expected) <= config.max_audio_bytes
+        # Upsampling can retain the final interpolation frame until more input arrives.
+        assert len(expected) >= config.max_audio_bytes - 2
+
+    asyncio.run(run_flow())

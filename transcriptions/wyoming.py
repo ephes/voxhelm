@@ -385,6 +385,12 @@ def _validate_typed_event(event: Event) -> None:
             type(data.get(key)) is not int or data[key] <= 0
             for key in ("rate", "width", "channels")
         )
+        if not invalid:
+            invalid = (
+                not 8000 <= data["rate"] <= 192000
+                or data["width"] not in (1, 2, 4)
+                or data["channels"] not in (1, 2)
+            )
     if (
         AudioStart.is_type(event.type)
         or AudioChunk.is_type(event.type)
@@ -407,14 +413,17 @@ class WyomingSttEventHandler(AsyncEventHandler):
         super().__init__(*args, **kwargs)
         self.config = config
         self.info_event = info.event()
+        self._reset_audio()
+        self.request_model = config.model
+        self.request_language = config.language
+
+    def _reset_audio(self) -> None:
         self.audio_buffer = io.BytesIO()
         self.audio_converter = AudioChunkConverter(
             rate=_CONVERTED_RATE,
             width=_CONVERTED_WIDTH,
             channels=_CONVERTED_CHANNELS,
         )
-        self.request_model = config.model
-        self.request_language = config.language
         self.audio_shape = WyomingAudioShape()
 
     async def run(self) -> None:
@@ -508,32 +517,47 @@ class WyomingSttEventHandler(AsyncEventHandler):
             transcribe = Transcribe.from_event(event)
             self.request_model = (transcribe.name or self.config.model).strip()
             self.request_language = transcribe.language or self.config.language
-            self.audio_buffer = io.BytesIO()
-            self.audio_shape = WyomingAudioShape()
+            self._reset_audio()
             return True
 
         if AudioStart.is_type(event.type):
             start = AudioStart.from_event(event)
+            self._reset_audio()
             self.audio_shape = WyomingAudioShape(
                 input_rate=start.rate,
                 input_width=start.width,
                 input_channels=start.channels,
             )
-            self.audio_buffer = io.BytesIO()
             return True
 
         if AudioChunk.is_type(event.type):
             raw_chunk = AudioChunk.from_event(event)
-            self.audio_shape.input_bytes += len(raw_chunk.audio)
-            chunk = self.audio_converter.convert(raw_chunk)
+            if (raw_chunk.rate, raw_chunk.width, raw_chunk.channels) != (
+                self.audio_shape.input_rate,
+                self.audio_shape.input_width,
+                self.audio_shape.input_channels,
+            ) or len(raw_chunk.audio) % (raw_chunk.width * raw_chunk.channels):
+                await self.write_event(
+                    Error(
+                        text="Invalid audio chunk geometry or sequence.", code="invalid_event"
+                    ).event()
+                )
+                return False
+
+            input_bytes = self.audio_shape.input_bytes + len(raw_chunk.audio)
+            input_frames = input_bytes // (raw_chunk.width * raw_chunk.channels)
+            # A fresh fixed-geometry stream produces at most ceil(N * out_rate / in_rate)
+            # frames. Use cumulative frames so chunk rounding cannot erode the budget.
+            output_frames_bound = (
+                input_frames * _CONVERTED_RATE + raw_chunk.rate - 1
+            ) // raw_chunk.rate
             max_audio_bytes = self.config.max_audio_bytes
-            if self.audio_buffer.tell() + len(chunk.audio) > max_audio_bytes:
+            if output_frames_bound * _CONVERTED_WIDTH > max_audio_bytes:
                 _LOGGER.warning(
                     "Wyoming STT audio rejected: buffered audio exceeds limit of %s seconds",
                     self.config.max_audio_seconds,
                 )
-                self.audio_buffer = io.BytesIO()
-                self.audio_shape = WyomingAudioShape()
+                self._reset_audio()
                 await self.write_event(
                     Error(
                         text=(
@@ -544,6 +568,8 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     ).event()
                 )
                 return False
+            chunk = self.audio_converter.convert(raw_chunk)
+            self.audio_shape.input_bytes = input_bytes
             self.audio_shape.converted_bytes += len(chunk.audio)
             self.audio_buffer.write(chunk.audio)
             return True

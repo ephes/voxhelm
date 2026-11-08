@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bind Wyoming chunks to supported `AudioStart` PCM geometry (8–192 kHz, 1/2/4-byte
+  samples, mono/stereo) and whole frames,
+  check the cumulative resampled frame budget before conversion, and reset
+  converter history at each utterance boundary.
+
 - Reject malformed Wyoming typed events before state changes or inference, and
   close stalled/trickled event reads after a single 30-second elapsed deadline.
 
