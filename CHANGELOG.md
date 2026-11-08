@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Compensate failed lane holder publication without touching other holders, and
+  keep admission logging non-authoritative. Refuse admission on state read I/O
+  errors instead of reclaiming unreadable live holders.
+
 - Reject malformed Wyoming typed events before state changes or inference, and
   close stalled/trickled event reads after a single 30-second elapsed deadline.
 
