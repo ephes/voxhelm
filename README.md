@@ -1203,6 +1203,11 @@ Capacity is a small, bounded set of slots (decision D-24):
   immediately while one long HTTP transcription is inside `whisper-cli`; both
   then share the GPU, so the interactive request is slower than on an idle host
   but not blocked.
+- Holder publication and waiter removal run under the control lock. A failed
+  publication removes only that attempt's holder; admission logging cannot revoke
+  a returned ticket. An operational state read error refuses admission and leaves
+  existing holders untouched. Missing or malformed historical records retain the
+  recovery policy below; fix filesystem access before retrying an I/O failure.
 - Each holder is recorded as its own file; a crashed holder is reclaimed when its
   process is gone. Live holders retain capacity until release, regardless of age,
   including legacy `holder.json` records. `VOXHELM_LANE_SCHEDULER_STALE_SECONDS`

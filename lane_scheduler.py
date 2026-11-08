@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -199,23 +199,33 @@ class LaneScheduler:
                             pid=waiter.pid,
                             claimed_at=time.time(),
                         )
-                        self._write_json(self._holder_path(holder.token), holder.as_dict())
-                        waiter_path.unlink(missing_ok=True)
-                        acquired = True
+                        holder_path = self._holder_path(holder.token)
                         waited_ms = int((time.monotonic() - started_wait) * 1000)
-                        _LOGGER.info(
-                            "lane_scheduler admitted lane=%s wait_ms=%s pid=%s holders=%s/%s",
-                            waiter.lane,
-                            waited_ms,
-                            waiter.pid,
-                            total + 1,
-                            self.total_slots,
-                        )
-                        return AdmissionTicket(
+                        ticket = AdmissionTicket(
                             lane=waiter.lane,
                             token=waiter.token,
                             waited_ms=waited_ms,
                         )
+                        try:
+                            self._write_json(holder_path, holder.as_dict())
+                            waiter_path.unlink(missing_ok=True)
+                        except BaseException:
+                            # Still under the control lock: compensate only this attempt,
+                            # including a partially written holder, before giving up.
+                            holder_path.unlink(missing_ok=True)
+                            raise
+                        acquired = True
+                        # Logging cannot revoke an admitted ticket and orphan its slot.
+                        with suppress(Exception):
+                            _LOGGER.info(
+                                "lane_scheduler admitted lane=%s wait_ms=%s pid=%s holders=%s/%s",
+                                waiter.lane,
+                                waited_ms,
+                                waiter.pid,
+                                total + 1,
+                                self.total_slots,
+                            )
+                        return ticket
 
                 time.sleep(_POLL_INTERVAL_SECONDS)
         finally:
@@ -373,11 +383,14 @@ class LaneScheduler:
             return None
 
     def _read_json(self, path: Path) -> dict[str, object] | None:
-        if not path.exists():
-            return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except OSError, UnicodeDecodeError, json.JSONDecodeError:
+        except FileNotFoundError:
+            return None
+        except OSError:
+            # An unreadable live holder still owns capacity. Never reclaim it.
+            raise RuntimeError("Cannot read lane scheduler state; admission refused.") from None
+        except UnicodeDecodeError, ValueError, RecursionError:
             return None
         if not isinstance(payload, dict):
             return None
