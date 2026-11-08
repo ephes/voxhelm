@@ -113,6 +113,15 @@ shaped `(rows, 1, 256)`, with at least one row. Token counts still clamp to the
 last row. Invalid packs raise a controlled backend-unavailable error and are
 never cached; replacing the file allows a subsequent load to recover.
 
+Kokoro refuses nonblank text that yields no supported phoneme tokens with an
+actionable error. Supported one-character utterances and punctuation tokens
+retain ordinary inference behavior. Audio chunks are validated and written
+incrementally to an owned WAV, retaining at most one inference chunk and its PCM
+conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
+86,400,000 PCM bytes at 24 kHz mono). Duration comes from written frames. Late
+inference errors, cancellation and cap overflow remove the partial WAV before
+any artifact is published.
+
 ## Local Development
 
 ```bash
