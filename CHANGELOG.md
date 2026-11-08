@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cover remote worker capacity, durable attempt ownership and complete/fail
+  settlement with real process races, plus lease timing after writer contention.
+
 - Group remote fair-share active/recent load counts in one query regardless of fleet size.
 
 - Restrict remote fair sharing to peers capable of running current candidates;

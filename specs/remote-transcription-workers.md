@@ -692,3 +692,20 @@ Before implementation/deployment, validate manually:
 Fair-share admission groups active and recent load counts for compatible fresh
 peers in one Job query, preserving strict active-lease expiry and inclusive
 freshness/recent-load window boundaries.
+
+### Process-level ownership regression contracts
+
+`uv run pytest tests/test_remote_process_contracts.py` uses spawned processes,
+independent connections to an isolated file-backed SQLite database, and synthetic
+filesystem artifacts. It verifies same-worker concurrency=1 admission, durable
+attempt prefixes, progress after settlement, and full lease issuance after a real
+writer wait exceeding the configured lease. Completion versus retryable/terminal
+failure is exercised in both lock-acquisition orders: the winner owns the complete
+result and manifest, replaced-object cleanup follows only committed completion,
+and the losing old lease cannot change a subsequent attempt. Child database
+errors fail the oracle as well as excess leases; no model download or inference
+runtime is involved. These are coverage contracts for the existing locks.
+
+Counterfactual lock-removal cases run with these tests as sensitivity checks.
+Both participants must reach the ownership oracle before the expected failure;
+setup errors or timeouts do not count as detecting the missing lock.

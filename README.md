@@ -119,6 +119,10 @@ Install `ffmpeg` on PATH before `just check`; the synthetic WAV/MP3/AAC regressi
 exercise real codec boundaries without downloading media or models. CI ensures it is
 installed before running tests.
 
+Remote ownership regressions use spawned processes with scratch SQLite databases
+and synthetic filesystem artifacts (`tests/test_remote_process_contracts.py`),
+including capacity, lock-wait lease timing, and completion/failure races.
+
 `just check` runs Ruff lint, a Ruff format check (`just format-check`; fix with
 `uv run ruff format .`), mypy and pytest. GitHub Actions
 (`.github/workflows/ci.yml`) runs the same steps on macOS arm64 on every push and pull
