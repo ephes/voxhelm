@@ -26,16 +26,19 @@ it inside its own admission).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
 import math
+import os
 import re
 import tempfile
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from django.conf import settings
@@ -256,11 +259,24 @@ def transcribe_window(
 def read_window_json(path: Path, *, limit: int = WINDOW_JSON_MAX_BYTES) -> bytes:
     """Read whisper.cpp's native JSON output, refusing files over ``limit`` bytes.
 
-    Reads at most ``limit + 1`` bytes from the open file, so a file that grows after
-    a size check cannot slip past the cap. Raises ``RuntimeError`` when over the cap
-    and ``OSError`` when the file cannot be read.
+    The file is opened without following a symlink and without blocking (a FIFO with
+    no writer cannot stall the open), and must be a regular file on the open
+    descriptor; anything else raises ``RuntimeError``. Reads at most ``limit + 1``
+    bytes from that descriptor, so a file that grows after a size check cannot slip
+    past the cap. Raises ``RuntimeError`` when over the cap and ``OSError`` when the
+    file cannot be opened or read.
     """
-    with path.open("rb") as handle:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError("whisper.cpp JSON output is not a regular file.") from exc
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        if not S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise RuntimeError("whisper.cpp JSON output is not a regular file.")
+        os.set_blocking(handle.fileno(), True)
         raw = handle.read(limit + 1)
     if len(raw) > limit:
         raise RuntimeError(

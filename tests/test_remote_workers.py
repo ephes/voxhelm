@@ -932,8 +932,10 @@ def test_worker_claim_rescans_after_prefiltered_candidate_loses_race(
     current_second = Job.objects.get(id=second.id)
     calls = 0
 
-    def raced_then_next_candidate(*, now: object, capabilities: dict[str, Any]) -> list[Job]:
-        del now, capabilities
+    def raced_then_next_candidate(
+        *, worker_id: str, now: object, capabilities: dict[str, Any]
+    ) -> list[Job]:
+        del worker_id, now, capabilities
         nonlocal calls
         calls += 1
         if calls == 1:

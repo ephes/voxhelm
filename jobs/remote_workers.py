@@ -6,10 +6,11 @@ import json
 import math
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from django.conf import settings
@@ -167,9 +168,24 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
 SUMMARY_STRING_MAX_LENGTH = 256
 SPEAKER_SIDECAR_CONTENT_TYPE = "application/json"
 CLAIM_UPDATE_CANDIDATE_LIMIT = 10
+# Bounded claim scans (see remote_claim_candidates): each scan hydrates and validates
+# at most CLAIM_SCAN_LIMIT queued/expired jobs, and one poll runs at most
+# CLAIM_SCAN_ROUNDS scans (a second only after losing a conditional-claim race).
+CLAIM_SCAN_LIMIT = 100
+CLAIM_SCAN_ROUNDS = 2
+# A job changed shortly before a sweep started still counts as changed during it: a
+# requeue samples its timestamp before waiting for the SQLite write lock (busy
+# timeout 5 s) and commits after the sweep's read. 30 s covers that wait plus the
+# settlement work; a writer slower than that is found when the sweep wraps.
+CLAIM_SCAN_CHANGE_GRACE_SECONDS = 30
+CLAIM_SCAN_CURSOR_VERSION = 1
 # A completion manifest names at most a handful of artifacts; the cap bounds the
 # per-artifact validation and store stat() calls before any of them run.
 REMOTE_ARTIFACT_MANIFEST_LIMIT = 32
+# Cumulative wall time for the per-artifact store checks of one completion. Checked
+# before every object request; a single request is bounded by the store client's own
+# timeouts (filesystem: none needed; S3: the client's connect/read timeouts).
+REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS = 30.0
 # JobArtifact column limits; PositiveBigIntegerField is a signed 64-bit column.
 ARTIFACT_FIELD_MAX_LENGTHS = {"name": 255, "storage_key": 512, "content_type": 255}
 ARTIFACT_SIZE_BYTES_MAX = 2**63 - 1
@@ -320,10 +336,12 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
     if max_jobs < 1:
         raise ApiError("max_jobs must be at least 1.")
     capabilities = optional_object(payload.get("capabilities"), "capabilities")
-    while True:
+    for _ in range(CLAIM_SCAN_ROUNDS):
         now = timezone.now()
         expire_exhausted_remote_leases(now)
-        candidates = remote_claim_candidates(now=now, capabilities=capabilities)
+        candidates = remote_claim_candidates(
+            worker_id=worker_id, now=now, capabilities=capabilities
+        )
         if not candidates:
             return None
 
@@ -390,7 +408,118 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
     return None
 
 
-def remote_claim_candidates(*, now: object, capabilities: dict[str, Any]) -> list[Job]:
+@dataclass(frozen=True)
+class ClaimScanCursor:
+    """Position of the last job a worker's current sweep rejected, in claim order."""
+
+    priority_rank: int
+    created_at: datetime
+    job_id: UUID
+    sweep_started_at: datetime
+    capabilities: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "v": CLAIM_SCAN_CURSOR_VERSION,
+            "priority_rank": self.priority_rank,
+            "created_at": self.created_at.isoformat(),
+            "id": str(self.job_id),
+            "sweep_started_at": self.sweep_started_at.isoformat(),
+            "capabilities": self.capabilities,
+        }
+
+
+def claim_capabilities_fingerprint(capabilities: dict[str, Any]) -> str:
+    encoded = json.dumps(capabilities, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def stored_claim_scan_cursor(worker_id: str) -> object:
+    return (
+        Worker.objects.filter(worker_id=worker_id)
+        .values_list("claim_scan_cursor", flat=True)
+        .first()
+    )
+
+
+def parse_claim_scan_cursor(
+    raw: object, *, now: datetime, fingerprint: str
+) -> ClaimScanCursor | None:
+    """The worker's stored sweep position, or None to scan from the top.
+
+    A missing, malformed, foreign-version or other-capabilities cursor, or one whose
+    sweep claims to start in the future (a clock step), is dropped: the scan then
+    restarts from the head of the queue, which is always safe. There is no age limit:
+    a sweep through a large backlog must be able to reach its end, and a finished
+    sweep restarts from the top anyway.
+    """
+    if not isinstance(raw, dict) or raw.get("v") != CLAIM_SCAN_CURSOR_VERSION:
+        return None
+    try:
+        cursor = ClaimScanCursor(
+            priority_rank=int(raw["priority_rank"]),
+            created_at=datetime.fromisoformat(str(raw["created_at"])),
+            job_id=UUID(str(raw["id"])),
+            sweep_started_at=datetime.fromisoformat(str(raw["sweep_started_at"])),
+            capabilities=str(raw["capabilities"]),
+        )
+    except KeyError, TypeError, ValueError, OverflowError:
+        return None
+    if timezone.is_naive(cursor.created_at) or timezone.is_naive(cursor.sweep_started_at):
+        return None
+    if cursor.capabilities != fingerprint or cursor.sweep_started_at > now:
+        return None
+    return cursor
+
+
+def claim_scan_after(cursor: ClaimScanCursor) -> Q:
+    """Jobs strictly after the cursor in (priority rank, created_at, id) order."""
+    return (
+        Q(priority_rank__gt=cursor.priority_rank)
+        | Q(priority_rank=cursor.priority_rank, created_at__gt=cursor.created_at)
+        | Q(
+            priority_rank=cursor.priority_rank,
+            created_at=cursor.created_at,
+            pk__gt=cursor.job_id,
+        )
+    )
+
+
+def claim_scan_changed_since(started_at: datetime, *, now: datetime) -> Q:
+    """Jobs that may have become claimable or changed in ``[started_at, now]``.
+
+    Every state transition back to the queue and every job creation stamps
+    ``updated_at``; an expired lease turns claimable without a write, at its
+    ``lease_expires_at``. Rows stamped after ``now`` (only possible after a backward
+    clock step) do not count, so they cannot pin every scan to the top; the sweep's
+    end still reaches them.
+    """
+    return Q(updated_at__gte=started_at, updated_at__lte=now) | Q(
+        state=Job.State.RUNNING, lease_expires_at__gte=started_at
+    )
+
+
+def remote_claim_candidates(
+    *, worker_id: str, now: datetime, capabilities: dict[str, Any]
+) -> list[Job]:
+    """Up to ten claimable jobs this worker can run, in priority/FIFO order.
+
+    Each call hydrates at most ``CLAIM_SCAN_LIMIT`` jobs. A worker-owned cursor lets a
+    sweep continue across polls (and API processes) past a large incompatible backlog.
+    The cursor only moves across jobs this sweep rejected before its first eligible
+    one, so an eligible job that was not leased (capacity, fairness, a lost race) is
+    found again next poll. Priority stays correct: before resuming, one query checks
+    whether any claimable job at or before the cursor was created, requeued, updated
+    or had its lease expire since the sweep started; if so (or the worker's
+    capabilities changed) the scan restarts from the top, so a new high-priority job
+    is never hidden behind the cursor. An exhausted continuation wraps to the top in
+    the same poll, and a scan that reaches the end without an eligible job starts the
+    next sweep at the top, so changes no timestamp records (server configuration) are
+    seen after at most one full sweep.
+
+    Only the Python-side hydration and validation is bounded: the database still
+    evaluates and orders the claimable set for the existence check and the page.
+    """
     candidates = (
         Job.objects.filter(
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
@@ -406,18 +535,58 @@ def remote_claim_candidates(*, now: object, capabilities: dict[str, Any]) -> lis
                 output_field=IntegerField(),
             )
         )
-        .order_by("priority_rank", "created_at")
+        .order_by("priority_rank", "created_at", "pk")
     )
 
+    fingerprint = claim_capabilities_fingerprint(capabilities)
+    stored = stored_claim_scan_cursor(worker_id)
+    cursor = parse_claim_scan_cursor(stored, now=now, fingerprint=fingerprint)
+    if (
+        cursor is not None
+        and candidates.exclude(claim_scan_after(cursor))
+        .filter(claim_scan_changed_since(cursor.sweep_started_at, now=now))
+        .exists()
+    ):
+        # Something new sorts at or before the cursor: restart from the top.
+        cursor = None
+    rows: list[Job] = []
+    if cursor is not None:
+        rows = list(candidates.filter(claim_scan_after(cursor))[:CLAIM_SCAN_LIMIT])
+        if not rows:
+            cursor = None  # The sweep reached the end: wrap within this poll.
+    if cursor is None:
+        sweep_started_at = now - timedelta(seconds=CLAIM_SCAN_CHANGE_GRACE_SECONDS)
+        rows = list(candidates[:CLAIM_SCAN_LIMIT])
+    else:
+        sweep_started_at = cursor.sweep_started_at
+
     eligible: list[Job] = []
-    for candidate in candidates.iterator(chunk_size=100):
-        if not remote_payload_is_claimable(candidate):
-            continue
-        if not worker_can_run_job(candidate, capabilities):
-            continue
-        eligible.append(candidate)
-        if len(eligible) >= CLAIM_UPDATE_CANDIDATE_LIMIT:
-            break
+    last_rejected: Job | None = None
+    for candidate in rows:
+        if remote_payload_is_claimable(candidate) and worker_can_run_job(candidate, capabilities):
+            eligible.append(candidate)
+            if len(eligible) >= CLAIM_UPDATE_CANDIDATE_LIMIT:
+                break
+        elif not eligible:
+            last_rejected = candidate
+
+    next_cursor: ClaimScanCursor | None = cursor
+    if last_rejected is not None:
+        next_cursor = ClaimScanCursor(
+            priority_rank=int(cast(Any, last_rejected).priority_rank),
+            created_at=last_rejected.created_at,
+            job_id=last_rejected.pk,
+            sweep_started_at=sweep_started_at,
+            capabilities=fingerprint,
+        )
+    if not eligible and len(rows) < CLAIM_SCAN_LIMIT:
+        next_cursor = None  # Everything after the cursor was rejected: start over.
+    # Stored outside the claim transaction: no URL checks under its write lock, and
+    # any API process can continue this worker's next bounded scan. An unchanged
+    # cursor (an idle poll) is not rewritten, so idle polls take no SQLite write lock.
+    serialized = next_cursor.as_json() if next_cursor is not None else {}
+    if serialized != stored:
+        Worker.objects.filter(worker_id=worker_id).update(claim_scan_cursor=serialized)
     return eligible
 
 
@@ -1198,7 +1367,13 @@ def verify_remote_artifact_objects(
         store = get_artifact_store_for_identity(store_identity)
     except RuntimeError as exc:
         raise ApiError(f"Artifact store is not configured: {exc}") from exc
+    deadline = time.monotonic() + REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS
     for artifact in artifacts:
+        if time.monotonic() >= deadline:
+            raise ApiError(
+                "Artifact verification exceeded its "
+                f"{REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS:g} second budget."
+            )
         try:
             stored = store.stat(key=artifact["storage_key"])
         except Exception as exc:

@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from django.utils import timezone
@@ -180,8 +181,8 @@ def _words(offsets: list[tuple[int, int]]) -> bytes:
 
 @pytest.mark.parametrize(
     "offsets",
-    [[(-1, 10)], [(50, 10)], [(0, 10**18)], [(0, 240_001)]],
-    ids=["negative", "inverted", "huge", "past-clip"],
+    [[(-1, 10)], [(50, 10)], [(0, 10**18)], [(0, 10**400)], [(0, 121_001)], [(120_500, 240_000)]],
+    ids=["negative", "inverted", "huge", "overflow", "past-tolerance", "past-clip"],
 )
 def test_chapter_word_offsets_outside_the_clip_fail_the_window(offsets) -> None:
     with pytest.raises(RuntimeError, match="outside the clip"):
@@ -189,10 +190,22 @@ def test_chapter_word_offsets_outside_the_clip_fail_the_window(offsets) -> None:
 
 
 def test_chapter_word_offsets_at_clip_edges_are_kept() -> None:
+    # 120,100 ms: the real G6 fixture's overshoot (atp-t7#2s, "felt."); 121,000 ms: the
+    # documented tolerance edge.
     words = chapter_windows.chapter_window_words(
-        _words([(0, 0), (119_000, 125_000)]), clip_start=10.0, clip_seconds=120.0
+        _words([(0, 0), (119_550, 120_100), (120_000, 121_000)]),
+        clip_start=10.0,
+        clip_seconds=120.0,
     )
-    assert [(w["s"], w["e"]) for w in words] == [(10.0, 10.0), (129.0, 135.0)]
+    assert [(w["s"], w["e"]) for w in words] == [(10.0, 10.0), (129.55, 130.1), (130.0, 131.0)]
+
+
+def test_rejected_offsets_leave_the_source_bytes_intact() -> None:
+    raw = _words([(0, 10), (0, 10**400)])
+    before = bytes(raw)
+    with pytest.raises(RuntimeError, match="outside the clip"):
+        chapter_windows.chapter_window_words(raw, clip_start=0.0, clip_seconds=120.0)
+    assert raw == before
 
 
 def test_blank_segments_are_skipped_before_the_offset_check() -> None:
@@ -259,6 +272,48 @@ def test_oversized_manifest_is_refused_before_store_access(client, settings, mon
 
 
 @pytest.mark.django_db
+def test_slow_store_exhausts_the_cumulative_verification_budget(client, settings, monkeypatch):
+    from jobs import remote_workers
+
+    job = submit_remote_job(client, settings, task_ref="manifest-slow-store")
+    claim = claim_one(client).json()["job"]
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+    assert len(manifest) >= 2
+    clock = [1000.0]
+    # Only remote_workers sees the fake clock; the process-wide time module is untouched.
+    monkeypatch.setattr(remote_workers, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    original = remote_workers.get_artifact_store_for_identity
+    stats: list[str] = []
+
+    def slow_store(identity):
+        store = original(identity)
+
+        class Slow:
+            def stat(self, *, key):
+                stats.append(key)
+                clock[0] += remote_workers.REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS
+                return store.stat(key=key)
+
+        return Slow()
+
+    monkeypatch.setattr(remote_workers, "get_artifact_store_for_identity", slow_store)
+    response = _complete(client, job, claim, manifest)
+    assert response.status_code == 400
+    assert "budget" in response.json()["error"]["message"]
+    assert len(stats) == 1
+    job.refresh_from_db()
+    assert job.state == "running"
+    assert not JobArtifact.objects.filter(job=job).exists()
+
+    # The same manifest completes when the store answers within the budget.
+    monkeypatch.setattr(remote_workers, "get_artifact_store_for_identity", original)
+    response = _complete(client, job, claim, manifest)
+    assert response.status_code == 200, response.content
+    assert JobArtifact.objects.filter(job=job).count() == len(manifest)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "field,value,message",
     [
@@ -313,6 +368,33 @@ def test_window_json_over_the_cap_is_refused(tmp_path) -> None:
         windows.read_window_json(path, limit=2048)
     path.write_bytes(b" " * 2048)
     assert len(windows.read_window_json(path, limit=2048)) == 2048
+
+
+def test_window_json_fifo_is_refused_without_blocking(tmp_path) -> None:
+    path = tmp_path / "out.json"
+    os.mkfifo(path)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        windows.read_window_json(path, limit=2048)
+    assert time.monotonic() - started < 5
+
+
+def test_window_json_symlink_and_directory_are_refused(tmp_path) -> None:
+    target = tmp_path / "elsewhere.json"
+    target.write_bytes(b"{}")
+    link = tmp_path / "out.json"
+    link.symlink_to(target)
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        windows.read_window_json(link, limit=2048)
+    directory = tmp_path / "dir.json"
+    directory.mkdir()
+    with pytest.raises((RuntimeError, OSError)):
+        windows.read_window_json(directory, limit=2048)
+
+
+def test_missing_window_json_is_still_an_os_error(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        windows.read_window_json(tmp_path / "missing.json", limit=2048)
 
 
 # --- B19: normalizer owned process diagnostic budget ---

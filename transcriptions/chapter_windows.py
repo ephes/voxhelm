@@ -440,9 +440,12 @@ def decode_chapter_clip(
         raise RuntimeError(f"ffmpeg chapter clip decoding failed: {_log_tail(completed)}")
 
 
-# Offsets past the decoded clip are not physically meaningful, but whisper.cpp can
-# overshoot the clip end; only offsets beyond twice the clip length are refused.
-WORD_OFFSET_LIMIT_CLIPS = 2
+# Word offsets must lie inside the decoded clip. whisper.cpp's DTW timestamps can end
+# a little past the last decoded sample: the real G6 fixtures (186 research windows,
+# 67,856 words) end at most 100 ms past the 120 s clip (``atp-t7#2s``, "felt." ending
+# at 120.1 s). Offsets up to ``WORD_OFFSET_TOLERANCE_MS`` past the clip are therefore
+# kept (10x that observation); anything later is refused as corrupt output.
+WORD_OFFSET_TOLERANCE_MS = 1000
 
 
 def chapter_window_words(
@@ -456,8 +459,10 @@ def chapter_window_words(
     seconds, rounded to 3 decimals. Malformed output raises ``RuntimeError``.
 
     Offsets of kept (non-blank) words must lie in the clip's native millisecond
-    domain: ``0 <= from <= to`` and ``to`` at most ``WORD_OFFSET_LIMIT_CLIPS`` clip
-    lengths, so a corrupt file cannot produce negative, inverted or absurd times.
+    domain: ``0 <= from <= to`` and ``to`` at most the clip length plus
+    ``WORD_OFFSET_TOLERANCE_MS`` (whisper.cpp's end-of-clip rounding), so a corrupt file
+    cannot produce negative, inverted, huge or out-of-clip times. The integer check runs
+    before any float conversion.
     Blank segments are skipped before the check, as before.
     """
     clip_ms = (
@@ -487,7 +492,7 @@ def chapter_window_words(
         stripped = text.strip()
         if not stripped:
             continue
-        if not 0 <= values[0] <= values[1] <= clip_ms * WORD_OFFSET_LIMIT_CLIPS:
+        if not 0 <= values[0] <= values[1] <= clip_ms + WORD_OFFSET_TOLERANCE_MS:
             raise RuntimeError("whisper.cpp chapter window output has offsets outside the clip.")
         words.append(
             {

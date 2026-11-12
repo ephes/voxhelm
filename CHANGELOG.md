@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Remote claims: bound every claim scan to 100 hydrated and validated jobs with a
+  resumable per-worker cursor (`Worker.claim_scan_cursor`, migration `0013`) so a
+  large incompatible backlog is no longer loaded into Python on each poll, and keep
+  the scan priority-correct: any claimable job created, requeued, updated or with
+  an expired lease at or before the cursor since the sweep began restarts the scan
+  from the top. Capability changes and finished sweeps also restart; a poll runs at
+  most two scans and writes the cursor only when it changed.
+- Remote completions: the per-object store checks of one manifest share a
+  30-second cumulative budget and fail with HTTP 400 without settling the job.
+- Window transcription: whisper.cpp JSON output must be a regular file (opened
+  without following symlinks or blocking on a FIFO); chapter-window word offsets
+  beyond the clip plus a 1 s tolerance are refused (was twice the clip length).
+- Wyoming: remove the SIGINT/SIGTERM handlers the sidecar installed when it
+  returns, and run all post-start code (including the startup log line) under the
+  shutdown `finally`.
+
 - Drop non-finite diarization turns and align speakers through an interval index
   instead of scanning every turn per segment; refuse negative, inverted or absurd
   chapter-window word offsets and cap whisper.cpp window JSON at 8 MiB.

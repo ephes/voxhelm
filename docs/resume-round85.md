@@ -1,5 +1,37 @@
 # Round 85 resume note
 
+## Finish (2026-11-12, with r81 slice 64 and r83 slice 23)
+
+Three r85 slices were partial after B17–B19 and are now closed:
+
+- `voxhelm-remote-manifest-preflight-operation-budget`: a 30-second cumulative
+  budget for the per-object store checks of one completion, checked before each
+  request (`REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS`); exhaustion is a bounded HTTP
+  400 without settling the job or inserting artifacts.
+- `voxhelm-window-native-json-file-admission`: `read_window_json` opens with
+  `O_NONBLOCK | O_NOFOLLOW` and requires a regular file on the open descriptor,
+  so a FIFO, symlink or directory fails without blocking.
+- `voxhelm-chapter-native-word-time-domain`: kept word offsets are now refused
+  beyond the clip length plus a 1 s tolerance (was twice the clip). The scout asked
+  for the clip length itself, but the real G6 research windows contain a legitimate
+  overshoot: `atp-t7#2s` ends "felt." at 120.1 s of the 120 s clip (the maximum
+  over 186 windows and 67,856 words). A strict clip bound would fail that real job,
+  so the tolerance is 1 s (10x the observed overshoot).
+
+G6 identity re-run with the new offset check (2026-11-12, studio, whisper.cpp from
+Homebrew, the pinned research turbo model, SHA-256 `1fc70f77...bc69` verified):
+`evals/chapter_windows_compare.py` over the 26 G6 episodes (manifest rebuilt from
+the G6 key set: holdout/unseen edges plus listening kit 2's B-textcheck cards)
+plus `atp-t7` from the free set (the overshoot fixture). Result: 27 of 27
+episodes and 108 of 108 windows identical to the research windows (G6 alone: 26
+episodes, 102 windows, 36,313 of 36,313 words; with `atp-t7`: 38,626 words), no
+window not ok, no retried clip, no database query, research directory not written.
+Median 6.1 s per window under heavy host load (load average above 150).
+
+The same change finishes r81 slice 64 (bounded, priority-correct claim scans;
+see `specs/remote-transcription-workers.md`, "Bounded remote claim scans") and r83
+slice 23 (Wyoming signal handlers removed, post-start code under `finally`).
+
 ## B17–B19 outcome (2026-11-12)
 
 The full scout report was not reachable from the implementing host, so the nine

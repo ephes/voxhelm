@@ -893,11 +893,16 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         max_inference_threads=resolved_config.max_inference_threads,
     )
 
+    def request_stop() -> None:
+        stop_event.set()
+
+    installed_signals: list[signal.Signals] = []
     for handled_signal in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(handled_signal, stop_event.set)
-        except NotImplementedError:  # pragma: no cover
-            pass
+            loop.add_signal_handler(handled_signal, request_stop)
+        except NotImplementedError, RuntimeError, ValueError:  # pragma: no cover
+            continue
+        installed_signals.append(handled_signal)
 
     def handler_factory(
         reader: asyncio.StreamReader,
@@ -905,19 +910,44 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
     ) -> WyomingSttEventHandler:
         return WyomingSttEventHandler(resolved_config, info, reader, writer, admission=admission)
 
-    await server.start(handler_factory)
-    _LOGGER.info(
-        "Wyoming STT/TTS listening on %s:%s using backend=%s model=%s language=%s",
-        resolved_config.host,
-        resolved_config.port,
-        resolved_config.backend,
-        resolved_config.model,
-        resolved_config.language or "auto",
-    )
     try:
-        await stop_event.wait()
+        await server.start(handler_factory)
+        # Everything after a successful start runs under the finally, so a logging
+        # failure or cancellation still stops the listener and owned handlers.
+        try:
+            _LOGGER.info(
+                "Wyoming STT/TTS listening on %s:%s using backend=%s model=%s language=%s",
+                resolved_config.host,
+                resolved_config.port,
+                resolved_config.backend,
+                resolved_config.model,
+                resolved_config.language or "auto",
+            )
+            await stop_event.wait()
+        finally:
+            await shutdown_wyoming_server(server, admission)
     finally:
-        await shutdown_wyoming_server(server, admission)
+        # Remove the SIGINT/SIGTERM handlers installed above so the caller's loop keeps
+        # no stale reference to this server's stop event, but leave a handler someone
+        # registered after us (another sidecar on the same loop) in place. asyncio has
+        # one handler per signal and no public lookup, so a handler registered before
+        # is replaced while the sidecar runs and not restored afterwards.
+        for handled_signal in installed_signals:
+            if _loop_signal_callback(loop, handled_signal) in (request_stop, None):
+                loop.remove_signal_handler(handled_signal)
+
+
+def _loop_signal_callback(loop: asyncio.AbstractEventLoop, handled: signal.Signals) -> object:
+    """The callback currently registered for ``handled`` on ``loop``, if visible.
+
+    Reads the private registry of the Unix selector loop; ``None`` when it is not
+    available (other loop implementations), in which case the caller removes the
+    handler it installed.
+    """
+    handlers = getattr(loop, "_signal_handlers", None)
+    if not isinstance(handlers, dict):
+        return None
+    return getattr(handlers.get(handled), "_callback", None)
 
 
 async def shutdown_wyoming_server(server: AsyncServer, admission: WyomingAdmission) -> None:

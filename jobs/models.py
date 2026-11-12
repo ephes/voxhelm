@@ -124,6 +124,8 @@ class Worker(models.Model):
     capabilities = models.JSONField(default=dict)
     concurrency = models.PositiveIntegerField(default=1)
     running_job_ids = models.JSONField(default=list)
+    # Bounded claim scan position; see jobs.remote_workers.remote_claim_candidates.
+    claim_scan_cursor = models.JSONField(default=dict, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
