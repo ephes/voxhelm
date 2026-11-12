@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import tempfile
 import wave
+import zipfile
+import zlib
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -163,6 +166,8 @@ KOKORO_VOCAB: dict[str, int] = {
 # leading/trailing pad tokens). The style pack is length-indexed by that count.
 KOKORO_MAX_TOKENS = 510
 KOKORO_SAMPLE_RATE = 24000
+# 30 minutes of mono 16-bit PCM: 86,400,000 payload bytes, below RIFF limits.
+KOKORO_MAX_OUTPUT_FRAMES = KOKORO_SAMPLE_RATE * 30 * 60
 _SPACE_TOKEN = KOKORO_VOCAB[" "]
 _MIN_SPEED = 0.5
 _MAX_SPEED = 2.0
@@ -259,7 +264,6 @@ class KokoroBackend:
 
     def synthesize(self, text: str, params: SynthesizeParams) -> SynthesisResult:
         config = self._resolve_model(params.voice)
-        np_mod = _require_numpy()
 
         prepared = text
         if _is_german(config.phoneme_language):
@@ -270,23 +274,20 @@ class KokoroBackend:
         sentences = split_sentences(prepared)
         token_lists = [self._phonemize_to_tokens(s, config.phoneme_language) for s in sentences]
         chunks = build_token_chunks(token_lists, budget=KOKORO_MAX_TOKENS)
+        if not chunks:
+            raise RuntimeError(
+                "Kokoro found no supported speech tokens. Try text in the voice's language."
+            )
 
         session = self._session(config.model_path)
         voicepack = self._voicepack(config.voicepack_path, config.voicepack_key)
 
         speed = float(min(_MAX_SPEED, max(_MIN_SPEED, params.speed)))
-        audio_parts: list[np.ndarray] = []
         with _KOKORO_LOCK:
-            for chunk in chunks:
-                audio_parts.append(_run_inference(session, chunk, voicepack, speed))
-
-        if audio_parts:
-            audio = np_mod.concatenate(audio_parts)
-        else:
-            audio = np_mod.zeros(0, dtype=np_mod.float32)
-
-        audio_path = _write_wav(audio)
-        duration_seconds = round(len(audio) / KOKORO_SAMPLE_RATE, 3) if len(audio) else 0.0
+            audio_path, frames = _write_wav(
+                _run_inference(session, chunk, voicepack, speed) for chunk in chunks
+            )
+        duration_seconds = round(frames / KOKORO_SAMPLE_RATE, 3)
         return SynthesisResult(
             audio_path=audio_path,
             backend_name="kokoro",
@@ -393,14 +394,36 @@ class KokoroBackend:
             if cached is not None:
                 _VOICEPACK_CACHE.move_to_end(cache_key)
                 return cached
-            with np.load(identity[0]) as pack:
-                if voicepack_key not in pack:
-                    available = ", ".join(sorted(pack.keys()))
-                    raise RuntimeError(
-                        f"Voicepack key '{voicepack_key}' not found in '{voicepack_path}'. "
-                        f"Available keys: {available}."
-                    )
-                style = np.array(pack[voicepack_key], dtype=np.float32, copy=True)
+            try:
+                with np.load(identity[0], allow_pickle=False) as pack:
+                    if voicepack_key not in pack:
+                        raise BackendUnavailableError(
+                            "Voicepack is missing the configured style key."
+                        )
+                    raw_style = pack[voicepack_key]
+                    if (
+                        raw_style.ndim != 3
+                        or raw_style.shape[0] < 1
+                        or raw_style.shape[1:] != (1, 256)
+                        or raw_style.dtype.kind not in "fiu"
+                    ):
+                        raise BackendUnavailableError(
+                            "Voicepack must contain numeric styles shaped (rows, 1, 256)."
+                        )
+                    style = np.array(raw_style, dtype=np.float32, copy=True)
+                    if not np.isfinite(style).all():
+                        raise BackendUnavailableError("Voicepack styles must be finite.")
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                EOFError,
+                zipfile.BadZipFile,
+                zlib.error,
+            ) as exc:
+                raise BackendUnavailableError(
+                    "Voicepack could not be loaded as numeric styles."
+                ) from exc
             for existing in list(_VOICEPACK_CACHE):
                 if existing[0][0] == identity[0] and existing[0] != identity:
                     del _VOICEPACK_CACHE[existing]
@@ -494,26 +517,48 @@ def _run_inference(
         "style": np.asarray(style, dtype=np.float32),
         "speed": np.ones(1, dtype=np.float32) * speed,
     }
-    audio = session.run(None, inputs)[0]
-    return np.asarray(audio, dtype=np.float32).reshape(-1)
+    outputs = session.run(None, inputs)
+    if not outputs:
+        raise RuntimeError("Kokoro returned no audio output.")
+    audio = np.asarray(outputs[0])
+    # ONNX exports return a mono vector or a single batch of mono samples.
+    if (
+        audio.dtype.kind not in "fiu"
+        or audio.size == 0
+        or not (audio.ndim == 1 or (audio.ndim == 2 and audio.shape[0] == 1))
+    ):
+        raise RuntimeError("Kokoro audio must be a nonempty mono vector or single mono batch.")
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not np.isfinite(samples).all():
+        raise RuntimeError("Kokoro audio samples must be finite.")
+    return samples
 
 
-def _write_wav(audio: np.ndarray) -> Path:
+def _write_wav(audio_parts: Iterable[np.ndarray]) -> tuple[Path, int]:
     np = _require_numpy()
-    clipped = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
-    pcm = (clipped * 32767.0).astype(np.int16)
-    audio_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temporary:
+        audio_path = Path(temporary.name)
+    frames = 0
     try:
         with wave.open(str(audio_path), "wb") as writer:
             writer.setnchannels(1)
             writer.setsampwidth(2)
             writer.setframerate(KOKORO_SAMPLE_RATE)
-            writer.writeframes(pcm.tobytes())
+            for audio in audio_parts:
+                if frames + len(audio) > KOKORO_MAX_OUTPUT_FRAMES:
+                    raise RuntimeError("Kokoro audio exceeded the 30-minute output limit.")
+                clipped = np.clip(audio, -1.0, 1.0)
+                pcm = (clipped * 32767.0).astype("<i2")
+                writer.writeframes(pcm.tobytes())
+                frames += len(audio)
+                del audio, clipped, pcm
+            if not frames:
+                raise RuntimeError("Kokoro returned no audio samples.")
     except BaseException:
-        # The caller never receives the path on failure, so remove it here.
+        # The caller never receives the path on inference, cancellation or write failure.
         audio_path.unlink(missing_ok=True)
         raise
-    return audio_path
+    return audio_path, frames
 
 
 def _phonemize(text: str, language: str) -> str:

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Refuse Kokoro requests with no supported speech tokens instead of returning
+  empty WAVs; write PCM chunks incrementally with a 30-minute total frame cap
+  and remove partial output after inference, cancellation or budget failure.
+
+- Reject empty, nonfinite or malformed Kokoro inference audio before publishing
+  WAVs; validate installed style shape and finite values before caching voicepacks,
+  and report empty, truncated or corrupt voicepack archives as backend unavailable.
+
+- Bind the historical fingerprint upgrade to the selected database and bound
+  payload reads to 100-job keyset pages with indexed duplicate tracking.
+
+- Retain ASGI download reader ownership through cancelled worker reads and close
+  once after settlement, including streams closed before their first read, while
+  keeping the filesystem `Content-Length` header.
+- Preserve the primary artifact publication error when temporary cleanup also
+  fails, reporting cleanup separately without exposing private diagnostics.
+
 - Bind Wyoming chunks to supported `AudioStart` PCM geometry (8–192 kHz, 1/2/4-byte
   samples, mono/stereo) and whole frames,
   check the cumulative resampled frame budget before conversion, and reset

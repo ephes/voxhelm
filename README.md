@@ -103,6 +103,48 @@ inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
 
+## Kokoro inference and installed style validation
+
+Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
+a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
+publication. Valid samples keep the existing clipping and 16-bit PCM conversion.
+Installed voicepacks must contain real numeric, finite float32-compatible styles
+shaped `(rows, 1, 256)`, with at least one row. Token counts still clamp to the
+last row. Invalid packs raise a controlled backend-unavailable error and are
+never cached; replacing the file allows a subsequent load to recover.
+
+Kokoro refuses nonblank text that yields no supported phoneme tokens with an
+actionable error. Supported one-character utterances and punctuation tokens
+retain ordinary inference behavior. Audio chunks are validated and written
+incrementally to an owned WAV, retaining at most one inference chunk and its PCM
+conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
+86,400,000 PCM bytes at 24 kHz mono). Duration comes from written frames. Late
+inference errors, cancellation and cap overflow remove the partial WAV before
+any artifact is published.
+
+## Historical fingerprint upgrades
+
+Migration 0008 backfills only the database selected by `migrate --database`.
+It reads at most 100 jobs per keyset page, closes reads before SQLite writes,
+and uses a temporary indexed lookup instead of retaining all duplicate keys.
+The newest active matching job keeps its frozen fingerprint; failed jobs also
+receive fingerprints. The entire upgrade rolls back on failure.
+
+## Download and publication failure ownership
+
+ASGI artifact downloads read at most 64 KiB at a time. On disconnect, cancellation
+propagates immediately, while the active worker retains the reader until its read
+settles and closes it exactly once. Response closure also handles streams that
+never started. S3 reads use the transport's 60-second socket read timeout; local
+regular-file reads settle through the filesystem. Closing never races a read.
+ASGI responses keep the `Content-Length` (and any `Content-Disposition`) that a
+filesystem download would send under WSGI.
+
+If filesystem publication and temporary cleanup both fail, the original storage
+error propagates and a fixed cleanup warning is logged without paths or payloads.
+The previous destination and unrelated objects remain intact; the owned temporary
+file may need repair. A cleanup failure on its own still propagates normally.
+
 ## Local Development
 
 ```bash
@@ -436,7 +478,7 @@ Ordinary finite numbers and existing synthesis speed bounds remain supported.
 
 Producer and operator artifact downloads stream bounded reads from the artifact's
 recorded filesystem/S3 store, including asynchronous reads under ASGI. Closing or
-cancelling the response closes the underlying reader. Authorization, private
+cancelling the response closes the underlying reader once its active read settles. Authorization, private
 cache headers and recorded content types still apply. A missing stored object
 returns HTTP 404; other supported storage/configuration failures before response
 headers return HTTP 503 with a bounded JSON error and no storage details. Rows
@@ -473,7 +515,8 @@ its existing ownership checks can refuse unsafe deletion.
 New artifact directories use mode 0700 and published objects use mode 0600.
 Writes use private sibling temporary files, flush them, and atomically replace
 the final object only after success. Readers see the previous complete object
-until replacement; failed writes clean temporary files and preserve old bytes.
+until replacement; failed writes preserve old bytes and attempt temporary cleanup.
+If cleanup also fails, a fixed warning is logged and the original write error survives.
 Existing directory modes are not changed. These guarantees apply to the
 filesystem store; S3 behavior is unchanged. Adoption requires an application or
 worker update; no deployment is performed by the change itself.

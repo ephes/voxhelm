@@ -341,24 +341,26 @@ def test_header_and_close_failure_remain_a_safe_storage_response(client, monkeyp
 
 
 @pytest.mark.django_db(transaction=True)
-def test_asgi_cancellation_closes_an_active_storage_read(monkeypatch):
+def test_asgi_cancellation_closes_after_active_storage_read_settles(monkeypatch):
     import threading
 
     job, _ = artifact_fixture()
     started, released, finished = threading.Event(), threading.Event(), threading.Event()
+    closed = threading.Event()
 
     class BlockedReader(BoundedReader):
         def read(self, size=-1):
             started.set()
             try:
-                assert released.wait(3), "read was never closed"
+                assert released.wait(3), "read was never released"
                 return b""
             finally:
                 finished.set()
 
         def close(self):
-            released.set()
+            assert finished.is_set()
             super().close()
+            closed.set()
 
     reader = BlockedReader()
     install_store(
@@ -377,11 +379,46 @@ def test_asgi_cancellation_closes_an_active_storage_read(monkeypatch):
             consume.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(consume, 1)
+            assert not reader.closed
+            released.set()
+            assert await asyncio.to_thread(closed.wait, 2)
             assert reader.closed
-            assert await asyncio.to_thread(finished.wait, 2)
         finally:
             released.set()
             await iterator.aclose()
             await sync_to_async(response.close)()
+
+    asyncio.run(request())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_asgi_filesystem_download_keeps_content_length(django_user_model, monkeypatch, tmp_path):
+    user = django_user_model.objects.create_user(username="synthetic-length", is_staff=True)
+    job, artifact = artifact_fixture(user)
+    payload = tmp_path / "transcript.txt"
+    payload.write_bytes(b"y" * 70001)
+    readers = []
+
+    def open_reader(**kwargs):
+        readers.append(payload.open("rb"))
+        return readers[-1]
+
+    install_store(
+        monkeypatch,
+        lambda identity: SimpleNamespace(open_reader=open_reader, read_bytes=unbounded_read),
+    )
+
+    async def request():
+        response = await AsyncClient().get(
+            artifact_url(job, False), headers={"Authorization": "Bearer test-token"}
+        )
+        assert response.status_code == 200
+        assert isinstance(response, StreamingHttpResponse)
+        assert response.is_async
+        assert response["Content-Length"] == "70001"
+        body = b"".join([chunk async for chunk in response.streaming_content])
+        await sync_to_async(response.close)()
+        assert len(body) == 70001
+        assert readers[-1].closed
 
     asyncio.run(request())

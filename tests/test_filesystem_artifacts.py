@@ -177,3 +177,48 @@ def test_reader_factory_closes_descriptor_on_initialization_failure(monkeypatch,
     finally:
         for replacement in replacements:
             replacement.close()
+
+
+@pytest.mark.parametrize("primary", ["write", "fsync", "replace"])
+def test_cleanup_denial_preserves_primary_error(tmp_path, monkeypatch, caplog, primary):
+    store = FilesystemArtifactStore(root=tmp_path)
+    store.put_bytes(key="job/object", data=b"old", content_type="text/plain")
+    store.put_bytes(key="job/unrelated", data=b"keep", content_type="text/plain")
+    source = tmp_path / "source"
+    source.write_bytes(b"replacement")
+    original = OSError("synthetic primary private payload")
+    called = []
+
+    def fail(*args, **kwargs):
+        called.append(primary)
+        raise original
+
+    def deny_unlink(*args, **kwargs):
+        raise PermissionError("synthetic cleanup private payload")
+
+    if primary == "write":
+        monkeypatch.setattr("shutil.copyfileobj", fail)
+    else:
+        monkeypatch.setattr(os, primary, fail)
+    monkeypatch.setattr(os, "unlink", deny_unlink)
+    with pytest.raises(OSError) as caught:
+        store.put_file(key="job/object", source_path=source, content_type="text/plain")
+    assert caught.value is original
+    assert called == [primary]
+    assert store.read_bytes(key="job/object") == b"old"
+    assert store.read_bytes(key="job/unrelated") == b"keep"
+    assert len(list((tmp_path / "job").glob(".artifact-*.tmp"))) == 1
+    assert "cleanup" in caplog.text.lower()
+    assert "private payload" not in caplog.text
+
+
+def test_cleanup_denial_without_primary_error_is_raised(tmp_path, monkeypatch):
+    store = FilesystemArtifactStore(root=tmp_path)
+
+    def deny_unlink(*args, **kwargs):
+        raise PermissionError("synthetic cleanup denial")
+
+    monkeypatch.setattr(os, "unlink", deny_unlink)
+    with pytest.raises(PermissionError, match="synthetic cleanup denial"):
+        store.put_bytes(key="job/object", data=b"complete", content_type="text/plain")
+    assert store.read_bytes(key="job/object") == b"complete"
