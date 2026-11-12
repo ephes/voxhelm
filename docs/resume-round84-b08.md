@@ -1,5 +1,16 @@
 # Round 84 B08 resume note
 
+## B08 finisher outcome (2026-11-12)
+
+Rebased onto `main` after the round-82 merge and reviewed together with the other
+parked bundle (r84 B08 + r85 B16) by `claude-review-loop`
+(`claude-opus-5-5`, effort high): no Critical or Warning findings. One suggestion,
+declined: `transcriptions/audio_decode.run_audio_decode` resembles
+`known_speaker._run_audio_decode`, but the known-speaker helper drains and counts
+both pipes and supports an unlimited mode; unifying them would change that
+established contract. `just check` passed (1,684 passed, 6 skipped); merged to `main`.
+The remaining bundles listed below are still unstarted.
+
 Branch: `fix/r84-b08-lane-cancellation-ownership`.
 Base: `main` at `cab38107ca94e9f1e19b71e646f9a5c4cc2dbb5c` (fresh SSH clone).
 
