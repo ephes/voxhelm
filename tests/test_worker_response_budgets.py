@@ -319,7 +319,14 @@ def test_worker_uses_stdlib_tls_context_and_safe_transport_error(monkeypatch):
     assert "private.invalid" not in str(error.value)
 
 
-def test_poll_exception_log_does_not_echo_error_body(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (403, "control plane rejected worker (HTTP 403, worker disabled?) worker_id="),
+        (500, "worker poll failed worker_id="),
+    ],
+)
+def test_poll_exception_log_does_not_echo_error_body(monkeypatch, caplog, status, expected):
     import logging
 
     import httpx
@@ -331,7 +338,7 @@ def test_poll_exception_log_does_not_echo_error_body(monkeypatch, caplog):
         lambda **kwargs: original_client(
             transport=httpx.MockTransport(
                 lambda request: httpx.Response(
-                    403,
+                    status,
                     stream=httpx.ByteStream(b"synthetic-worker-credential https://private.invalid"),
                 )
             ),
@@ -344,10 +351,11 @@ def test_poll_exception_log_does_not_echo_error_body(monkeypatch, caplog):
     )
     monkeypatch.setattr(worker_cli, "log_startup", lambda config: None)
     monkeypatch.setattr(worker_cli, "build_capabilities", lambda: {})
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.WARNING)
     assert worker_cli.main(["--once"]) == 1
-    assert "worker poll failed" in caplog.text
-    assert "HTTP 403: Forbidden" in caplog.text
+    assert expected in caplog.text
+    if status == 403:
+        assert "Traceback" not in caplog.text
     assert "synthetic-worker-credential" not in caplog.text
     assert "private.invalid" not in caplog.text
 

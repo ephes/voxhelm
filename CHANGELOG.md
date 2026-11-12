@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Remote worker: a worker that the control plane rejects no longer logs a
+  traceback on every poll. HTTP 403 on the worker heartbeat or claim happens,
+  for example, while the worker is disabled during a deploy drain. The worker
+  then logs one line per attempt:
+  `control plane rejected worker (HTTP 403, worker disabled?); retrying in Ns`.
+  Consecutive failed polls back off exponentially from the poll interval,
+  doubling up to 60 s, or to the poll interval when that is longer. The first
+  successful poll resets the backoff and, after a rejection, logs that the
+  control plane accepted the worker again. Other failures use the same backoff
+  and keep their traceback, as before. That covers 5xx, connection errors, and
+  errors after a claim, such as a lost lease or a 403 on a job report.
+  `Ctrl-C` during a wait now exits with status 130.
+
 ## 0.1.12 (2026-11-12)
 
 Published to PyPI for the remote transcription workers (`atlas`, `studio`),

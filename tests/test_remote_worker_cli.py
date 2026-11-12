@@ -887,3 +887,201 @@ def test_continuous_worker_keeps_polling_after_reported_failure(monkeypatch):
         == 130
     )
     assert len(calls) == 2
+
+
+def run_loop_with_scripted_polls(monkeypatch, script, *, poll_seconds=5):
+    """Run the continuous loop over scripted poll results; stop after the script."""
+    client = RecordingClient()
+    object.__setattr__(client.config, "poll_seconds", poll_seconds)
+    remaining = list(script)
+    delays: list[float] = []
+
+    def run(**kwargs):
+        if not remaining:
+            raise KeyboardInterrupt
+        step = remaining.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    monkeypatch.setattr(worker_cli, "with_current_stt_runtimes", lambda caps: caps)
+    monkeypatch.setattr(worker_cli, "run_worker_once", run)
+    monkeypatch.setattr(worker_cli, "sleep", lambda seconds: pytest.fail("real sleep used"))
+    result = worker_cli.run_worker_loop(
+        config=client.config, client=client, capabilities={}, sleep_fn=delays.append
+    )
+    assert result == 130
+    return delays
+
+
+def forbidden() -> worker_cli.WorkerHttpError:
+    return worker_cli.WorkerRejected(status=403, detail="Forbidden")
+
+
+def test_rejected_worker_logs_one_concise_line_without_traceback(monkeypatch, caplog):
+    with caplog.at_level(logging.DEBUG, logger="voxhelm.remote_worker"):
+        delays = run_loop_with_scripted_polls(monkeypatch, [forbidden()])
+
+    assert delays == [5]
+    records = [record for record in caplog.records if record.name == "voxhelm.remote_worker"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+    assert records[0].getMessage() == (
+        "control plane rejected worker (HTTP 403, worker disabled?); retrying in 5s worker_id=atlas"
+    )
+    assert "Traceback" not in caplog.text
+
+
+def test_rejected_worker_backs_off_exponentially_up_to_cap(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        delays = run_loop_with_scripted_polls(monkeypatch, [forbidden() for _ in range(8)])
+
+    assert delays == [5, 10, 20, 40, 60, 60, 60, 60]
+    assert len(caplog.records) == 8
+    assert all(record.exc_info is None for record in caplog.records)
+    assert "Traceback" not in caplog.text
+
+
+def test_backoff_cap_never_polls_faster_than_poll_interval(monkeypatch):
+    delays = run_loop_with_scripted_polls(monkeypatch, [forbidden(), forbidden()], poll_seconds=90)
+    assert delays == [90, 90]
+
+
+def test_backoff_resets_after_successful_poll(monkeypatch, caplog):
+    no_work = worker_cli.WorkerOutcome.NO_WORK
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        delays = run_loop_with_scripted_polls(
+            monkeypatch,
+            [forbidden(), forbidden(), forbidden(), no_work, forbidden(), no_work, no_work],
+        )
+
+    # Backoff 5, 10, 20; idle poll 5; the next rejection starts again at 5.
+    assert delays == [5, 10, 20, 5, 5, 5, 5]
+    accepted = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("control plane accepted worker again")
+    ]
+    assert accepted == [
+        "control plane accepted worker again after 3 failed poll(s) worker_id=atlas",
+        "control plane accepted worker again after 1 failed poll(s) worker_id=atlas",
+    ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        worker_cli.WorkerHttpError(status=503, detail="Service Unavailable"),
+        worker_cli.WorkerError("Could not reach Voxhelm worker API: ConnectError."),
+        # A 403 from a job report after a claim is not a disabled worker.
+        worker_cli.WorkerHttpError(status=403, detail="Forbidden"),
+        worker_cli.WorkerLeaseLost("lease lost"),
+    ],
+)
+def test_other_poll_errors_keep_traceback_and_back_off(monkeypatch, caplog, error):
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        delays = run_loop_with_scripted_polls(
+            monkeypatch, [error, error, error, worker_cli.WorkerOutcome.NO_WORK]
+        )
+
+    assert delays == [5, 10, 20, 5]
+    failures = [r for r in caplog.records if r.getMessage().startswith("worker poll failed")]
+    assert len(failures) == 3
+    assert all(record.exc_info is not None for record in failures)
+    assert "retrying in 5s" in failures[0].getMessage()
+    assert not any("rejected worker" in r.getMessage() for r in caplog.records)
+    # Only a rejection logs a recovery line.
+    assert len(caplog.records) == 3
+
+
+def test_403_from_heartbeat_or_claim_is_a_rejection(monkeypatch):
+    client = RecordingClient()
+
+    def reject(**kwargs):
+        raise worker_cli.WorkerHttpError(status=403, detail="Forbidden")
+
+    monkeypatch.setattr(client, "heartbeat_worker", reject)
+    with pytest.raises(worker_cli.WorkerRejected):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+    client = RecordingClient()
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", reject)
+    with pytest.raises(worker_cli.WorkerRejected):
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+    client = RecordingClient()
+
+    def unavailable(**kwargs):
+        raise worker_cli.WorkerHttpError(status=503, detail="Service Unavailable")
+
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", unavailable)
+    with pytest.raises(worker_cli.WorkerHttpError) as error:
+        worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+    assert not isinstance(error.value, worker_cli.WorkerRejected)
+
+
+def test_unexpected_poll_error_keeps_traceback_and_backs_off(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        delays = run_loop_with_scripted_polls(
+            monkeypatch, [ValueError("synthetic bug"), ValueError("synthetic bug")]
+        )
+
+    assert delays == [5, 10]
+    assert all(record.exc_info is not None for record in caplog.records)
+
+
+def test_once_rejection_logs_one_line_and_exits_nonzero(monkeypatch, caplog):
+    client = RecordingClient()
+
+    def reject(**kwargs):
+        raise worker_cli.WorkerHttpError(status=403, detail="Forbidden")
+
+    monkeypatch.setattr(worker_cli, "with_current_stt_runtimes", lambda caps: caps)
+    monkeypatch.setattr(client, "heartbeat_worker", reject)
+    with caplog.at_level(logging.DEBUG, logger="voxhelm.remote_worker"):
+        result = worker_cli.run_worker_loop(
+            config=client.config,
+            client=client,
+            capabilities={},
+            once=True,
+            sleep_fn=lambda seconds: pytest.fail("--once must not wait"),
+        )
+
+    assert result == 1
+    assert [record.getMessage() for record in caplog.records] == [
+        "control plane rejected worker (HTTP 403, worker disabled?) worker_id=atlas"
+    ]
+    assert caplog.records[0].exc_info is None
+
+
+def test_interrupt_during_backoff_exits_like_shutdown(monkeypatch):
+    client = RecordingClient()
+
+    def reject(**kwargs):
+        raise worker_cli.WorkerHttpError(status=403, detail="Forbidden")
+
+    def interrupted_sleep(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker_cli, "with_current_stt_runtimes", lambda caps: caps)
+    monkeypatch.setattr(client, "heartbeat_worker", reject)
+    assert (
+        worker_cli.run_worker_loop(
+            config=client.config, client=client, capabilities={}, sleep_fn=interrupted_sleep
+        )
+        == 130
+    )
+
+
+def test_accepted_again_after_mixed_failure_streak(monkeypatch, caplog):
+    unavailable = worker_cli.WorkerHttpError(status=503, detail="Service Unavailable")
+    with caplog.at_level(logging.INFO, logger="voxhelm.remote_worker"):
+        run_loop_with_scripted_polls(
+            monkeypatch, [forbidden(), unavailable, worker_cli.WorkerOutcome.NO_WORK]
+        )
+    assert caplog.records[-1].getMessage() == (
+        "control plane accepted worker again after 2 failed poll(s) worker_id=atlas"
+    )

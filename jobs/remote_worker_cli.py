@@ -102,6 +102,9 @@ DEFAULT_POLL_SECONDS = 5
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
 MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60
+# Failed polls back off exponentially from the poll interval up to this cap (or
+# the poll interval itself when that is longer).
+MAX_POLL_BACKOFF_SECONDS = 60
 
 
 MAX_WORKER_TIMING_SECONDS = 3600
@@ -138,6 +141,14 @@ class WorkerHttpError(RuntimeError):
         self.status = status
         self.detail = detail
         super().__init__(f"Voxhelm worker API returned HTTP {status}: {detail}")
+
+
+class WorkerRejected(WorkerHttpError):
+    """The control plane refused the worker heartbeat or claim (HTTP 403).
+
+    Raised only from the poll phase of ``run_worker_once`` (before any job is
+    claimed), typically because the worker is disabled.
+    """
 
 
 @dataclass(frozen=True)
@@ -603,14 +614,24 @@ def run_worker_once(
     client: WorkerClient,
     capabilities: dict[str, Any],
 ) -> WorkerOutcome:
-    heartbeat = client.heartbeat_worker(capabilities=capabilities, running_job_ids=[])
+    try:
+        heartbeat = client.heartbeat_worker(capabilities=capabilities, running_job_ids=[])
+    except WorkerHttpError as exc:
+        if exc.status == HTTPStatus.FORBIDDEN:
+            raise WorkerRejected(status=exc.status, detail=exc.detail) from exc
+        raise
     poll_after = heartbeat.get("poll_after_seconds")
     if poll_after is not None:
         if isinstance(poll_after, bool) or not isinstance(poll_after, int):
             raise WorkerError("poll_after_seconds must be an integer from 1 to 3600.")
         validate_worker_timing(poll_after, "poll_after_seconds")
         object.__setattr__(config, "poll_seconds", poll_after)
-    claim = client.claim(capabilities=capabilities)
+    try:
+        claim = client.claim(capabilities=capabilities)
+    except WorkerHttpError as exc:
+        if exc.status == HTTPStatus.FORBIDDEN:
+            raise WorkerRejected(status=exc.status, detail=exc.detail) from exc
+        raise
     if claim is None:
         return WorkerOutcome.NO_WORK
 
@@ -1405,6 +1426,97 @@ def log_startup(config: WorkerConfig) -> None:
     )
 
 
+class PollBackoff:
+    """Capped exponential backoff between failed control-plane polls.
+
+    The first failure waits the normal poll interval (the previous behaviour);
+    each further consecutive failure doubles the wait up to
+    ``MAX_POLL_BACKOFF_SECONDS`` (or the poll interval, when that is longer). A
+    successful poll resets the backoff.
+    """
+
+    def __init__(self, *, cap_seconds: float = MAX_POLL_BACKOFF_SECONDS) -> None:
+        self.cap_seconds = cap_seconds
+        self.failures = 0
+        self.rejected = False
+
+    def next_delay(self, base_seconds: float, *, rejected: bool = False) -> float:
+        self.failures += 1
+        # Sticky for the streak: a rejection followed by e.g. a 503 still logs
+        # "accepted again" once a poll succeeds.
+        self.rejected = self.rejected or rejected
+        cap = max(self.cap_seconds, base_seconds)
+        # Bound the exponent so long outages cannot overflow float arithmetic.
+        return min(base_seconds * 2 ** min(self.failures - 1, 16), cap)
+
+    def record_success(self, *, worker_id: str) -> None:
+        if not self.failures:
+            return
+        if self.rejected:
+            LOGGER.info(
+                "control plane accepted worker again after %d failed poll(s) worker_id=%s",
+                self.failures,
+                worker_id,
+            )
+        self.failures = 0
+        self.rejected = False
+
+
+def is_worker_rejection(exc: BaseException) -> bool:
+    return isinstance(exc, WorkerRejected)
+
+
+def log_poll_failure(exc: Exception, *, worker_id: str, delay: float | None) -> None:
+    """One line for a rejected poll (HTTP 403); a traceback for anything else."""
+    retry = "" if delay is None else f"; retrying in {delay:g}s"
+    if is_worker_rejection(exc):
+        LOGGER.warning(
+            "control plane rejected worker (HTTP 403, worker disabled?)%s worker_id=%s",
+            retry,
+            worker_id,
+        )
+        return
+    LOGGER.exception("worker poll failed%s worker_id=%s", retry, worker_id)
+
+
+def run_worker_loop(
+    *,
+    config: WorkerConfig,
+    client: WorkerClient,
+    capabilities: dict[str, Any],
+    once: bool = False,
+    sleep_fn: Callable[[float], object] | None = None,
+) -> int:
+    def pause(seconds: float) -> bool:
+        try:
+            (sleep if sleep_fn is None else sleep_fn)(seconds)
+        except KeyboardInterrupt:
+            return False
+        return True
+
+    backoff = PollBackoff()
+    while True:
+        try:
+            capabilities = with_current_stt_runtimes(capabilities)
+            claimed = run_worker_once(config=config, client=client, capabilities=capabilities)
+        except KeyboardInterrupt:
+            return 130
+        except Exception as exc:
+            if once:
+                log_poll_failure(exc, worker_id=config.worker_id, delay=None)
+                return 1
+            delay = backoff.next_delay(config.poll_seconds, rejected=is_worker_rejection(exc))
+            log_poll_failure(exc, worker_id=config.worker_id, delay=delay)
+            if not pause(delay):
+                return 130
+            continue
+        backoff.record_success(worker_id=config.worker_id)
+        if once:
+            return 1 if claimed == WorkerOutcome.FAILED else 0
+        if not claimed and not pause(config.poll_seconds):
+            return 130
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -1424,23 +1536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     log_parakeet_version()
     capabilities = build_capabilities()
     client = WorkerClient(config=config)
-
-    while True:
-        try:
-            capabilities = with_current_stt_runtimes(capabilities)
-            claimed = run_worker_once(config=config, client=client, capabilities=capabilities)
-        except KeyboardInterrupt:
-            return 130
-        except Exception:
-            LOGGER.exception("worker poll failed worker_id=%s", config.worker_id)
-            if args.once:
-                return 1
-            sleep(config.poll_seconds)
-            continue
-        if args.once:
-            return 1 if claimed == WorkerOutcome.FAILED else 0
-        if not claimed:
-            sleep(config.poll_seconds)
+    return run_worker_loop(config=config, client=client, capabilities=capabilities, once=args.once)
 
 
 if __name__ == "__main__":

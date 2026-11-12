@@ -1178,6 +1178,17 @@ be interrupted; ownership is checked again before the next phase.
 `--once` exits zero for no work or a completed job, nonzero for failed
 processing (even when failure reporting succeeds), a failed control request,
 or a failed report. Continuous mode keeps polling after reported job failures.
+A failed poll waits before the next attempt. The first wait is the poll
+interval, each further consecutive failure doubles it up to 60 seconds (or the
+poll interval when that is longer), and the first successful poll resets it.
+
+An HTTP 403 on the worker heartbeat or claim usually means the worker was
+disabled, for example during a deploy drain. It logs
+`control plane rejected worker (HTTP 403, worker disabled?); retrying in Ns`
+without a traceback. Once the worker is re-enabled, it logs
+`control plane accepted worker again`. Every other failure logs its traceback,
+as before.
+
 `--poll-seconds`, `--http-timeout-seconds`, and `--heartbeat-interval-seconds`
 accept integers from 1 to 3600 seconds and are checked before runtime probes or
 client construction. Server `poll_after_seconds` hints use the same integer
