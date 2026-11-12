@@ -480,3 +480,108 @@ def test_connection_starting_during_shutdown_is_refused() -> None:
     asyncio.run(flow())
     assert [e.code for e in errors(writer)] == ["server_busy"]
     assert writer.closed and admission.connections == 0
+
+
+def _installed_signal_handlers(loop: asyncio.AbstractEventLoop) -> set[int]:
+    import signal
+
+    return {
+        handled
+        for handled in (signal.SIGINT, signal.SIGTERM)
+        if cast(Any, loop)._signal_handlers.get(handled) is not None
+    }
+
+
+def test_server_removes_its_signal_handlers_and_can_run_again(monkeypatch) -> None:
+    servers: list[FakeServer] = []
+
+    def make_server(uri):
+        servers.append(FakeServer())
+        return servers[-1]
+
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(make_server))
+    config = replace(limit_config(), host="127.0.0.1", port=0)
+
+    async def flow() -> None:
+        loop = asyncio.get_running_loop()
+        for run in range(2):
+            serving = asyncio.create_task(run_wyoming_stt_server(config=config))
+            while len(servers) <= run or not servers[-1].started.is_set():
+                await asyncio.sleep(0)
+            assert _installed_signal_handlers(loop)
+            serving.cancel()
+            results = await asyncio.gather(serving, return_exceptions=True)
+            assert isinstance(results[0], asyncio.CancelledError)
+            assert servers[-1].stopped
+            assert not _installed_signal_handlers(loop)
+
+    asyncio.run(flow())
+    assert len(servers) == 2
+
+
+def test_failure_after_start_still_stops_server_and_removes_handlers(monkeypatch) -> None:
+    server = FakeServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    config = replace(limit_config(), host="127.0.0.1", port=0)
+
+    def broken_log(*args, **kwargs):
+        raise RuntimeError("synthetic logging failure")
+
+    monkeypatch.setattr(wyoming_module._LOGGER, "info", broken_log)
+
+    async def flow() -> None:
+        with pytest.raises(RuntimeError, match="synthetic logging failure"):
+            await run_wyoming_stt_server(config=config)
+        assert not _installed_signal_handlers(asyncio.get_running_loop())
+
+    asyncio.run(flow())
+    assert server.stopped
+
+
+def test_start_failure_removes_signal_handlers(monkeypatch) -> None:
+    class FailingServer(FakeServer):
+        async def start(self, factory) -> None:
+            raise OSError("synthetic bind failure")
+
+    server = FailingServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    config = replace(limit_config(), host="127.0.0.1", port=0)
+
+    async def flow() -> None:
+        with pytest.raises(OSError, match="synthetic bind failure"):
+            await run_wyoming_stt_server(config=config)
+        assert not _installed_signal_handlers(asyncio.get_running_loop())
+
+    asyncio.run(flow())
+    assert not server.stopped
+
+
+def test_concurrent_sidecar_keeps_its_signal_handlers(monkeypatch) -> None:
+    servers: list[FakeServer] = []
+
+    def make_server(uri):
+        servers.append(FakeServer())
+        return servers[-1]
+
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(make_server))
+    config = replace(limit_config(), host="127.0.0.1", port=0)
+
+    async def flow() -> None:
+        loop = asyncio.get_running_loop()
+        first = asyncio.create_task(run_wyoming_stt_server(config=config))
+        while len(servers) < 1 or not servers[0].started.is_set():
+            await asyncio.sleep(0)
+        second = asyncio.create_task(run_wyoming_stt_server(config=config))
+        while len(servers) < 2 or not servers[1].started.is_set():
+            await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        # The second sidecar's handlers survive the first one's cleanup ...
+        assert _installed_signal_handlers(loop)
+        second.cancel()
+        await asyncio.gather(second, return_exceptions=True)
+        # ... and are removed by the second one.
+        assert not _installed_signal_handlers(loop)
+
+    asyncio.run(flow())
+    assert all(server.stopped for server in servers)

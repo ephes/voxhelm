@@ -776,9 +776,15 @@ clip is shifted by 0.7, -0.7, 1.9 and -1.9 s in turn; the pinned model is
 checked again after every failed clip, so a model that went away fails the job
 instead of producing untranscribed windows. Words are every non-blank segment's
 stripped text with the clip start plus its offsets, rounded to 3 decimals.
-Offsets of kept words must satisfy `0 <= from <= to <= 240 s` (twice the clip,
-allowing whisper.cpp to overshoot the clip end); impossible offsets, like other
-malformed output, and whisper.cpp JSON files over 8 MiB fail the run. On
+Offsets of kept words must be integers with `0 <= from <= to <= 121 s`: the
+120 s clip plus a 1 s tolerance, because whisper.cpp's DTW timestamps can end
+slightly past the last decoded sample (the G6 research windows end at most
+100 ms past the clip). Impossible offsets, like other malformed output, fail
+the run, as do whisper.cpp JSON files over 8 MiB. The JSON is opened without
+following a symlink or blocking and must be a regular file: for the drift-check
+windows anything else fails the run; for chapter windows a FIFO or directory at
+the output path counts as a failed clip (shifted and retried, then an untranscribed
+window) and a symlink fails the run. On
 the 26 episodes of the podcast gate G6 the 102 windows are identical, word for
 word and to the millisecond, to the research's. See
 `specs/2026-10-17_chapter_windows.md`.
@@ -956,6 +962,28 @@ share one grouped active/recent Job count query instead of per-peer counts. Capa
 lease expiry use the admission time sampled after acquiring the worker write lock,
 so lock contention does not consume the issued lease.
 
+Claim scans are bounded and priority-correct. Each scan hydrates and validates at
+most 100 queued/expired jobs in priority/creation-time/job-ID order; a poll runs
+a second scan only after losing a conditional-claim race. A worker-owned cursor
+(`Worker.claim_scan_cursor`) lets a sweep continue across polls and API processes
+past a large backlog the worker cannot run; it moves only across jobs the sweep
+rejected before its first eligible one, so a job that was found but not leased
+(capacity, fairness, a lost race) is found again. Before resuming, one existence
+query checks whether any claimable job at or before the cursor was created,
+requeued or otherwise updated, or had its lease expire, since the sweep started
+(with a 30-second grace for writers that stamp `updated_at` before waiting for
+the SQLite write lock and commit later); if so the scan restarts from the top,
+so a new high-priority job is never hidden behind the cursor. A change of the
+worker's advertised capabilities or a finished sweep also restarts from the top;
+sweeps have no age limit, so a quiet queue of any size is swept to its end, and
+changes no row timestamp records (server configuration) are seen after one full
+sweep. Each claimable-job change at or before the cursor restarts the sweep, so
+while such changes keep arriving faster than a sweep takes, scans favour the head
+of the queue (priority first). Only the Python-side hydration and validation is
+bounded; the database still evaluates and orders the claimable set (served by the
+`(execution_mode, state, priority, created_at)` index). An unchanged cursor is
+not rewritten, so idle polls do not write.
+
 Configure `VOXHELM_WORKER_BASE_URL` (or `VOXHELM_BASE_URL`) with the canonical
 worker API origin (the final
 HTTPS URL when using ingress). Worker control-plane requests refuse all HTTP
@@ -1069,7 +1097,9 @@ attempt prefix, for example `voxhelm/jobs/<job_id>/attempt-1/transcript.txt`;
 Voxhelm verifies that each reported object exists in the configured artifact
 store and that its stored size matches the manifest before marking the job
 succeeded. A manifest lists at most 32 artifacts, checked before any store
-access; names, storage keys and content types must fit their columns (255, 512
+access, and the per-object store checks share a 30-second cumulative budget
+(checked before each request; one request is bounded by the store client's own
+timeouts), after which the completion is refused without settling the job; names, storage keys and content types must fit their columns (255, 512
 and 255 characters, no NUL), `size_bytes` must fit a signed 64-bit integer, and no
 two artifacts may name the same object (keys are compared after collapsing `//`
 and `.` segments). The producer still downloads winning artifacts through
@@ -1255,7 +1285,13 @@ the sidecar enforces these input limits per connection:
   public text; exception details (paths, decoder output) are only logged.
 - On stop or cancellation the sidecar aborts, cancels and awaits every connection
   handler and stops listening; each handler releases its transport even if
-  cleanup fails.
+  cleanup fails. Everything after a successful listener start (including the
+  startup log line) runs under that shutdown. The sidecar installs SIGINT/SIGTERM
+  handlers on its event loop and removes them when it returns (unless a handler
+  registered after its own, such as a second sidecar on the same loop, has taken
+  over), so an embedding loop can start it again; asyncio keeps one handler per
+  signal, so a handler the embedding application registered for those signals
+  before is replaced while the sidecar runs and is not restored.
 - Inference admission refuses rather than queues: a request over
   `VOXHELM_WYOMING_MAX_INFERENCE_THREADS` (default `4`) fails immediately with
   `code="busy"`. The lane scheduler still serializes admitted backend work.

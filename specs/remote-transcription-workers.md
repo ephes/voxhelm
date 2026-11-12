@@ -436,7 +436,7 @@ Completion rules:
 - Artifact `storage_key` values must be under the claimed attempt-scoped artifact prefix.
 - Each manifest object must already exist in the configured artifact store and its stored byte size must match `size_bytes`; missing or mismatched objects are rejected before `studio` marks the job succeeded.
 - Artifact names must match existing Voxhelm artifact naming rules and be unique per job.
-- A manifest lists at most 32 artifacts (refused before any store access); artifact names, storage keys and content types must fit their columns without NUL characters, `size_bytes` must fit a signed 64-bit integer, and storage keys must be unique per job after collapsing `//` and `.` path segments.
+- A manifest lists at most 32 artifacts (refused before any store access), and the per-object existence/size checks share a 30-second cumulative budget checked before every store request; exhausting it refuses the completion (HTTP 400) without settling the job or inserting artifacts; artifact names, storage keys and content types must fit their columns without NUL characters, `size_bytes` must fit a signed 64-bit integer, and storage keys must be unique per job after collapsing `//` and `.` path segments.
 - Transcript output formats must match the job's requested `output.formats`.
 - Known-speaker jobs must include the `transcript_speakers` artifact (`transcript.speakers.json`) and `result_metadata.diarization.known_speaker_summary` when the request strategy is `pyannote_known_speaker`.
 - `transcript_speakers` artifacts are rejected for jobs that did not request `pyannote_known_speaker`.
@@ -515,7 +515,7 @@ Server-side algorithm shape:
 1. Find an ordered candidate set with `execution_mode=remote_pull`, eligible type/capabilities, and either:
    - `state=queued`, or
    - `state=running` with `lease_expires_at < now` and `attempt_count < max_attempts`.
-   URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction samples the admission clock after acquiring the worker write lock, rechecks capacity and claimability at that instant, and issues a full lease from that instant. Fair sharing only yields to fresh peers whose advertised capabilities can execute at least one current candidate, using the same capability checks as claim selection.
+   The candidate scan is bounded (see "Bounded remote claim scans" below). URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction samples the admission clock after acquiring the worker write lock, rechecks capacity and claimability at that instant, and issues a full lease from that instant. Fair sharing only yields to fresh peers whose advertised capabilities can execute at least one current candidate, using the same capability checks as claim selection.
    If the authenticated worker already has active leased jobs at the lower of
    its recorded concurrency and requested `max_jobs`, return no claim instead
    of handing out another lease.
@@ -530,7 +530,7 @@ Server-side algorithm shape:
    - `started_at=COALESCE(started_at, now)`
    - `last_worker_heartbeat_at=now`
 3. The `WHERE` clause must restate the claim conditions so a concurrent claimant loses cleanly.
-4. Treat affected row count `0` as a lost race and try the next candidate.
+4. Treat affected row count `0` as a lost race and try the next candidate. When every candidate is lost, rescan once more at most (two scans per poll), then return no claim.
 5. Return the new opaque lease token only once, in the successful claim response.
 
 All lease and heartbeat comparisons use `studio` server time. Worker-supplied timestamps are informational only.
@@ -722,3 +722,34 @@ committed result, manifest identities, input metadata and finish time, refuses
 changed metadata, and eventually removes only the owned staged input. Sensitivity
 checks remove reference protection, skip missing-object ownership cleanup, or
 bypass the idempotent-completion branch; each must fail its named oracle.
+
+### Bounded remote claim scans
+
+`Worker.claim_scan_cursor` stores the worker's current sweep: the
+(priority rank, `created_at`, job ID) of the last job the sweep rejected before
+its first eligible candidate, the time the sweep started (minus a 30-second
+grace for writers that stamp `updated_at` before waiting for the SQLite write
+lock; a slower writer is found when the sweep wraps), and a fingerprint of the worker's advertised
+capabilities. Each scan hydrates at most 100 claimable jobs after the cursor (or
+from the top), collects at most ten eligible candidates, and never advances the
+cursor past an eligible job, including on capacity or fairness refusal.
+
+Priority correctness: before resuming, one existence query looks for claimable
+jobs at or before the cursor with `updated_at` or `lease_expires_at` at or after
+the sweep start (creation, requeue and every other state write stamp
+`updated_at`; an expired lease turns claimable at `lease_expires_at` without a
+write). Any hit restarts the sweep from the top, so a new or returning
+higher-priority job is never hidden behind the cursor (the trade-off the parked
+`r81-v2-bounded-claims` head/continuation design left open). The sweep also
+restarts on a capabilities change, when the continuation is empty (wrapping
+within the same poll), and when a scan reaches the end without an eligible job.
+There is no age limit, so a quiet queue of any size is swept to its end; changes
+no row timestamp records (such as server configuration) are seen after one full
+sweep. A malformed cursor, or one whose sweep start lies in the future, is
+ignored. Cost per poll: one cursor read, one existence query, at most 100
+hydrated jobs per scan and at most two scans, and a cursor write outside the
+claim transaction only when the cursor changed. Only hydration and validation are
+bounded; the database still evaluates and orders the claimable set. While
+claimable-job changes at or before the cursor keep arriving faster than a sweep
+takes, scans favour the head of the queue (priority first) and reach the tail
+once changes pause.
