@@ -8,9 +8,9 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import IO, Iterator
 
 from django.conf import settings
 
@@ -55,6 +55,7 @@ class AdmissionTicket:
     lane: str
     token: str
     waited_ms: int
+    _holder_handle: IO[str] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ class HolderRecord:
     lane: str
     pid: int
     claimed_at: float
+    lock_owned: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> HolderRecord:
@@ -108,6 +110,7 @@ class HolderRecord:
             lane=normalize_lane(str(lane)),
             pid=int(str(pid)),
             claimed_at=_finite_timestamp(claimed_at, "claimed_at"),
+            lock_owned=payload.get("lock_owned") is True,
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -116,6 +119,7 @@ class HolderRecord:
             "lane": self.lane,
             "pid": self.pid,
             "claimed_at": self.claimed_at,
+            "lock_owned": self.lock_owned,
         }
 
 
@@ -171,18 +175,18 @@ class LaneScheduler:
         )
         waiter_path = self._waiter_path(waiter.token)
         acquired = False
+        holder_handle: IO[str] | None = None
         started_wait = time.monotonic()
 
-        with self._control_lock():
-            self._write_json(waiter_path, waiter.as_dict())
-
         try:
+            with self._control_lock(cancel_event):
+                self._write_json(waiter_path, waiter.as_dict())
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise InferenceCancelled(
                         f"Local inference was cancelled while waiting for lane '{waiter.lane}'."
                     )
-                with self._control_lock():
+                with self._control_lock(cancel_event):
                     self._cleanup_dead_waiters()
                     total, non_interactive = self._reclaim_holders()
                     if not waiter_path.exists():
@@ -198,15 +202,23 @@ class LaneScheduler:
                             lane=waiter.lane,
                             pid=waiter.pid,
                             claimed_at=time.time(),
+                            lock_owned=True,
                         )
                         holder_path = self._holder_path(holder.token)
                         waited_ms = int((time.monotonic() - started_wait) * 1000)
-                        ticket = AdmissionTicket(
-                            lane=waiter.lane,
-                            token=waiter.token,
-                            waited_ms=waited_ms,
-                        )
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise InferenceCancelled(
+                                "Local inference was cancelled before admission."
+                            )
+                        holder_handle = holder_path.open("x+", encoding="utf-8")
                         try:
+                            fcntl.flock(holder_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            ticket = AdmissionTicket(
+                                lane=waiter.lane,
+                                token=waiter.token,
+                                waited_ms=waited_ms,
+                                _holder_handle=holder_handle,
+                            )
                             self._write_json(holder_path, holder.as_dict())
                             waiter_path.unlink(missing_ok=True)
                         except BaseException:
@@ -230,12 +242,19 @@ class LaneScheduler:
                 time.sleep(_POLL_INTERVAL_SECONDS)
         finally:
             if not acquired:
-                with self._control_lock():
-                    waiter_path.unlink(missing_ok=True)
+                if holder_handle is not None:
+                    holder_handle.close()
+                # Only this attempt publishes this UUID. Removing its waiter does
+                # not need the control lock, which may still be held by a peer.
+                waiter_path.unlink(missing_ok=True)
 
     def release(self, ticket: AdmissionTicket) -> None:
-        with self._control_lock():
-            self._holder_path(ticket.token).unlink(missing_ok=True)
+        try:
+            with self._control_lock():
+                self._holder_path(ticket.token).unlink(missing_ok=True)
+        finally:
+            if ticket._holder_handle is not None:
+                ticket._holder_handle.close()
 
     def _ensure_layout(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
@@ -244,10 +263,24 @@ class LaneScheduler:
         self.control_lock_path.touch(exist_ok=True)
 
     @contextmanager
-    def _control_lock(self) -> Iterator[None]:
+    def _control_lock(self, cancel_event: threading.Event | None = None) -> Iterator[None]:
         with self.control_lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InferenceCancelled(
+                        "Local inference was cancelled while waiting for control."
+                    )
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if cancel_event is not None:
+                        cancel_event.wait(_POLL_INTERVAL_SECONDS)
+                    else:
+                        time.sleep(_POLL_INTERVAL_SECONDS)
             try:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InferenceCancelled("Local inference was cancelled before admission.")
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -308,7 +341,20 @@ class LaneScheduler:
             holder_path.unlink(missing_ok=True)
             return None
 
-        if not _pid_is_alive(holder.pid):
+        if holder.lock_owned:
+            # The ticket keeps this inode locked until release/process death.
+            # A reused PID cannot keep an abandoned reservation alive.
+            with holder_path.open("r", encoding="utf-8") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    live = True
+                else:
+                    live = False
+        else:
+            # Preserve capacity for live pre-lock holders during upgrades.
+            live = _pid_is_alive(holder.pid)
+        if not live:
             _LOGGER.warning(
                 "lane_scheduler reclaimed dead holder lane=%s pid=%s token=%s",
                 holder.lane,

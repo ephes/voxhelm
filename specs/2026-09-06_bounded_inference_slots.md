@@ -11,6 +11,12 @@ amendment in `decision-log.md` keeps old live holders counted, uses age only for
 warnings and documents orphan recovery. Dead-PID and invalid-state cleanup remain.
 The current README describes operation; this amendment has no new deployment claim.
 
+**Ownership amendment 2026-11-08 (not a deployment claim):** New tickets hold an
+OS lock on their holder inode through release; unlocked marked records can be
+reclaimed even after PID reuse. Older unmarked records retain PID liveness.
+Cancellation also interrupts control-lock waits and cleans its waiter without
+reacquiring the lock. See the D-24 ownership amendment and current README.
+
 ## Verified results (2026-09-06, studio, content-free synthetic audio)
 
 Method: a 20-minute mono MP3 (48 kbps, 7.2 MB) generated locally with `say`

@@ -13,7 +13,11 @@ from typing import Any, Protocol
 from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+from transcriptions.audio_decode import AudioDecodeError, run_audio_decode
 from transcriptions.service import TranscriptionResult
+
+# Two hours of 16 kHz PCM; bound the compressed-to-decoded expansion.
+PYANNOTE_MAX_FRAMES = 2 * 60 * 60 * 16000
 
 
 @dataclass(frozen=True)
@@ -87,41 +91,53 @@ def load_audio_for_pyannote(audio_path: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="voxhelm-pyannote-") as temp_dir:
         wav_path = Path(temp_dir) / "audio.wav"
         try:
-            subprocess.run(
+            run_audio_decode(
                 [
                     settings.VOXHELM_FFMPEG_BIN,
                     "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostats",
                     "-y",
                     "-i",
                     str(audio_path),
+                    "-t",
+                    str((PYANNOTE_MAX_FRAMES + 1) / 16000),
                     "-ac",
                     "1",
                     "-ar",
                     "16000",
+                    "-c:a",
+                    "pcm_s16le",
                     "-f",
                     "wav",
                     str(wav_path),
                 ],
                 timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
             )
         except subprocess.TimeoutExpired as exc:
             raise DiarizationError(
                 "Audio decode for pyannote diarization exceeded the configured decode deadline."
             ) from exc
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except (OSError, subprocess.CalledProcessError, AudioDecodeError) as exc:
             raise DiarizationError("Could not decode audio for pyannote diarization.") from exc
 
-        with wave.open(str(wav_path), "rb") as wav_file:
-            sample_rate = wav_file.getframerate()
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            frames = wav_file.readframes(wav_file.getnframes())
-
-    if channels != 1 or sample_width != 2:
-        raise DiarizationError("Decoded diarization audio was not 16-bit mono PCM WAV.")
+        try:
+            with wave.open(str(wav_path), "rb") as wav_file:
+                sample_rate = wav_file.getframerate()
+                if (wav_file.getnchannels(), wav_file.getsampwidth(), sample_rate) != (1, 2, 16000):
+                    raise DiarizationError(
+                        "Decoded diarization audio was not 16 kHz 16-bit mono PCM WAV."
+                    )
+                frame_count = wav_file.getnframes()
+                if frame_count > PYANNOTE_MAX_FRAMES:
+                    raise DiarizationError("Diarization audio exceeded the decoded frame limit.")
+                frames = wav_file.readframes(frame_count)
+                if len(frames) != frame_count * 2:
+                    raise DiarizationError("Decoded diarization audio contained truncated PCM.")
+        except (OSError, EOFError, wave.Error) as exc:
+            raise DiarizationError("Could not read decoded diarization audio.") from exc
 
     samples = numpy.frombuffer(frames, dtype=numpy.dtype("<i2")).astype("float32") / 32768.0
     waveform = torch.from_numpy(samples).unsqueeze(0)
@@ -188,21 +204,22 @@ class PyannoteDiarizationBackend:
             )
 
         try:
-            self._pipeline = pipeline_cls.from_pretrained(
+            candidate = pipeline_cls.from_pretrained(
                 self.model_name,
                 token=self.auth_token,
             )
         except TypeError:
-            self._pipeline = pipeline_cls.from_pretrained(
+            candidate = pipeline_cls.from_pretrained(
                 self.model_name,
                 use_auth_token=self.auth_token,
             )
-        if self._pipeline is None:
+        if candidate is None:
             raise DiarizationBackendUnavailableError(
                 f"pyannote.audio could not load diarization model '{self.model_name}'."
             )
-        self._pipeline.to(resolve_pyannote_device(self.device_name))
-        return self._pipeline
+        candidate.to(resolve_pyannote_device(self.device_name))
+        self._pipeline = candidate
+        return candidate
 
 
 _DIARIZATION_LOCK = Lock()
