@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Drop non-finite diarization turns and align speakers through an interval index
+  instead of scanning every turn per segment; refuse negative, inverted or absurd
+  chapter-window word offsets and cap whisper.cpp window JSON at 8 MiB.
+- Remote completions: cap manifests at 32 artifacts before any store access,
+  enforce artifact column limits and 64-bit sizes, and refuse two artifacts that
+  name the same storage object.
+- Run whisper.cpp audio normalization at error log level in its own process group,
+  logging only a 2 KiB stderr prefix and discarding the rest (never returned); rotate failing expired staged uploads
+  behind healthy ones during bounded admission cleanup.
+
 - Speech API: refuse NaN/Infinity, over-long integers, parser nesting limits,
   boolean and overflowing `speed` values as HTTP 400; return a fixed public
   message for synthesis/export failures (missing voices and Kokoro text without

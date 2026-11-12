@@ -62,6 +62,9 @@ WINDOW_MODEL_SHA256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e
 # them out of its verbose_json words, which is what the research runner read.
 WHISPER_TOKEN_EOT = 50257
 WINDOW_SECONDS = 30.0
+# whisper.cpp's JSON for one short clip is tens to hundreds of KiB; refuse anything
+# far larger before it is read into memory and parsed.
+WINDOW_JSON_MAX_BYTES = 8 * 1024 * 1024
 WINDOW_PAD_SECONDS = 1.0
 SAMPLE_RATE = 16000
 _PUNCTUATION = ".,!?;:"
@@ -227,12 +230,12 @@ def transcribe_window(
             raise RuntimeError(f"whisper.cpp window transcription failed: {_log_tail(completed)}")
         json_path = output_base.with_suffix(".json")
         try:
-            raw = json_path.read_bytes()
+            raw = read_window_json(json_path)
         except OSError as exc:
             raise RuntimeError("whisper.cpp window transcription produced no JSON output.") from exc
         try:
             payload = json.loads(raw.decode("utf-8", errors="replace"), strict=False)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
             raise RuntimeError("whisper.cpp window transcription produced invalid JSON.") from exc
         language, probability = detected_language(completed.stderr, payload)
     words = window_words(payload, clip_start=clip_start, t=float(t))
@@ -248,6 +251,22 @@ def transcribe_window(
         words=words,
         identity=identity,
     )
+
+
+def read_window_json(path: Path, *, limit: int = WINDOW_JSON_MAX_BYTES) -> bytes:
+    """Read whisper.cpp's native JSON output, refusing files over ``limit`` bytes.
+
+    Reads at most ``limit + 1`` bytes from the open file, so a file that grows after
+    a size check cannot slip past the cap. Raises ``RuntimeError`` when over the cap
+    and ``OSError`` when the file cannot be read.
+    """
+    with path.open("rb") as handle:
+        raw = handle.read(limit + 1)
+    if len(raw) > limit:
+        raise RuntimeError(
+            f"whisper.cpp JSON output exceeded the {limit // (1024 * 1024)} MiB window limit."
+        )
+    return raw
 
 
 def raise_if_cancelled(cancel_event: threading.Event | None) -> None:

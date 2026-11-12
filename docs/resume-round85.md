@@ -1,5 +1,21 @@
 # Round 85 resume note
 
+## B17–B19 outcome (2026-11-12)
+
+The full scout report was not reachable from the implementing host, so the nine
+slices were implemented from their slugs after confirming each gap on `main`:
+finite diarization turn domain, an interval index for speaker alignment
+(`SpeakerTurnIndex`), chapter word offsets bounded to the clip, a 32-artifact
+manifest preflight, artifact column/size domain, normalized storage-key
+uniqueness, rotation of failing staged cleanup rows, an 8 MiB whisper.cpp window
+JSON cap, and the normalizer on the shared owned-process runner
+(`transcriptions/owned_process.py`, also used by speech export). Regressions:
+`tests/test_round85_bounds.py` (regressions fail on the previous `main`; the index
+equivalence and control cases pass on both). Three Opus review rounds: round 1's
+normalizer-overflow and chapter-offset warnings were fixed (noisy decodes drain
+instead of failing; offsets checked on kept words with a 2x-clip bound); rounds
+2–3 clean apart from a doc wording fix. Round 85 is complete.
+
 ## B16 finisher outcome (2026-11-12)
 
 Rebased onto `main` after the round-82 merge and reviewed together with the other

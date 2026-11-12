@@ -51,6 +51,17 @@ class OverlappingBackend:
         return TranscriptionResult(text="ok", language="en", segments=[])
 
 
+def owned_process_from(fake_run):
+    """Adapt a ``subprocess.run``-style ffmpeg fake to ``run_owned_process``."""
+
+    def run(args, *, timeout, messages, **kwargs):
+        completed = fake_run(args, timeout=timeout)
+        if completed.returncode:
+            raise RuntimeError(messages.failure)
+
+    return run
+
+
 def _run_in_threads(target, count: int = 2) -> list[BaseException]:
     errors: list[BaseException] = []
 
@@ -585,8 +596,6 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
     )
 
     def fake_run(args, **kwargs):
-        assert kwargs["encoding"] == "utf-8"
-        assert kwargs["errors"] == "replace"
         call = [str(part) for part in args]
         calls.append(call)
         assert call[0] == settings.VOXHELM_FFMPEG_BIN
@@ -615,7 +624,7 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
         )
         return subprocess.CompletedProcess(call, 0, "", "")
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+    monkeypatch.setattr("transcriptions.service.run_owned_process", owned_process_from(fake_run))
     monkeypatch.setattr("transcriptions.service.run_cancellable_process", fake_whisper_cli)
 
     result = backend.transcribe(
@@ -624,9 +633,13 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
     )
 
     assert len(calls) == 2
-    assert calls[0][:6] == [
+    assert calls[0][:10] == [
         settings.VOXHELM_FFMPEG_BIN,
         "-nostdin",
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
         "-y",
         "-i",
         str(input_path),
@@ -692,7 +705,7 @@ def _capture_whispercpp_args(
         )
         return subprocess.CompletedProcess(call, 0, "", "")
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+    monkeypatch.setattr("transcriptions.service.run_owned_process", owned_process_from(fake_run))
     monkeypatch.setattr("transcriptions.service.run_cancellable_process", fake_whisper_cli)
     backend.transcribe(
         input_path,
@@ -777,7 +790,7 @@ def test_build_backend_service_wires_anti_hallucination_settings(settings) -> No
 
 
 def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(
-    monkeypatch, tmp_path: Path, settings
+    monkeypatch, tmp_path: Path, settings, caplog
 ) -> None:
     backend = WhisperCppBackend(
         binary_path="/tmp/fake-whisper-cli",
@@ -799,29 +812,30 @@ def test_whispercpp_backend_surfaces_ffmpeg_normalization_failure(
         lambda _name: model_path,
     )
 
-    def fake_run(args, **kwargs):
-        del args, kwargs
-        return type(
-            "Completed",
-            (),
-            {"returncode": 1, "stderr": "decoder exploded", "stdout": ""},
-        )()
+    fake_ffmpeg = tmp_path / "failing-ffmpeg.py"
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\nsys.stderr.write('decoder exploded')\nraise SystemExit(1)\n"
+    )
+    fake_ffmpeg.chmod(0o755)
+    settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
-
-    try:
-        backend.transcribe(
-            input_path,
-            TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
-        )
-    except RuntimeError as exc:
-        assert str(exc) == "ffmpeg audio normalization failed: decoder exploded"
-    else:  # pragma: no cover
-        raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
+    with caplog.at_level("WARNING", logger="transcriptions.owned_process"):
+        try:
+            backend.transcribe(
+                input_path,
+                TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
+            )
+        except RuntimeError as exc:
+            # Tool output stays in the operator log, out of the public error.
+            assert str(exc) == "ffmpeg audio normalization failed."
+        else:  # pragma: no cover
+            raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
+    assert "decoder exploded" in caplog.text
 
 
 def test_whispercpp_audio_normalization_handles_non_utf8_ffmpeg_stderr(
-    tmp_path: Path, settings
+    tmp_path: Path, settings, caplog
 ) -> None:
     fake_ffmpeg = tmp_path / "fake-ffmpeg.py"
     fake_ffmpeg.write_text(
@@ -837,12 +851,10 @@ def test_whispercpp_audio_normalization_handles_non_utf8_ffmpeg_stderr(
     output_path = tmp_path / "normalized.wav"
     settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
 
-    try:
-        normalize_audio_to_wav_16k_mono(input_path=input_path, output_path=output_path)
-    except RuntimeError as exc:
-        assert str(exc) == "ffmpeg audio normalization failed: bad byte: �"
-    else:  # pragma: no cover
-        raise AssertionError("Expected ffmpeg normalization failure to raise RuntimeError.")
+    with caplog.at_level("WARNING", logger="transcriptions.owned_process"):
+        with pytest.raises(RuntimeError, match=r"^ffmpeg audio normalization failed\.$"):
+            normalize_audio_to_wav_16k_mono(input_path=input_path, output_path=output_path)
+    assert "bad byte: \ufffd" in caplog.text
 
 
 def test_whispercpp_backend_raises_when_transcript_json_is_missing(
@@ -875,7 +887,7 @@ def test_whispercpp_backend_raises_when_transcript_json_is_missing(
         Path(call[-1]).write_bytes(b"RIFFfakewav")
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+    monkeypatch.setattr("transcriptions.service.run_owned_process", owned_process_from(fake_run))
     monkeypatch.setattr(
         "transcriptions.service.run_cancellable_process",
         lambda args, **kwargs: subprocess.CompletedProcess([str(part) for part in args], 0, "", ""),
@@ -1325,7 +1337,7 @@ def test_whispercpp_backend_raises_before_starting_whisper_cli_when_cancelled(
         whisper_cli_calls.append([str(part) for part in args])
         raise AssertionError("whisper-cli must not start after cancellation.")
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_run)
+    monkeypatch.setattr("transcriptions.service.run_owned_process", owned_process_from(fake_run))
     monkeypatch.setattr("transcriptions.service.run_cancellable_process", fake_whisper_cli)
 
     with pytest.raises(InferenceCancelled):
@@ -1397,7 +1409,9 @@ def test_transcribe_audio_kills_real_whisper_cli_and_releases_the_slot(
         Path(call[-1]).write_bytes(b"RIFFfakewav")
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
-    monkeypatch.setattr("transcriptions.service.subprocess.run", fake_ffmpeg_run)
+    monkeypatch.setattr(
+        "transcriptions.service.run_owned_process", owned_process_from(fake_ffmpeg_run)
+    )
     backend = WhisperCppBackend(
         binary_path=str(fake_cli),
         model_name="ggml-large-v3.bin",

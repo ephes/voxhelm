@@ -24,6 +24,7 @@ from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
 from transcriptions import formats as transcript_formats
+from transcriptions.owned_process import OwnedProcessMessages, run_owned_process
 from transcriptions.sanitizer import sanitize_result
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
@@ -268,46 +269,49 @@ class WhisperCppBackend:
         return normalize_whispercpp_payload(payload, model_name=self.model_name)
 
 
-def normalize_audio_to_wav_16k_mono(*, input_path: Path, output_path: Path) -> None:
-    try:
-        completed = subprocess.run(
-            [
-                settings.VOXHELM_FFMPEG_BIN,
-                "-nostdin",
-                "-y",
-                "-i",
-                str(input_path),
-                "-vn",
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                "-c:a",
-                "pcm_s16le",
-                str(output_path),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            "ffmpeg audio normalization exceeded the configured decode deadline."
-        ) from exc
-    if completed.returncode == 0 and output_path.exists():
-        return
+NORMALIZATION_MESSAGES = OwnedProcessMessages(
+    start="ffmpeg audio normalization could not start ffmpeg.",
+    deadline="ffmpeg audio normalization exceeded the configured decode deadline.",
+    diagnostics="ffmpeg audio normalization exceeded the diagnostic output limit.",
+    failure="ffmpeg audio normalization failed.",
+)
 
-    detail = "\n".join(
-        part.strip()
-        for part in (completed.stderr, completed.stdout)
-        if isinstance(part, str) and part.strip()
+
+def normalize_audio_to_wav_16k_mono(*, input_path: Path, output_path: Path) -> None:
+    """Decode to 16 kHz mono PCM WAV with an owned process tree and bounded diagnostics.
+
+    ffmpeg runs in its own process group under ``VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS``
+    at error log level; a 2 KiB stderr prefix is logged on failure and the rest is
+    drained and discarded. Tool output never goes into the raised error.
+    """
+    run_owned_process(
+        [
+            settings.VOXHELM_FFMPEG_BIN,
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ],
+        timeout=settings.VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS,
+        messages=NORMALIZATION_MESSAGES,
+        # Damaged but decodable user media can log many errors; keep memory bounded
+        # without failing a decode that succeeds.
+        fail_on_diagnostic_overflow=False,
     )
-    if detail:
-        raise RuntimeError(f"ffmpeg audio normalization failed: {detail}")
-    raise RuntimeError("ffmpeg audio normalization failed.")
+    if not output_path.exists():
+        raise RuntimeError(NORMALIZATION_MESSAGES.failure)
 
 
 class ParakeetBackend:

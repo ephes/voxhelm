@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import math
 import subprocess
 import tempfile
 import wave
+from bisect import bisect_left
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -327,11 +330,12 @@ def apply_speaker_labels(
 
     labeled_segments = []
     assigned_count = 0
+    turn_index = SpeakerTurnIndex(normalized_turns)
     for segment in result.segments:
         speaker = choose_speaker_for_segment(
             segment_start=segment.start,
             segment_end=segment.end,
-            turns=normalized_turns,
+            turns=turn_index,
         )
         if speaker is not None:
             assigned_count += 1
@@ -344,7 +348,10 @@ def apply_speaker_labels(
 def normalize_speaker_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
     labels_by_backend_label: dict[str, str] = {}
     normalized_turns: list[SpeakerTurn] = []
-    for turn in sorted(turns, key=lambda item: (item.start, item.end, item.speaker)):
+    # Non-finite times are outside the turn domain: NaN breaks ordering and overlap
+    # arithmetic, and an infinite bound would claim every segment. Drop them first.
+    finite_turns = [turn for turn in turns if math.isfinite(turn.start) and math.isfinite(turn.end)]
+    for turn in sorted(finite_turns, key=lambda item: (item.start, item.end, item.speaker)):
         backend_label = turn.speaker.strip()
         if not backend_label:
             continue
@@ -364,19 +371,75 @@ def normalize_speaker_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
     return normalized_turns
 
 
+class SpeakerTurnIndex:
+    """Overlap queries over speaker turns without scanning every turn per segment.
+
+    A max-end segment tree over the turns ordered by start answers "which turns
+    overlap ``[start, end)``" in O((k + 1) log n) for k overlapping turns, so
+    aligning S segments costs O((S + overlaps) log n) instead of O(S * n).
+    Results are the original turn indices in ascending order, so callers see the
+    same candidates in the same order as a full scan.
+    """
+
+    def __init__(self, turns: Sequence[SpeakerTurn]) -> None:
+        self.turns = list(turns)
+        self._order = sorted(range(len(self.turns)), key=lambda i: self.turns[i].start)
+        self._starts = [self.turns[i].start for i in self._order]
+        size = 1
+        while size < len(self._order):
+            size *= 2
+        self._size = size
+        tree = [-math.inf] * (2 * size)
+        for position, index in enumerate(self._order):
+            tree[size + position] = self.turns[index].end
+        for node in range(size - 1, 0, -1):
+            tree[node] = max(tree[2 * node], tree[2 * node + 1])
+        self._tree = tree
+
+    def overlapping(self, start: float, end: float) -> list[int]:
+        """Indices of turns with ``turn.start < end`` and ``turn.end > start``."""
+        limit = bisect_left(self._starts, end)
+        found: list[int] = []
+        stack = [(1, 0, self._size)]
+        while stack:
+            node, low, high = stack.pop()
+            if low >= limit or self._tree[node] <= start:
+                continue
+            if high - low == 1:
+                found.append(self._order[low])
+                continue
+            middle = (low + high) // 2
+            stack.append((2 * node + 1, middle, high))
+            stack.append((2 * node, low, middle))
+        found.sort()
+        return found
+
+
+def overlapping_turns(
+    turns: Sequence[SpeakerTurn] | SpeakerTurnIndex, start: float, end: float
+) -> list[tuple[int, SpeakerTurn]]:
+    """``(index, turn)`` pairs that may overlap ``[start, end)``, in turn order."""
+    if isinstance(turns, SpeakerTurnIndex):
+        return [(index, turns.turns[index]) for index in turns.overlapping(start, end)]
+    return list(enumerate(turns))
+
+
 def choose_speaker_for_segment(
     *,
     segment_start: float,
     segment_end: float,
-    turns: list[SpeakerTurn],
+    turns: Sequence[SpeakerTurn] | SpeakerTurnIndex,
 ) -> str | None:
+    if not (math.isfinite(segment_start) and math.isfinite(segment_end)):
+        # A segment without a finite time cannot be aligned to any turn.
+        return None
     start = min(segment_start, segment_end)
     end = max(segment_start, segment_end)
     if end <= start:
         return None
 
     candidates: list[tuple[float, float, float, str, int]] = []
-    for index, turn in enumerate(turns):
+    for index, turn in overlapping_turns(turns, start, end):
         overlap = min(end, turn.end) - max(start, turn.start)
         if overlap <= 0:
             continue

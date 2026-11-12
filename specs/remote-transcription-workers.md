@@ -436,6 +436,7 @@ Completion rules:
 - Artifact `storage_key` values must be under the claimed attempt-scoped artifact prefix.
 - Each manifest object must already exist in the configured artifact store and its stored byte size must match `size_bytes`; missing or mismatched objects are rejected before `studio` marks the job succeeded.
 - Artifact names must match existing Voxhelm artifact naming rules and be unique per job.
+- A manifest lists at most 32 artifacts (refused before any store access); artifact names, storage keys and content types must fit their columns without NUL characters, `size_bytes` must fit a signed 64-bit integer, and storage keys must be unique per job after collapsing `//` and `.` path segments.
 - Transcript output formats must match the job's requested `output.formats`.
 - Known-speaker jobs must include the `transcript_speakers` artifact (`transcript.speakers.json`) and `result_metadata.diarization.known_speaker_summary` when the request strategy is `pyannote_known_speaker`.
 - `transcript_speakers` artifacts are rejected for jobs that did not request `pyannote_known_speaker`.

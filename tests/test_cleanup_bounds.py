@@ -246,7 +246,11 @@ def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch
     assert attempted == [row.storage_key for row in candidates[:4]]
     assert StagedMedia.objects.filter(pk=fresh.pk).exists()
     assert StagedMedia.objects.filter(pk=failed.pk).exists()
-    assert StagedMedia.objects.filter(expires_at=expired).count() == 3
+    # The two unattempted rows keep their expiry; the failed one is deferred behind
+    # them (still expired) so it cannot starve later bounded passes.
+    assert StagedMedia.objects.filter(expires_at=expired).count() == 2
+    failed.refresh_from_db()
+    assert expired < failed.expires_at <= timezone.now()
     assert str(failed.pk) in caplog.text
     assert "synthetic-private" not in caplog.text
     assert "private.invalid" not in caplog.text
