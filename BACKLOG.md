@@ -108,6 +108,12 @@ Spec: `specs/2026-09-06_bounded_inference_slots.md`.
 - [x] B07: bind chunks to supported AudioStart geometry (8–192 kHz, 1/2/4-byte samples, mono/stereo)
   and whole frames, preflight the cumulative converted frame budget, and reset resampler history
   at Transcribe/AudioStart.
+- [x] B08–B10: clean up synthesis output that finishes after cancellation, abort non-reading clients after a
+  30-second write deadline, cap open connections and pre-thread inference admission
+  (`VOXHELM_WYOMING_MAX_CONNECTIONS`, `VOXHELM_WYOMING_MAX_INFERENCE_THREADS`), redact failure diagnostics, and
+  cancel/close all handlers on server stop or cancellation.
+- [ ] Expose `VOXHELM_WYOMING_MAX_CONNECTIONS` / `VOXHELM_WYOMING_MAX_INFERENCE_THREADS` in the ops-library
+  `voxhelm_deploy` role if non-default limits are needed.
 - [x] Validate consumed typed event fields before state changes/inference and close malformed clients.
 - [x] Bound complete event reads (header and both bodies) by one 30-second elapsed deadline.
 - [x] Cap buffered Wyoming STT audio with `VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS` (default 120 s, checked on the

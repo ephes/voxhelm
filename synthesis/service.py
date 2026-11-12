@@ -114,6 +114,10 @@ class BackendUnavailableError(RuntimeError):
     """Raised when a synthesis backend is not available on the current host."""
 
 
+class VoiceNotInstalledError(RuntimeError):
+    """A client requested a voice that is not installed; the message is client-facing."""
+
+
 class BackendProtocol(Protocol):
     def synthesize(self, text: str, params: SynthesizeParams) -> SynthesisResult: ...
 
@@ -212,7 +216,7 @@ class PiperBackend:
             resolved_language = self.language_voices.get(normalize_language_key(requested_voice))
             if resolved_language and resolved_language in installed:
                 return installed[resolved_language]
-            raise RuntimeError(
+            raise VoiceNotInstalledError(
                 f"Requested voice '{requested_voice}' is not installed. "
                 f"Available voices: {', '.join(sorted(installed))}."
             )

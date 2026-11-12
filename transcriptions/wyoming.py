@@ -7,9 +7,11 @@ import logging
 import os
 import signal
 import tempfile
+import threading
 import time
 import wave
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from django.conf import settings
@@ -17,7 +19,7 @@ from django.core.exceptions import ImproperlyConfigured
 from wyoming.asr import Transcribe, Transcript
 from wyoming.audio import AudioChunk, AudioChunkConverter, AudioStart, AudioStop
 from wyoming.error import Error
-from wyoming.event import Event
+from wyoming.event import Event, async_write_event
 from wyoming.info import (
     AsrModel,
     AsrProgram,
@@ -34,11 +36,13 @@ from wyoming.tts import Synthesize
 from lane_scheduler import LANE_INTERACTIVE
 from synthesis.service import (
     SynthesizeParams,
+    VoiceNotInstalledError,
     build_voice_registry,
     cleanup_paths,
     synthesize_text,
 )
 
+from .errors import ApiError
 from .observability import emit_transcription_debug_log
 from .service import (
     TranscribeParams,
@@ -57,6 +61,9 @@ _CONVERTED_BYTES_PER_SECOND = _CONVERTED_RATE * _CONVERTED_WIDTH * _CONVERTED_CH
 DEFAULT_MAX_AUDIO_SECONDS = 120
 DEFAULT_MAX_EVENT_DATA_BYTES = 256 * 1024
 EVENT_READ_TIMEOUT_SECONDS = 30
+EVENT_WRITE_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_CONNECTIONS = 16
+DEFAULT_MAX_INFERENCE_THREADS = 4
 
 _PIPER_ATTRIBUTION = Attribution(
     name="Piper",
@@ -93,6 +100,8 @@ class WyomingSttConfig:
     max_event_data_bytes: int = DEFAULT_MAX_EVENT_DATA_BYTES
     # None derives the per-event payload limit from the STT audio cap.
     max_event_payload_bytes_override: int | None = None
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
+    max_inference_threads: int = DEFAULT_MAX_INFERENCE_THREADS
 
     @property
     def max_audio_bytes(self) -> int:
@@ -191,6 +200,14 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         raise ImproperlyConfigured(
             "VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES must be a positive integer."
         )
+    max_connections = settings.VOXHELM_WYOMING_MAX_CONNECTIONS
+    if max_connections <= 0:
+        raise ImproperlyConfigured("VOXHELM_WYOMING_MAX_CONNECTIONS must be a positive integer.")
+    max_inference_threads = settings.VOXHELM_WYOMING_MAX_INFERENCE_THREADS
+    if max_inference_threads <= 0:
+        raise ImproperlyConfigured(
+            "VOXHELM_WYOMING_MAX_INFERENCE_THREADS must be a positive integer."
+        )
     return WyomingSttConfig(
         host=settings.VOXHELM_WYOMING_STT_HOST,
         port=settings.VOXHELM_WYOMING_STT_PORT,
@@ -202,6 +219,8 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         max_audio_seconds=max_audio_seconds,
         max_event_data_bytes=max_event_data_bytes,
         max_event_payload_bytes_override=max_event_payload_bytes,
+        max_connections=max_connections,
+        max_inference_threads=max_inference_threads,
     )
 
 
@@ -259,6 +278,117 @@ def build_wyoming_info(config: WyomingSttConfig) -> Info:
             )
         ],
     )
+
+
+@dataclass
+class WyomingAdmission:
+    """Process-wide connection and inference-thread admission for one server.
+
+    The inference count is released by the worker thread itself when it finishes,
+    so threads that outlive a cancelled or disconnected request keep counting.
+    """
+
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
+    max_inference_threads: int = DEFAULT_MAX_INFERENCE_THREADS
+    connections: int = 0
+    inference_threads: int = 0
+    closing: bool = False
+    handlers: dict[asyncio.Task, WyomingSttEventHandler] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def try_open_connection(self) -> bool:
+        with self.lock:
+            if self.connections >= self.max_connections:
+                return False
+            self.connections += 1
+            return True
+
+    def close_connection(self) -> None:
+        with self.lock:
+            self.connections -= 1
+
+    def try_start_inference(self) -> bool:
+        with self.lock:
+            if self.inference_threads >= self.max_inference_threads:
+                return False
+            self.inference_threads += 1
+            return True
+
+    def finish_inference(self) -> None:
+        with self.lock:
+            self.inference_threads -= 1
+
+
+class WyomingInferenceBusy(Exception):
+    """No inference thread could be admitted for this request."""
+
+
+class WyomingWriteTimeout(Exception):
+    """A client did not accept an outbound event before the write deadline."""
+
+
+class _OwnedResult:
+    """Hand a worker result to its awaiting request, or clean it up if abandoned."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.abandoned = False
+        self.result: object | None = None
+
+
+async def run_owned_inference[T](
+    admission: WyomingAdmission,
+    func: Callable[[], T],
+    *,
+    cleanup: Callable[[T], None] | None = None,
+) -> T:
+    """Run ``func`` in a thread after admission; never leak its result on cancellation.
+
+    Cancellation cannot stop the thread. If the awaiting request is cancelled first,
+    the thread cleans up its own result when it finishes; if the thread finished
+    first, the cancelled request cleans it up. Cleanup never depends on the event
+    loop still running.
+    """
+    if not admission.try_start_inference():
+        raise WyomingInferenceBusy
+    owned = _OwnedResult()
+
+    def call() -> T:
+        try:
+            result = func()
+            with owned.lock:
+                if not owned.abandoned:
+                    owned.result = result
+                    return result
+            if cleanup is not None:
+                cleanup(result)
+            return result
+        finally:
+            admission.finish_inference()
+
+    try:
+        return await asyncio.to_thread(call)
+    except asyncio.CancelledError:
+        with owned.lock:
+            owned.abandoned = True
+            delivered = owned.result
+            owned.result = None
+        if delivered is not None and cleanup is not None:
+            cleanup(delivered)  # type: ignore[arg-type]
+        raise
+
+
+def _cleanup_speech_result(result: object) -> None:
+    cleanup_paths(result.audio_path)  # type: ignore[attr-defined]
+
+
+def _public_failure_text(exc: Exception, fallback: str) -> str:
+    """Only request errors are client-facing; other diagnostics stay in the server log."""
+    if isinstance(exc, ApiError):
+        return exc.message
+    if isinstance(exc, VoiceNotInstalledError):
+        return str(exc)
+    return fallback
 
 
 class WyomingEventRejected(Exception):
@@ -408,10 +538,15 @@ class WyomingSttEventHandler(AsyncEventHandler):
         config: WyomingSttConfig,
         info: Info,
         *args,
+        admission: WyomingAdmission | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.config = config
+        self.admission = admission or WyomingAdmission(
+            max_connections=config.max_connections,
+            max_inference_threads=config.max_inference_threads,
+        )
         self.info_event = info.event()
         self._reset_audio()
         self.request_model = config.model
@@ -434,7 +569,23 @@ class WyomingSttEventHandler(AsyncEventHandler):
         connection when the loop ends.
         """
         self._is_running = True
+        task = asyncio.current_task()
+        admitted = not self.admission.closing and self.admission.try_open_connection()
+        if task is not None:
+            self.admission.handlers[task] = self
         try:
+            if not admitted:
+                if self.admission.closing:
+                    _LOGGER.info("Wyoming connection refused: server is shutting down")
+                else:
+                    _LOGGER.warning(
+                        "Wyoming connection refused: %s active connections",
+                        self.config.max_connections,
+                    )
+                await self.write_event(
+                    Error(text="Too many active connections.", code="server_busy").event()
+                )
+                return
             while self._is_running:
                 try:
                     event = await read_bounded_event(
@@ -450,11 +601,44 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     break
                 if not (await self.handle_event(event)):
                     break
+        except (WyomingWriteTimeout, ConnectionError) as exc:
+            _LOGGER.warning("Wyoming client write failed: %s", type(exc).__name__)
         finally:
-            await self.disconnect()
-            # The library leaves the transport open when the loop ends; close it so a
-            # refused or finished client does not keep the socket.
+            if admitted:
+                self.admission.close_connection()
+            if task is not None:
+                self.admission.handlers.pop(task, None)
+            try:
+                await self.disconnect()
+            finally:
+                # The library leaves the transport open when the loop ends; close it so
+                # a refused, finished or cancelled client does not keep the socket.
+                self.writer.close()
+
+    def abort(self) -> None:
+        """Drop the connection immediately, discarding any unsent output."""
+        self._is_running = False
+        transport = getattr(self.writer, "transport", None)
+        if transport is not None:
+            transport.abort()
+        else:
             self.writer.close()
+
+    async def write_event(self, event: Event) -> None:
+        """Write one event, aborting the connection if the client stops reading."""
+        try:
+            async with asyncio.timeout(EVENT_WRITE_TIMEOUT_SECONDS):
+                await async_write_event(event, self.writer)
+        except TimeoutError as exc:
+            self.abort()
+            raise WyomingWriteTimeout("Outbound event write deadline exceeded.") from exc
+
+    async def _write_busy(self) -> None:
+        _LOGGER.warning(
+            "Wyoming inference refused: %s inference threads active",
+            self.config.max_inference_threads,
+        )
+        await self.write_event(Error(text="Inference capacity is busy.", code="busy").event())
 
     async def handle_event(self, event: Event) -> bool:
         try:
@@ -492,22 +676,33 @@ class WyomingSttEventHandler(AsyncEventHandler):
             if synthesize.voice is not None:
                 requested_voice = synthesize.voice.name
                 requested_language = synthesize.voice.language
+            params = SynthesizeParams(
+                request_model="auto",
+                voice=requested_voice,
+                language=requested_language,
+                speed=1.0,
+                scheduler_lane=LANE_INTERACTIVE,
+            )
             try:
-                speech_result = await asyncio.to_thread(
-                    synthesize_text,
-                    text,
-                    SynthesizeParams(
-                        request_model="auto",
-                        voice=requested_voice,
-                        language=requested_language,
-                        speed=1.0,
-                        scheduler_lane=LANE_INTERACTIVE,
-                    ),
+                speech_result = await run_owned_inference(
+                    self.admission,
+                    lambda: synthesize_text(text, params),
+                    cleanup=_cleanup_speech_result,
                 )
                 await self._write_synthesized_audio(speech_result.audio_path)
+            except WyomingInferenceBusy:
+                await self._write_busy()
+                return False
+            except WyomingWriteTimeout, ConnectionError:
+                raise
             except Exception as exc:
                 _LOGGER.exception("Wyoming TTS synthesis failed")
-                await self.write_event(Error(text=str(exc), code="synthesis_failed").event())
+                await self.write_event(
+                    Error(
+                        text=_public_failure_text(exc, "Speech synthesis failed."),
+                        code="synthesis_failed",
+                    ).event()
+                )
             finally:
                 if speech_result is not None:
                     cleanup_paths(speech_result.audio_path)
@@ -581,11 +776,12 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 )
                 return False
 
+            audio_bytes = self.audio_buffer.getvalue()
             try:
                 started_at = time.monotonic()
-                result = await asyncio.to_thread(
-                    self._transcribe_current_audio,
-                    self.audio_buffer.getvalue(),
+                result = await run_owned_inference(
+                    self.admission,
+                    lambda: self._transcribe_current_audio(audio_bytes),
                 )
                 raw_transcript = result.text
                 if settings.VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT:
@@ -595,6 +791,9 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     )
                     if normalized_text and normalized_text != result.text:
                         result = replace(result, text=normalized_text)
+            except WyomingInferenceBusy:
+                await self._write_busy()
+                return False
             except Exception as exc:
                 _LOGGER.exception(
                     "Wyoming STT transcription failed model=%s language=%s audio=%s",
@@ -602,7 +801,12 @@ class WyomingSttEventHandler(AsyncEventHandler):
                     self.request_language or "auto",
                     self.audio_shape.as_dict(),
                 )
-                await self.write_event(Error(text=str(exc), code="transcription_failed").event())
+                await self.write_event(
+                    Error(
+                        text=_public_failure_text(exc, "Transcription failed."),
+                        code="transcription_failed",
+                    ).event()
+                )
                 return False
 
             emit_transcription_debug_log(
@@ -684,6 +888,10 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
     server = AsyncServer.from_uri(resolved_config.uri)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    admission = WyomingAdmission(
+        max_connections=resolved_config.max_connections,
+        max_inference_threads=resolved_config.max_inference_threads,
+    )
 
     for handled_signal in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -695,7 +903,7 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> WyomingSttEventHandler:
-        return WyomingSttEventHandler(resolved_config, info, reader, writer)
+        return WyomingSttEventHandler(resolved_config, info, reader, writer, admission=admission)
 
     await server.start(handler_factory)
     _LOGGER.info(
@@ -706,8 +914,40 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         resolved_config.model,
         resolved_config.language or "auto",
     )
-    await stop_event.wait()
-    await server.stop()
+    try:
+        await stop_event.wait()
+    finally:
+        await shutdown_wyoming_server(server, admission)
+
+
+async def shutdown_wyoming_server(server: AsyncServer, admission: WyomingAdmission) -> None:
+    """Abort and cancel every handler, stop listening, then drop late arrivals.
+
+    Aborting (rather than closing) discards output buffered for a client that stopped
+    reading, so no half-closed transport lingers. Runs on normal stop and when the
+    serving task is cancelled. Inference threads cannot be interrupted; their results
+    are cleaned up when they finish.
+    """
+
+    async def cancel_handlers() -> None:
+        handlers = list(admission.handlers.items())
+        for task, handler in handlers:
+            handler.abort()
+            task.cancel()
+        if handlers:
+            await asyncio.gather(*(task for task, _ in handlers), return_exceptions=True)
+
+    async def shutdown() -> None:
+        # Handlers that start from now on refuse immediately and close.
+        admission.closing = True
+        await cancel_handlers()
+        await server.stop()
+        # Best effort for handlers that already started; any later one sees
+        # ``closing`` and refuses on its own, so correctness does not rely on this yield.
+        await asyncio.sleep(0)
+        await cancel_handlers()
+
+    await asyncio.shield(shutdown())
 
 
 def main() -> None:

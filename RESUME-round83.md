@@ -1,5 +1,21 @@
 # Round 83 resume note
 
+## B08–B10 outcome (2026-11-12)
+
+The full scout report was not reachable from the implementing host, so the six
+slices were implemented from their slugs after confirming each gap on `main`:
+orphaned synthesis output after cancellation is deleted by its owner, outbound
+writes have a 30-second deadline, open connections
+(`VOXHELM_WYOMING_MAX_CONNECTIONS`, 16) and inference threads
+(`VOXHELM_WYOMING_MAX_INFERENCE_THREADS`, 4, checked before the thread starts) are
+capped, failure events no longer carry exception text (missing-voice messages
+stay client-facing via `VoiceNotInstalledError`), and stop/cancellation aborts and
+cancels every handler. Regressions: `tests/test_wyoming_lifecycle.py`.
+Three Opus review rounds: round 1 found a missing-voice regression (fixed) and a
+shutdown-order concern based on a newer wyoming `stop()` (wyoming 1.8.0 does not
+await `wait_closed`; shutdown was still reordered and covered with real TCP
+tests); rounds 2–3 were suggestion-only and applied. Round 83 is complete.
+
 ## B07 finisher outcome (2026-11-08)
 
 Claude finisher reviewed the whole parked B07 diff against `ef4e7d1`. One finding,
