@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.12 (2026-11-12)
+
+Published to PyPI for the remote transcription workers (`atlas`, `studio`),
+which install voxhelm from PyPI and ran 0.1.11 until now. It carries every
+entry below that was written after 0.1.11 (`6594d0f`), in particular the
+worker-side bounds: lease heartbeats that stop work when the lease is lost,
+bounded reference and Pyannote decoding, cancellable lane waits, the 8 MiB
+regular-file window JSON, chapter offsets within the clip length plus 1 s and
+the normalizer in its own bounded process group. The claim-scan and Wyoming
+changes only affect the control plane on `studio`, deployed from source.
+
 - Remote claims: bound every claim scan to 100 hydrated and validated jobs with a
   resumable per-worker cursor (`Worker.claim_scan_cursor`, migration `0013`) so a
   large incompatible backlog is no longer loaded into Python on each poll, and keep
