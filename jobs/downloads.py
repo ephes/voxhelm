@@ -60,11 +60,17 @@ def artifact_response(request: HttpRequest, artifact: JobArtifact) -> HttpRespon
     try:
         store = artifacts.get_artifact_store_for_identity(artifact.storage_identity)
         reader = store.open_reader(key=artifact.storage_key)
-        if isinstance(request, ASGIRequest):
-            # Register only the owner's closer; FileResponse would also register
-            # reader.close and race an in-flight worker after a disconnect.
-            return StreamingHttpResponse(_AsyncDownload(reader), content_type=artifact.content_type)
-        return FileResponse(reader, content_type=artifact.content_type)
+        file_response = FileResponse(reader, content_type=artifact.content_type)
+        if not isinstance(request, ASGIRequest):
+            return file_response
+        # Register only the owner's closer; the FileResponse would also register
+        # reader.close and race an in-flight worker after a disconnect. It is
+        # discarded unclosed and only supplies its computed headers.
+        response = StreamingHttpResponse(_AsyncDownload(reader), content_type=artifact.content_type)
+        for header in ("Content-Length", "Content-Disposition"):
+            if header in file_response:
+                response[header] = file_response[header]
+        return response
     except (OSError, BotoCoreError, ClientError, ValueError, RuntimeError) as exc:
         if reader is not None:
             try:

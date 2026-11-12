@@ -137,6 +137,8 @@ propagates immediately, while the active worker retains the reader until its rea
 settles and closes it exactly once. Response closure also handles streams that
 never started. S3 reads use the transport's 60-second socket read timeout; local
 regular-file reads settle through the filesystem. Closing never races a read.
+ASGI responses keep the `Content-Length` (and any `Content-Disposition`) that a
+filesystem download would send under WSGI.
 
 If filesystem publication and temporary cleanup both fail, the original storage
 error propagates and a fixed cleanup warning is logged without paths or payloads.

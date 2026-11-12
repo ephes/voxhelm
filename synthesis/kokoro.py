@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import tempfile
 import wave
+import zipfile
+import zlib
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -411,7 +413,14 @@ class KokoroBackend:
                     style = np.array(raw_style, dtype=np.float32, copy=True)
                     if not np.isfinite(style).all():
                         raise BackendUnavailableError("Voicepack styles must be finite.")
-            except (OSError, ValueError, TypeError) as exc:
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                EOFError,
+                zipfile.BadZipFile,
+                zlib.error,
+            ) as exc:
                 raise BackendUnavailableError(
                     "Voicepack could not be loaded as numeric styles."
                 ) from exc

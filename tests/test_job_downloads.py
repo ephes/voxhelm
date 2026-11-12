@@ -389,3 +389,36 @@ def test_asgi_cancellation_closes_after_active_storage_read_settles(monkeypatch)
             await sync_to_async(response.close)()
 
     asyncio.run(request())
+
+
+@pytest.mark.django_db(transaction=True)
+def test_asgi_filesystem_download_keeps_content_length(django_user_model, monkeypatch, tmp_path):
+    user = django_user_model.objects.create_user(username="synthetic-length", is_staff=True)
+    job, artifact = artifact_fixture(user)
+    payload = tmp_path / "transcript.txt"
+    payload.write_bytes(b"y" * 70001)
+    readers = []
+
+    def open_reader(**kwargs):
+        readers.append(payload.open("rb"))
+        return readers[-1]
+
+    install_store(
+        monkeypatch,
+        lambda identity: SimpleNamespace(open_reader=open_reader, read_bytes=unbounded_read),
+    )
+
+    async def request():
+        response = await AsyncClient().get(
+            artifact_url(job, False), headers={"Authorization": "Bearer test-token"}
+        )
+        assert response.status_code == 200
+        assert isinstance(response, StreamingHttpResponse)
+        assert response.is_async
+        assert response["Content-Length"] == "70001"
+        body = b"".join([chunk async for chunk in response.streaming_content])
+        await sync_to_async(response.close)()
+        assert len(body) == 70001
+        assert readers[-1].closed
+
+    asyncio.run(request())

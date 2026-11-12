@@ -133,3 +133,32 @@ def test_bad_pack_is_not_cached_and_replacement_recovers(tmp_path, monkeypatch, 
         result.audio_path.unlink()
     finally:
         kokoro.reset_caches()
+
+
+@pytest.mark.parametrize("corruption", ["empty", "truncated", "corrupt-member"])
+def test_unreadable_pack_raises_backend_unavailable_and_is_not_cached(tmp_path, corruption):
+    kokoro.reset_caches()
+    pack = tmp_path / "styles.npz"
+    np.savez_compressed(pack, synthetic=np.ones((3, 1, 256), dtype="float32"))
+    data = pack.read_bytes()
+    if corruption == "empty":
+        pack.write_bytes(b"")
+    elif corruption == "truncated":
+        pack.write_bytes(data[: len(data) // 2])
+    else:
+        # Keep the zip directory intact but corrupt the compressed member payload.
+        start = data.index(b"synthetic.npy") + len(b"synthetic.npy")
+        damaged = bytearray(data)
+        for offset in range(start + 8, start + 40):
+            damaged[offset] ^= 0xFF
+        pack.write_bytes(bytes(damaged))
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"synthetic")
+    config = kokoro.KokoroModelConfig("kokoro-test", model, pack, "synthetic", "en-us")
+    backend = kokoro.KokoroBackend(models={"kokoro-test": config})
+    try:
+        with pytest.raises(BackendUnavailableError, match="[Vv]oicepack"):
+            backend._voicepack(pack, "synthetic")
+        assert not kokoro._VOICEPACK_CACHE
+    finally:
+        kokoro.reset_caches()
