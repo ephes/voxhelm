@@ -19,7 +19,12 @@ from synthesis.kokoro import (
     split_sentences,
     tokenize,
 )
-from synthesis.service import BackendUnavailableError, SynthesizeParams, build_voice_registry
+from synthesis.service import (
+    BackendUnavailableError,
+    SynthesizeParams,
+    VoiceNotInstalledError,
+    build_voice_registry,
+)
 
 # numpy ships only with the optional `kokoro` extra; skip the whole module (rather
 # than crash collection) when it is absent, while still importing it eagerly under
@@ -465,7 +470,7 @@ def test_synthesize_unknown_voice_raises(monkeypatch) -> None:
     params = SynthesizeParams(
         request_model="auto", voice="kokoro-missing", language=None, speed=1.0
     )
-    with pytest.raises(RuntimeError, match="is not configured"):
+    with pytest.raises(VoiceNotInstalledError, match="is not configured"):
         backend.synthesize("Hallo.", params)
 
 

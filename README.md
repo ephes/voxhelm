@@ -281,6 +281,8 @@ export VOXHELM_WYOMING_STT_PROMPT=""
 export VOXHELM_WYOMING_STT_MAX_AUDIO_SECONDS="120"
 export VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES="262144"
 export VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES=""
+export VOXHELM_WYOMING_MAX_CONNECTIONS="16"
+export VOXHELM_WYOMING_MAX_INFERENCE_THREADS="4"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"
@@ -1221,6 +1223,26 @@ the sidecar enforces these input limits per connection:
   `5000`, counted after trimming surrounding whitespace) as
   `POST /v1/audio/speech`. Longer text is answered with an `error` event
   (`code="text_too_long"`) and the connection is closed without synthesizing.
+- `VOXHELM_WYOMING_MAX_CONNECTIONS` (default `16`, must be positive) caps open
+  client connections. A connection over the cap gets one `error` event
+  (`code="server_busy"`) and is closed before any event is read.
+- `VOXHELM_WYOMING_MAX_INFERENCE_THREADS` (default `4`, must be positive) caps
+  synthesis and transcription worker threads, checked before a thread starts.
+  A thread keeps its slot until it actually finishes, even after its client
+  disconnected or the request was cancelled, so abandoned inference cannot pile
+  up. A request over the cap gets `code="busy"` and the connection is closed.
+- Each outbound event must be accepted by the client within 30 seconds; a client
+  that stops reading has its connection aborted.
+- A synthesis result produced after its request was cancelled (client gone or
+  server shutdown) is deleted by the worker thread when it finishes.
+- Failure events (`synthesis_failed`, `transcription_failed`) carry a fixed
+  public text; exception details (paths, decoder output) are only logged.
+- On stop or cancellation the sidecar aborts, cancels and awaits every connection
+  handler and stops listening; each handler releases its transport even if
+  cleanup fails.
+- Inference admission refuses rather than queues: a request over
+  `VOXHELM_WYOMING_MAX_INFERENCE_THREADS` (default `4`) fails immediately with
+  `code="busy"`. The lane scheduler still serializes admitted backend work.
 
 Set `VOXHELM_STT_DEBUG_LOGGING=true` when tuning the HA path. Voxhelm will emit
 one structured `stt_debug` log line per transcription with the input audio

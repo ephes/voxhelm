@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Wyoming: delete synthesis output that finishes after its request was cancelled,
+  abort clients that stop reading after a 30-second write deadline, cap open
+  connections (`VOXHELM_WYOMING_MAX_CONNECTIONS`, default 16) and inference
+  threads before they start (`VOXHELM_WYOMING_MAX_INFERENCE_THREADS`, default 4),
+  send fixed public failure texts instead of exception details (missing-voice
+  messages stay client-facing), and abort and cancel all connection handlers on
+  server stop or cancellation.
+
 - Bound Pyannote decoding to two hours of 16 kHz mono PCM, reject invalid/truncated
   WAVs before waveform allocation, and discard bounded decoder diagnostics.
 - Cache Pyannote pipelines only after successful device placement, allowing retries.

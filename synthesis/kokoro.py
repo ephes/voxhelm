@@ -35,6 +35,7 @@ from synthesis.service import (
     InstalledVoice,
     SynthesisResult,
     SynthesizeParams,
+    VoiceNotInstalledError,
     piper_artifact_identity,
 )
 
@@ -312,7 +313,7 @@ class KokoroBackend:
         if alias is not None:
             return self.models[alias]
         available = ", ".join(sorted(self.models)) or "none configured"
-        raise RuntimeError(
+        raise VoiceNotInstalledError(
             f"Requested Kokoro voice '{requested}' is not configured. "
             f"Available Kokoro voices: {available}."
         )
