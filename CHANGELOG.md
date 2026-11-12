@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.13 (2026-11-12)
+
+Published to PyPI for the remote transcription workers (`atlas`, `studio`),
+which run 0.1.12 from PyPI until now. It carries the remote-worker backoff
+below (`202ffe9`): a worker rejected by the control plane, for example while it
+is disabled during a deploy drain, logs one line per attempt and backs off
+instead of logging a traceback on every poll.
+
 - Remote worker: a worker that the control plane rejects no longer logs a
   traceback on every poll. HTTP 403 on the worker heartbeat or claim happens,
   for example, while the worker is disabled during a deploy drain. The worker
