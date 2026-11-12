@@ -18,6 +18,11 @@ The current slice also adds the first Voxhelm-owned operator UI:
 
 `whisper.cpp` inputs are normalized through `ffmpeg` to 16 kHz mono PCM WAV before
 inference so AAC/M4A and other container/codec quirks do not leak into the backend.
+The normalizer runs ffmpeg at error log level in its own process group: a 2 KiB
+stderr prefix is logged on failure (never part of the error), all further output is
+drained and discarded so noisy but decodable media still succeeds, and on
+every exit path the whole group is killed, so the decode deadline also covers
+descendants holding its pipes.
 
 ## Transcript Sanitization
 
@@ -538,7 +543,9 @@ uploads. Each candidate has its own locked transaction and expiry/claim recheck.
 A storage or row deletion failure rolls back that candidate, retains its retry row,
 and continues the bounded pass so a healthy new upload can proceed. Warnings log
 only the upload ID, without storage keys or raw exception details. Expiry removal
-is eventual; maintenance retries failures.
+is eventual; maintenance retries failures. A failed candidate's `expires_at` moves to
+the time of the failure: it stays expired, but later passes reach older healthy
+uploads first, so repeatedly failing rows cannot starve the bounded pass.
 The maintenance command below also drains expired unclaimed/finished-job uploads.
 
 `prune_job_artifacts --batch-size 100` examines at most 100 rows in each of five
@@ -768,7 +775,10 @@ whisper.cpp's default decoding passed explicitly (`-t 4 -p 1 -bs 5 -bo 5
 clip is shifted by 0.7, -0.7, 1.9 and -1.9 s in turn; the pinned model is
 checked again after every failed clip, so a model that went away fails the job
 instead of producing untranscribed windows. Words are every non-blank segment's
-stripped text with the clip start plus its offsets, rounded to 3 decimals. On
+stripped text with the clip start plus its offsets, rounded to 3 decimals.
+Offsets of kept words must satisfy `0 <= from <= to <= 240 s` (twice the clip,
+allowing whisper.cpp to overshoot the clip end); impossible offsets, like other
+malformed output, and whisper.cpp JSON files over 8 MiB fail the run. On
 the 26 episodes of the podcast gate G6 the 102 windows are identical, word for
 word and to the millisecond, to the research's. See
 `specs/2026-10-17_chapter_windows.md`.
@@ -814,7 +824,9 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
 
 When enabled, Voxhelm runs diarization after STT, aligns speaker turns to
 transcript segments by largest timestamp overlap, and emits stable generic
-labels such as `Speaker 1` and `Speaker 2`. If the expected speaker count is
+labels such as `Speaker 1` and `Speaker 2`. Turns with non-finite start or end
+times are dropped. Alignment uses an interval index, so its work grows with the
+number of overlapping turns per segment rather than segments × turns. If the expected speaker count is
 known, pass `diarization.num_speakers`; alternatively pass
 `diarization.min_speakers` and/or `diarization.max_speakers` as pyannote speaker
 hints. Verbose JSON includes `speaker` only on labeled segments. DOTe fills
@@ -1056,7 +1068,11 @@ requested transcript artifacts. Artifacts must be reported under the claimed
 attempt prefix, for example `voxhelm/jobs/<job_id>/attempt-1/transcript.txt`;
 Voxhelm verifies that each reported object exists in the configured artifact
 store and that its stored size matches the manifest before marking the job
-succeeded. The producer still downloads winning artifacts through
+succeeded. A manifest lists at most 32 artifacts, checked before any store
+access; names, storage keys and content types must fit their columns (255, 512
+and 255 characters, no NUL), `size_bytes` must fit a signed 64-bit integer, and no
+two artifacts may name the same object (keys are compared after collapsing `//`
+and `.` segments). The producer still downloads winning artifacts through
 `GET /v1/jobs/<job_id>/artifacts/<name>`. Transcript and speaker-sidecar
 artifacts must use the exact expected MIME types before Voxhelm exposes them.
 

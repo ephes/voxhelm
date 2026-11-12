@@ -177,6 +177,21 @@ def cleanup_expired_staged_media(
             logger.warning(
                 "Could not clean expired staged upload %s; maintenance will retry.", upload_id
             )
+            defer_failed_staged_cleanup(upload_id)
+
+
+def defer_failed_staged_cleanup(upload_id: uuid.UUID) -> None:
+    """Move a failed row behind other expired uploads; it stays expired.
+
+    Admission cleanup takes the oldest expiries first within a small limit, so rows
+    whose deletion keeps failing would otherwise be retried forever while newer
+    expired uploads are never reached.
+    """
+    try:
+        now = timezone.now()
+        StagedMedia.objects.filter(pk=upload_id, expires_at__lte=now).update(expires_at=now)
+    except Exception:
+        logger.warning("Could not defer cleanup of expired staged upload %s.", upload_id)
 
 
 class StagedMediaAlreadyClaimed(ApiError):

@@ -386,7 +386,9 @@ def transcribe_chapter_window(
         resolve_window_runtime()
     words: list[dict[str, Any]] = []
     if ok:
-        words = chapter_window_words(json_path.read_bytes(), clip_start=clip_start)
+        words = chapter_window_words(
+            window_module.read_window_json(json_path), clip_start=clip_start
+        )
     json_path.unlink(missing_ok=True)
     clip_path.unlink(missing_ok=True)
     return {
@@ -438,17 +440,32 @@ def decode_chapter_clip(
         raise RuntimeError(f"ffmpeg chapter clip decoding failed: {_log_tail(completed)}")
 
 
-def chapter_window_words(raw: bytes, *, clip_start: float) -> list[dict[str, Any]]:
+# Offsets past the decoded clip are not physically meaningful, but whisper.cpp can
+# overshoot the clip end; only offsets beyond twice the clip length are refused.
+WORD_OFFSET_LIMIT_CLIPS = 2
+
+
+def chapter_window_words(
+    raw: bytes, *, clip_start: float, clip_seconds: float | None = None
+) -> list[dict[str, Any]]:
     """Words ``{w, s, e}`` in file seconds from ``whisper-cli -oj -ml 1 -sow`` output.
 
     As ``asrwin120.py``: the bytes decoded as UTF-8 with replacement characters (a word
     split inside a multi-byte character stays readable), every segment whose stripped
     text is not empty, start and end the clip start plus the segment's offsets in
     seconds, rounded to 3 decimals. Malformed output raises ``RuntimeError``.
+
+    Offsets of kept (non-blank) words must lie in the clip's native millisecond
+    domain: ``0 <= from <= to`` and ``to`` at most ``WORD_OFFSET_LIMIT_CLIPS`` clip
+    lengths, so a corrupt file cannot produce negative, inverted or absurd times.
+    Blank segments are skipped before the check, as before.
     """
+    clip_ms = (
+        CHAPTER_WINDOW_SETTINGS.clip_seconds if clip_seconds is None else clip_seconds
+    ) * 1000
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise RuntimeError("whisper.cpp chapter window produced invalid JSON.") from exc
     segments = payload.get("transcription") if isinstance(payload, dict) else None
     if not isinstance(segments, list):
@@ -470,6 +487,8 @@ def chapter_window_words(raw: bytes, *, clip_start: float) -> list[dict[str, Any
         stripped = text.strip()
         if not stripped:
             continue
+        if not 0 <= values[0] <= values[1] <= clip_ms * WORD_OFFSET_LIMIT_CLIPS:
+            raise RuntimeError("whisper.cpp chapter window output has offsets outside the clip.")
         words.append(
             {
                 "w": stripped,

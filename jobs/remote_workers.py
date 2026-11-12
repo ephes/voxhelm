@@ -167,6 +167,12 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
 SUMMARY_STRING_MAX_LENGTH = 256
 SPEAKER_SIDECAR_CONTENT_TYPE = "application/json"
 CLAIM_UPDATE_CANDIDATE_LIMIT = 10
+# A completion manifest names at most a handful of artifacts; the cap bounds the
+# per-artifact validation and store stat() calls before any of them run.
+REMOTE_ARTIFACT_MANIFEST_LIMIT = 32
+# JobArtifact column limits; PositiveBigIntegerField is a signed 64-bit column.
+ARTIFACT_FIELD_MAX_LENGTHS = {"name": 255, "storage_key": 512, "content_type": 255}
+ARTIFACT_SIZE_BYTES_MAX = 2**63 - 1
 WORKER_HEARTBEAT_JSON_MAX_DEPTH = 100
 
 
@@ -1020,10 +1026,17 @@ def validate_remote_artifacts(
 ) -> list[dict[str, Any]]:
     if not isinstance(artifacts, list) or not artifacts:
         raise ApiError("artifacts must be a non-empty list.")
+    if len(artifacts) > REMOTE_ARTIFACT_MANIFEST_LIMIT:
+        raise ApiError(f"artifacts must list at most {REMOTE_ARTIFACT_MANIFEST_LIMIT} entries.")
     normalized = [normalize_remote_artifact(job=job, value=value) for value in artifacts]
     names = [artifact["name"] for artifact in normalized]
     if len(names) != len(set(names)):
         raise ApiError("Artifact names must be unique per job.")
+    # Filesystem stores resolve "a//b" and "a/./b" to the same object as "a/b";
+    # two rows sharing one object would let cleanup of one delete the other.
+    storage_paths = [str(PurePosixPath(artifact["storage_key"])) for artifact in normalized]
+    if len(storage_paths) != len(set(storage_paths)):
+        raise ApiError("Artifact storage_key values must be unique per job.")
     if not any(artifact["kind"] == JobArtifact.Kind.SOURCE for artifact in normalized):
         raise ApiError("Remote completions must include a source artifact.")
 
@@ -1070,7 +1083,7 @@ def validate_remote_artifacts(
 
 def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
     artifact = optional_object(value, "artifacts[]")
-    name = require_string(artifact.get("name"), "artifacts[].name")
+    name = require_artifact_field(artifact.get("name"), "name")
     if "/" in name or name in {".", ".."}:
         raise ApiError("Artifact names must be simple file names.")
     kind = require_string(artifact.get("kind"), "artifacts[].kind")
@@ -1100,11 +1113,11 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
     storage_backend = require_string(artifact.get("storage_backend"), "artifacts[].storage_backend")
     if storage_backend != leased_artifact_store_backend(job):
         raise ApiError("Artifact storage_backend does not match Voxhelm configuration.")
-    storage_key = require_string(artifact.get("storage_key"), "artifacts[].storage_key")
+    storage_key = require_artifact_field(artifact.get("storage_key"), "storage_key")
     prefix = leased_artifact_prefix(job)
     if not storage_key_is_under_attempt_prefix(storage_key, prefix=prefix):
         raise ApiError("Artifact storage_key must be under the claimed attempt prefix.")
-    content_type = require_string(artifact.get("content_type"), "artifacts[].content_type")
+    content_type = require_artifact_field(artifact.get("content_type"), "content_type")
     validate_remote_artifact_content_type(
         name=name,
         kind=kind,
@@ -1112,8 +1125,12 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
         content_type=content_type,
     )
     size_bytes = artifact.get("size_bytes")
-    if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes < 0:
-        raise ApiError("artifacts[].size_bytes must be a non-negative integer.")
+    if (
+        not isinstance(size_bytes, int)
+        or isinstance(size_bytes, bool)
+        or not 0 <= size_bytes <= ARTIFACT_SIZE_BYTES_MAX
+    ):
+        raise ApiError("artifacts[].size_bytes must be a non-negative 64-bit integer.")
     exposed = artifact.get("exposed")
     if not isinstance(exposed, bool):
         raise ApiError("artifacts[].exposed must be a boolean.")
@@ -1138,6 +1155,17 @@ def normalize_remote_artifact(*, job: Job, value: object) -> dict[str, Any]:
         "size_bytes": size_bytes,
         "exposed": exposed,
     }
+
+
+def require_artifact_field(value: object, field: str) -> str:
+    """A non-empty artifact string that fits its JobArtifact column."""
+    text = require_string(value, f"artifacts[].{field}")
+    if len(text) > ARTIFACT_FIELD_MAX_LENGTHS[field]:
+        raise ApiError(
+            f"artifacts[].{field} must be at most {ARTIFACT_FIELD_MAX_LENGTHS[field]} characters."
+        )
+    validate_heartbeat_storage_text(text, f"artifacts[].{field}")
+    return text
 
 
 def validate_remote_artifact_content_type(

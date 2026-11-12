@@ -48,8 +48,10 @@ from django.conf import settings
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions.diarization import (
     SpeakerTurn,
+    SpeakerTurnIndex,
     choose_speaker_for_segment,
     normalize_speaker_turns,
+    overlapping_turns,
     resolve_pyannote_device,
 )
 from transcriptions.service import (
@@ -979,10 +981,14 @@ def track_speaker_for_segment(
     return clear[0].speaker
 
 
-def raw_turn_overlaps(start: float, end: float, turns: list[SpeakerTurn]) -> dict[str, float]:
-    """Seconds of each diarization label inside ``start``-``end``."""
+def raw_turn_overlaps(
+    start: float, end: float, turns: Sequence[SpeakerTurn] | SpeakerTurnIndex
+) -> dict[str, float]:
+    """Seconds of each diarization label inside ``start``-``end`` (none for non-finite)."""
     overlaps: dict[str, float] = {}
-    for turn in turns:
+    if not (math.isfinite(start) and math.isfinite(end)):
+        return overlaps
+    for _index, turn in overlapping_turns(turns, start, end):
         overlap = min(end, turn.end) - max(start, turn.start)
         if overlap > 0:
             overlaps[turn.speaker] = overlaps.get(turn.speaker, 0.0) + overlap
@@ -1080,6 +1086,7 @@ def classify_segments(
     """
     track_centers = [frame.center for frame in track_frames]
     normalized_raw_turns = normalize_speaker_turns(raw_turns) if raw_turns else []
+    raw_turn_index = SpeakerTurnIndex(normalized_raw_turns)
 
     def mixed_windows_for(segment: Any, speaker: str) -> list[MixedWindow]:
         return find_mixed_windows(
@@ -1110,7 +1117,7 @@ def classify_segments(
             # Only segments that would be auto-accepted need the extra embeddings.
             mixed_windows = mixed_windows_for(segment, classification.top_speaker)
             confident = not mixed_windows
-        overlaps = raw_turn_overlaps(segment.start, segment.end, normalized_raw_turns)
+        overlaps = raw_turn_overlaps(segment.start, segment.end, raw_turn_index)
         single_label = single_raw_label(overlaps)
         if confident and single_label is not None:
             speaker_votes = label_votes.setdefault(single_label, {})
@@ -1176,7 +1183,7 @@ def classify_segments(
             raw_label = choose_speaker_for_segment(
                 segment_start=segment.start,
                 segment_end=segment.end,
-                turns=normalized_raw_turns,
+                turns=raw_turn_index,
             )
         segments.append(
             KnownSpeakerSegment(
@@ -1263,6 +1270,7 @@ def summarize_raw_labels(
     without a reference.
     """
     turns = normalize_speaker_turns(raw_turns) if raw_turns else []
+    turn_index = SpeakerTurnIndex(turns)
     seconds: dict[str, float] = {}
     for turn in turns:
         seconds[turn.speaker] = seconds.get(turn.speaker, 0.0) + turn.end - turn.start
@@ -1270,7 +1278,7 @@ def summarize_raw_labels(
     for segment in segments:
         if segment.speaker_uncertain or segment.speaker_accept_reason or not segment.speaker:
             continue
-        label = single_raw_label(raw_turn_overlaps(segment.start, segment.end, turns))
+        label = single_raw_label(raw_turn_overlaps(segment.start, segment.end, turn_index))
         if label is not None:
             speaker_votes = votes.setdefault(label, {})
             speaker_votes[segment.speaker] = speaker_votes.get(segment.speaker, 0) + 1
