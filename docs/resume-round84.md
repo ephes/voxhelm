@@ -1,5 +1,16 @@
 # Round 84 resume note
 
+## B09–B11 outcome (2026-11-12)
+
+The full scout report was not reachable from the implementing host, so the six
+speech slices were implemented from their slugs after confirming each gap on
+`main`: JSON scalar/depth admission and `speed` domain, the public error boundary
+(fixed 500 text, missing voice as 400), isolation of unreadable Piper voice
+configs, streamed responses that outlive their unlinked temporary files, and an
+export runner with a 64 KiB stderr ceiling, its own process group and a deadline
+covering descendants. Regressions: `tests/test_speech_bounds.py` (24 of 26 fail
+on the previous `main`; two are boundary controls). Round 84 is complete.
+
 ## B07 finisher outcome (2026-11-08)
 
 Claude finisher reviewed the whole parked B07 diff (rebased onto `main` after the

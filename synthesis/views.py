@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from dataclasses import dataclass
 
 from django.conf import settings
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest
+from django.http.response import HttpResponseBase
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from synthesis.service import MAX_TTS_SPEED, MIN_TTS_SPEED, export_audio, synthesize_text
+from synthesis.service import (
+    MAX_TTS_SPEED,
+    MIN_TTS_SPEED,
+    SynthesisInputError,
+    export_audio,
+    synthesize_text,
+)
+from transcriptions.file_streaming import reader_response
 from transcriptions.views import (
     ApiError,
     openai_error_response,
@@ -19,6 +29,7 @@ from transcriptions.views import (
 from .service import SynthesizeParams
 
 RESPONSE_FORMATS = {"wav", "mp3", "ogg"}
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,7 +45,7 @@ class ParsedSpeechRequest:
 
 @csrf_exempt
 @require_POST
-def audio_speech(request: HttpRequest) -> HttpResponse:
+def audio_speech(request: HttpRequest) -> HttpResponseBase:
     result = None
     exported = None
     try:
@@ -51,10 +62,14 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
             ),
         )
         exported = export_audio(result, output_format=parsed_request.response_format)
-        response = HttpResponse(
-            exported.path.read_bytes(),
-            content_type=exported.content_type,
-        )
+        # Stream from an open handle. The files are unlinked in ``finally`` below; on
+        # POSIX the open handle keeps the data readable until the response closes it.
+        handle = exported.path.open("rb")
+        try:
+            response = reader_response(request, handle, content_type=exported.content_type)
+        except BaseException:
+            handle.close()
+            raise
         response["Content-Disposition"] = f'inline; filename="speech.{exported.format_name}"'
         # Expose the effective backend/voice/language (post-routing) for debugging
         # and Slice 6's metadata assertions.
@@ -64,8 +79,14 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
         return response
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
-    except RuntimeError as exc:
-        return openai_error_response(str(exc), status=500, error_type="server_error")
+    except SynthesisInputError as exc:
+        return openai_error_response(str(exc), status=400, error_type="invalid_request_error")
+    except RuntimeError, OSError:
+        # Backend, converter and filesystem diagnostics stay in the server log.
+        _LOGGER.exception("Speech synthesis failed")
+        return openai_error_response(
+            "Speech synthesis failed.", status=500, error_type="server_error"
+        )
     finally:
         if exported is not None and result is not None and exported.path != result.audio_path:
             exported.path.unlink(missing_ok=True)
@@ -76,12 +97,7 @@ def audio_speech(request: HttpRequest) -> HttpResponse:
 def parse_speech_request(request: HttpRequest) -> ParsedSpeechRequest:
     if not (request.content_type or "").lower().startswith("application/json"):
         raise ApiError("Speech synthesis requires application/json.")
-    try:
-        payload = json.loads(request.body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ApiError("Request body was not valid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise ApiError("JSON request body must be an object.")
+    payload = load_speech_json(request.body)
 
     text = payload.get("input")
     if not isinstance(text, str) or not text.strip():
@@ -108,6 +124,30 @@ def parse_speech_request(request: HttpRequest) -> ParsedSpeechRequest:
         speed=speed,
         routing=routing,
     )
+
+
+def _reject_constant(name: str) -> object:
+    raise ValueError(f"non-finite constant {name}")
+
+
+def load_speech_json(body: bytes) -> dict[str, object]:
+    """Parse a speech request, refusing every parser limit as invalid JSON.
+
+    Deep nesting (the parser's recursion limit, which varies between Python
+    builds), NaN/Infinity and integers beyond Python's digit limit are reported
+    as invalid JSON instead of escaping as server errors.
+    """
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ApiError("Request body was not valid JSON.") from exc
+    try:
+        payload = json.loads(text, parse_constant=_reject_constant)
+    except (ValueError, RecursionError) as exc:
+        raise ApiError("Request body was not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise ApiError("JSON request body must be an object.")
+    return payload
 
 
 def validate_model(value: object) -> str:
@@ -143,9 +183,13 @@ def validate_routing(value: object) -> bool:
 def validate_speed(value: object) -> float:
     if value is None:
         return 1.0
-    if not isinstance(value, (int, float)):
+    # bool is an int subclass; JSON true/false is not a speed.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError("The 'speed' field must be a number.")
-    normalized = float(value)
-    if not MIN_TTS_SPEED <= normalized <= MAX_TTS_SPEED:
+    try:
+        normalized = float(value)
+    except OverflowError:
+        normalized = math.inf
+    if not math.isfinite(normalized) or not MIN_TTS_SPEED <= normalized <= MAX_TTS_SPEED:
         raise ApiError(f"The 'speed' field must be between {MIN_TTS_SPEED} and {MAX_TTS_SPEED}.")
     return normalized

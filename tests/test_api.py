@@ -573,7 +573,8 @@ def test_speech_endpoint_returns_audio(client, monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response["Content-Type"] == "audio/wav"
-    assert response.content == b"RIFFtest"
+    assert response["Content-Length"] == "8"
+    assert b"".join(response.streaming_content) == b"RIFFtest"
 
 
 def test_speech_endpoint_uses_non_interactive_scheduler_lane(client, monkeypatch, tmp_path):
@@ -1142,25 +1143,30 @@ def test_json_request_rejects_invalid_model_before_downloading(
 
 
 @pytest.mark.parametrize("failure", ["timeout", "startup"])
-def test_speech_export_failure_cleans_source_and_output(client, monkeypatch, tmp_path, failure):
-    import subprocess
+def test_speech_export_failure_cleans_source_and_output(
+    client, monkeypatch, settings, tmp_path, failure
+):
+    import sys
 
     source = tmp_path / "speech.wav"
     source.write_bytes(b"RIFFtest")
-    targets = []
+    targets_file = tmp_path / "targets"
     monkeypatch.setattr(
         "synthesis.views.synthesize_text", lambda text, params: DummySpeechResult(source)
     )
-
-    def run(args, **kwargs):
-        target = Path(args[-1])
-        targets.append(target)
-        target.write_bytes(b"partial")
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
-        raise OSError("cannot start converter")
-
-    monkeypatch.setattr("synthesis.service.subprocess.run", run)
+    fake_ffmpeg = tmp_path / "ffmpeg"
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys, time\n"
+        f"pathlib.Path({str(targets_file)!r}).write_text(sys.argv[-1])\n"
+        "pathlib.Path(sys.argv[-1]).write_bytes(b'partial')\n"
+        "time.sleep(10)\n"
+    )
+    fake_ffmpeg.chmod(0o755)
+    settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS = 1
+    settings.VOXHELM_FFMPEG_BIN = str(
+        fake_ffmpeg if failure == "timeout" else tmp_path / "missing-ffmpeg"
+    )
     response = client.post(
         "/v1/audio/speech",
         content_type="application/json",
@@ -1168,9 +1174,12 @@ def test_speech_export_failure_cleans_source_and_output(client, monkeypatch, tmp
         HTTP_AUTHORIZATION="Bearer test-token",
     )
     assert response.status_code == 500
-    assert response.json()["error"]["type"] == "server_error"
-    assert len(targets) == 1
-    assert not targets[0].exists()
+    assert response.json()["error"] == {
+        "message": "Speech synthesis failed.",
+        "type": "server_error",
+    }
+    if failure == "timeout":
+        assert not Path(targets_file.read_text()).exists()
     assert not source.exists()
 
 

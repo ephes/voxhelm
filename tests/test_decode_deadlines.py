@@ -58,16 +58,21 @@ def test_decode_deadline_kills_ffmpeg(tmp_path, settings, monkeypatch, decoder, 
 
 
 @pytest.mark.parametrize("output_format", ["mp3", "ogg"])
-def test_speech_export_disables_stdin(tmp_path, settings, monkeypatch, output_format):
+def test_speech_export_disables_stdin(tmp_path, settings, output_format):
     source = tmp_path / "speech.wav"
     source.write_bytes(b"wav")
-
-    def fake_run(argv, **kwargs):
-        assert "-nostdin" in argv
-        Path(argv[-1]).write_bytes(b"converted")
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr("synthesis.service.subprocess.run", fake_run)
+    argv_path = tmp_path / "argv.json"
+    fake_ffmpeg = tmp_path / "ffmpeg"
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(argv_path)!r}).write_text(json.dumps(sys.argv))\n"
+        "assert sys.stdin.read() == ''\n"
+        "pathlib.Path(sys.argv[-1]).write_bytes(b'converted')\n"
+    )
+    fake_ffmpeg.chmod(0o755)
+    settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
     result = SynthesisResult(source, "piper", "piper", "voice", "en", 16000, 2, 1, 1.0)
     exported = export_audio(result, output_format=output_format)
+    assert "-nostdin" in json.loads(argv_path.read_text())
     exported.path.unlink()

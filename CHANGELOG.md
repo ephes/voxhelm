@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Speech API: refuse NaN/Infinity, over-long integers, parser nesting limits,
+  boolean and overflowing `speed` values as HTTP 400; return a fixed public
+  message for synthesis/export failures (missing voices and Kokoro text without
+  supported tokens become HTTP 400); stream
+  audio from an open handle after removing temporary files; skip unreadable Piper
+  voice configs instead of failing discovery; run ffmpeg export in its own process
+  group with a 64 KiB stderr ceiling and a deadline covering descendants.
+
 - Wyoming: delete synthesis output that finishes after its request was cancelled,
   abort clients that stop reading after a 30-second write deadline, cap open
   connections (`VOXHELM_WYOMING_MAX_CONNECTIONS`, default 16) and inference
