@@ -55,7 +55,8 @@ def test_invalid_inference_never_publishes(monkeypatch, tmp_path, client, settin
             HTTP_AUTHORIZATION="Bearer test-token",
         )
         assert response.status_code == 500
-        assert "audio" in response.json()["error"]["message"]
+        # Backend diagnostics stay in the server log behind the public boundary.
+        assert response.json()["error"]["message"] == "Speech synthesis failed."
     else:
         configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
         monkeypatch.setattr("jobs.services.synthesize_text", backend.synthesize)

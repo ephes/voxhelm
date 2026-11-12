@@ -44,7 +44,7 @@ def test_nonblank_text_without_supported_tokens_fails(
             content_type="application/json",
             HTTP_AUTHORIZATION="Bearer test-token",
         )
-        assert response.status_code == 500
+        assert response.status_code == 400
         assert "supported speech tokens" in response.json()["error"]["message"]
     else:
         configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")

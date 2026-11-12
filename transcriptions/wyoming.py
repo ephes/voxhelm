@@ -35,8 +35,8 @@ from wyoming.tts import Synthesize
 
 from lane_scheduler import LANE_INTERACTIVE
 from synthesis.service import (
+    SynthesisInputError,
     SynthesizeParams,
-    VoiceNotInstalledError,
     build_voice_registry,
     cleanup_paths,
     synthesize_text,
@@ -386,7 +386,7 @@ def _public_failure_text(exc: Exception, fallback: str) -> str:
     """Only request errors are client-facing; other diagnostics stay in the server log."""
     if isinstance(exc, ApiError):
         return exc.message
-    if isinstance(exc, VoiceNotInstalledError):
+    if isinstance(exc, SynthesisInputError):
         return str(exc)
     return fallback
 

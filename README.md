@@ -122,7 +122,7 @@ last row. Invalid packs raise a controlled backend-unavailable error and are
 never cached; replacing the file allows a subsequent load to recover.
 
 Kokoro refuses nonblank text that yields no supported phoneme tokens with an
-actionable error. Supported one-character utterances and punctuation tokens
+actionable client error (HTTP 400 on the sync speech API). Supported one-character utterances and punctuation tokens
 retain ordinary inference behavior. Audio chunks are validated and written
 incrementally to an owned WAV, retaining at most one inference chunk and its PCM
 conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
@@ -1430,12 +1430,35 @@ window extraction. Output seeking preserves codec priming/resampling and may dec
 and discard preceding frames; this bounds PCM memory rather than decode CPU time.
 See [reference ownership and decoding](specs/known-speaker-diarization.md#reference-source-lifetime-and-interval-decoding).
 
-MP3/OGG speech export runs ffmpeg with a positive integer deadline configured by
-`VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS` (default `300` seconds). Timeout kills
-and reaps the converter; timeout, startup and nonzero-exit failures remove the
-owned output and raise a synthesis error (HTTP 500 `server_error` on the sync
-API, failed batch job). Callers still own and clean up the source WAV. WAV
-passthrough does not invoke ffmpeg or use this deadline.
+MP3/OGG speech export runs ffmpeg in its own process group with a positive
+integer deadline configured by `VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS` (default
+`300` seconds). The deadline covers the whole run, including descendants that
+keep its output pipes open. stdout is discarded and stderr is drained with a
+64 KiB ceiling; overflow fails the export. On every exit path the whole process
+group is killed and the converter reaped, so no descendant outlives the export.
+Timeout, startup, diagnostic-overflow and nonzero-exit failures remove the owned
+output and raise a synthesis error with a fixed message (HTTP 500 `server_error`
+on the sync API, failed batch job); at most 2 KiB of converter output is logged,
+never returned. Callers still own and clean up the source WAV. WAV passthrough
+does not invoke ffmpeg or use this deadline.
+
+`POST /v1/audio/speech` admission and responses:
+
+- The JSON body is refused as invalid JSON (HTTP 400) for `NaN`/`Infinity`,
+  integers beyond Python's digit limit and nesting beyond the parser's limit.
+  `speed` must be a finite JSON number; booleans and values that overflow a float
+  are refused with the `speed` field error.
+- Backend, converter and filesystem failures return HTTP 500 with the fixed
+  message `Speech synthesis failed.`; details are logged only. Input errors stay
+  client-facing as HTTP 400 `invalid_request_error`: a requested voice that is not
+  installed (with the available voices) and Kokoro text without supported tokens.
+  The Wyoming sidecar passes the same messages through in `synthesis_failed`.
+- Audio is streamed in bounded reads from an open file handle with
+  `Content-Length`, using worker-thread reads under ASGI (uvicorn) so Django never
+  materializes the file in memory. The temporary WAV/export files are removed
+  before the response is returned; the handle is closed with the response.
+- A Piper voice whose `.onnx.json` config cannot be read or parsed is skipped
+  with a logged warning; other installed voices stay available.
 
 Known-speaker reference clips and source intervals are limited to ten minutes of
 decoded 16 kHz mono audio (9,600,000 frames, 19.2 MB PCM16 / 38.4 MB float32).

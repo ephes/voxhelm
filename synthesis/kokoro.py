@@ -33,6 +33,7 @@ from synthesis.service import (
     ArtifactIdentity,
     BackendUnavailableError,
     InstalledVoice,
+    SynthesisInputError,
     SynthesisResult,
     SynthesizeParams,
     VoiceNotInstalledError,
@@ -276,7 +277,7 @@ class KokoroBackend:
         token_lists = [self._phonemize_to_tokens(s, config.phoneme_language) for s in sentences]
         chunks = build_token_chunks(token_lists, budget=KOKORO_MAX_TOKENS)
         if not chunks:
-            raise RuntimeError(
+            raise SynthesisInputError(
                 "Kokoro found no supported speech tokens. Try text in the voice's language."
             )
 

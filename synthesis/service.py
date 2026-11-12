@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import selectors
+import signal
 import subprocess
 import tempfile
 import wave
@@ -9,6 +12,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
+from time import monotonic, sleep
 from typing import Any, NamedTuple, Protocol
 
 from django.conf import settings
@@ -114,8 +118,12 @@ class BackendUnavailableError(RuntimeError):
     """Raised when a synthesis backend is not available on the current host."""
 
 
-class VoiceNotInstalledError(RuntimeError):
-    """A client requested a voice that is not installed; the message is client-facing."""
+class SynthesisInputError(RuntimeError):
+    """The request cannot be synthesized as given; the message is client-facing."""
+
+
+class VoiceNotInstalledError(SynthesisInputError):
+    """A client requested a voice that is not installed."""
 
 
 class BackendProtocol(Protocol):
@@ -460,40 +468,94 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
     args.append(str(target_path))
 
     try:
-        completed = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        # subprocess.run kills and waits for the child before raising.
-        target_path.unlink(missing_ok=True)
-        raise RuntimeError("Audio conversion exceeded the configured export deadline.") from exc
-    except OSError as exc:
-        target_path.unlink(missing_ok=True)
-        raise RuntimeError("Audio conversion could not start ffmpeg.") from exc
+        _run_owned_export(args, timeout=settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS)
     except BaseException:
-        # Interruptions must not leak the reserved output either.
+        # Failures and interruptions must not leak the reserved output.
         target_path.unlink(missing_ok=True)
         raise
-    if completed.returncode != 0:
-        target_path.unlink(missing_ok=True)
-        detail = "\n".join(
-            part.strip()
-            for part in (completed.stderr, completed.stdout)
-            if isinstance(part, str) and part.strip()
-        )
-        raise RuntimeError(f"Audio conversion failed: {detail or 'ffmpeg exited unsuccessfully.'}")
 
     return ExportedAudio(
         path=target_path,
         format_name=normalized,
         content_type=CONTENT_TYPES[normalized],
     )
+
+
+EXPORT_DIAGNOSTIC_MAX_BYTES = 64 * 1024
+EXPORT_DIAGNOSTIC_LOG_BYTES = 2048
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    # EPERM: on macOS a group whose only member is the unreaped leader refuses signals.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError, PermissionError:
+        pass
+
+
+def _run_owned_export(args: list[str], *, timeout: float) -> None:
+    """Run ffmpeg in its own process group under one elapsed deadline.
+
+    stdout is discarded and stderr is drained with a fixed byte ceiling, so a
+    noisy converter cannot grow memory. The deadline covers the whole run,
+    including pipes held open by descendants; on any exit path the whole process
+    group is killed and the converter reaped. Tool output never reaches the
+    raised error; a bounded prefix is logged for operators.
+    """
+    deadline = monotonic() + timeout
+    try:
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RuntimeError("Audio conversion could not start ffmpeg.") from exc
+    diagnostic = bytearray()
+    received = 0
+    try:
+        assert process.stderr is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stderr, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "Audio conversion exceeded the configured export deadline."
+                    ) from subprocess.TimeoutExpired(args, timeout)
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, min(8192, EXPORT_DIAGNOSTIC_MAX_BYTES - received + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    received += len(chunk)
+                    if len(diagnostic) < EXPORT_DIAGNOSTIC_LOG_BYTES:
+                        diagnostic.extend(chunk[: EXPORT_DIAGNOSTIC_LOG_BYTES - len(diagnostic)])
+                    if received > EXPORT_DIAGNOSTIC_MAX_BYTES:
+                        raise RuntimeError("Audio conversion exceeded the diagnostic output limit.")
+        # Wait for the converter without reaping it: while it is unreaped its PID
+        # (and so its process group ID) cannot be reused, so the group kill below
+        # can never reach an unrelated process.
+        while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            if monotonic() >= deadline:
+                raise RuntimeError(
+                    "Audio conversion exceeded the configured export deadline."
+                ) from subprocess.TimeoutExpired(args, timeout)
+            sleep(0.01)
+    finally:
+        _kill_process_group(process)
+        if process.stderr is not None:
+            process.stderr.close()
+        process.wait()
+    if process.returncode != 0:
+        _LOGGER.warning(
+            "Audio conversion failed with exit status %s: %s",
+            process.returncode,
+            diagnostic.decode("utf-8", errors="replace").strip() or "(no output)",
+        )
+        raise RuntimeError("Audio conversion failed.")
 
 
 def discover_installed_voices(
@@ -510,11 +572,17 @@ def discover_installed_voices(
         config_path = voice_dir / f"{voice_name}.onnx.json"
         if not model_path.exists() or not config_path.exists():
             continue
-        installed[voice_name] = build_voice_metadata(
-            voice_name=voice_name,
-            model_path=model_path,
-            config_path=config_path,
-        )
+        try:
+            installed[voice_name] = build_voice_metadata(
+                voice_name=voice_name,
+                model_path=model_path,
+                config_path=config_path,
+            )
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+            # One unreadable voice must not hide every other installed voice.
+            _LOGGER.warning(
+                "Skipping Piper voice %r: unreadable config (%s)", voice_name, type(exc).__name__
+            )
     return installed
 
 

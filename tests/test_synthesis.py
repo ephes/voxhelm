@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -258,7 +259,7 @@ def test_export_audio_returns_wav_without_conversion(tmp_path: Path) -> None:
     assert exported == ExportedAudio(path=wav_path, format_name="wav", content_type="audio/wav")
 
 
-def test_export_audio_handles_non_utf8_ffmpeg_stderr(tmp_path: Path, settings) -> None:
+def test_export_audio_handles_non_utf8_ffmpeg_stderr(tmp_path: Path, settings, caplog) -> None:
     fake_ffmpeg = tmp_path / "fake-ffmpeg.py"
     fake_ffmpeg.write_text(
         f"#!{sys.executable}\n"
@@ -283,8 +284,11 @@ def test_export_audio_handles_non_utf8_ffmpeg_stderr(tmp_path: Path, settings) -
     )
     settings.VOXHELM_FFMPEG_BIN = str(fake_ffmpeg)
 
-    with pytest.raises(RuntimeError, match="Audio conversion failed: bad byte: �"):
-        export_audio(result, output_format="mp3")
+    with caplog.at_level("WARNING", logger="synthesis.service"):
+        with pytest.raises(RuntimeError, match=r"^Audio conversion failed\.$"):
+            export_audio(result, output_format="mp3")
+    # Tool output reaches the operator log only, decoded with replacement.
+    assert "bad byte: \ufffd" in caplog.text
 
 
 def test_export_audio_rejects_unknown_format(tmp_path: Path) -> None:
@@ -743,10 +747,6 @@ def test_piper_cache_tracks_artifact_identity(monkeypatch, tmp_path, changed_art
 def test_export_audio_deadline_and_owned_cleanup(
     monkeypatch, tmp_path, settings, output_format, failure
 ):
-    import subprocess
-
-    from synthesis import service
-
     temp_dir = _isolated_tempdir(monkeypatch, tmp_path)
     source = tmp_path / "source.wav"
     source.write_bytes(b"RIFF")
@@ -761,19 +761,26 @@ def test_export_audio_deadline_and_owned_cleanup(
         channels=1,
         duration_seconds=1.0,
     )
-    settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS = 17
-    calls = []
-
-    def run(args, **kwargs):
-        calls.append(kwargs)
-        Path(args[-1]).write_bytes(b"partial" if failure != "success" else b"converted")
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(args, 17, stderr=b"partial")
-        if failure == "startup":
-            raise OSError("cannot start converter")
-        return subprocess.CompletedProcess(args, 1 if failure == "nonzero" else 0, "", "failed")
-
-    monkeypatch.setattr(service.subprocess, "run", run)
+    settings.VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS = 1
+    calls = tmp_path / "calls"
+    fake_ffmpeg = tmp_path / "fake-ffmpeg"
+    body = {
+        "timeout": "time.sleep(10)",
+        "nonzero": "sys.stderr.write('failed'); raise SystemExit(1)",
+        "success": "pathlib.Path(sys.argv[-1]).write_bytes(b'converted')",
+    }.get(failure, "")
+    fake_ffmpeg.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys, time\n"
+        f"open({str(calls)!r}, 'a').write('call\\n')\n"
+        "pathlib.Path(sys.argv[-1]).write_bytes(b'partial')\n"
+        f"{body}\n"
+    )
+    fake_ffmpeg.chmod(0o755)
+    settings.VOXHELM_FFMPEG_BIN = str(
+        tmp_path / "missing-ffmpeg" if failure == "startup" else fake_ffmpeg
+    )
+    started = time.monotonic()
     if failure == "success":
         exported = export_audio(result, output_format=output_format)
         assert exported.path.read_bytes() == b"converted"
@@ -781,8 +788,9 @@ def test_export_audio_deadline_and_owned_cleanup(
     else:
         with pytest.raises(RuntimeError, match="Audio conversion"):
             export_audio(result, output_format=output_format)
-    assert len(calls) == 1
-    assert calls[0].get("timeout") == 17
+    assert time.monotonic() - started < 5
+    if failure != "startup":
+        assert calls.read_text() == "call\n"
     assert list(temp_dir.iterdir()) == []
     assert source.read_bytes() == b"RIFF"
 
