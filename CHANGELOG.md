@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- German synthesis: preserve numeric tokens longer than 64 digits literally
+  across units, EUR and temperatures, avoiding integer conversion failures and
+  unbounded fractional expansion; ordinary pronunciation remains unchanged.
+- Preserve literal `__GODE_CARDINAL_DOT__` input by rendering cardinal-label
+  punctuation directly instead of reserving and globally restoring a marker.
+
 ## 0.1.13 (2026-11-12)
 
 Published to PyPI for the remote transcription workers (`atlas`, `studio`),

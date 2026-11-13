@@ -155,6 +155,10 @@ clean contributor reference material are the preferred follow-up direction.
 
 ### Voxhelm repo
 
+- [x] Bound German numeric normalization per token: at most 64 integer/fractional
+  digits; preserve longer numbers literally, with synthetic Kokoro regression coverage.
+- [x] Remove the German cardinal-label sentinel collision: render dots directly
+  and preserve literal marker text alongside ordinary cardinal/ordinal fixtures.
 - [x] Clean up and commit the diarization implementation, including pyannote 4 `DiarizeOutput` unwrapping
   (`58f8154`: `transcriptions/diarization.extract_pyannote_annotation`, tests in `tests/test_diarization.py`).
 - [x] Resolve the pending `jobs` migration check:

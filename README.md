@@ -118,6 +118,16 @@ of WebVTT. Artifacts stored before this change are not rewritten.
 
 ## Kokoro inference and installed style validation
 
+German preprocessing expands numeric units, EUR amounts and temperatures only
+when the complete numeric token has at most 64 digits (integer and fractional
+parts combined; sign and separator excluded). Longer numbers keep their literal
+spelling, including leading zeros, without integer conversion or fractional
+digit expansion. The independent `EUR` abbreviation still expands to `Euro`.
+This limit is independent of request text length and Python's global digit limit.
+Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their
+sentence punctuation without reserving internal marker text; literal input such
+as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.
+
 Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
 publication. Valid samples keep the existing clipping and 16-bit PCM conversion.

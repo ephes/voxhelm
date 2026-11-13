@@ -465,6 +465,44 @@ def test_synthesize_applies_german_rules_only_for_german(monkeypatch) -> None:
     assert any("5 EUR" in text for text in seen)
 
 
+@pytest.mark.parametrize("suffix", ["kg", "EUR", "°C", "°"])
+@pytest.mark.parametrize("raw", ["9" * 5000, "1," + "9" * 5000])
+def test_synthesize_german_oversized_numbers_reach_phonemizer_literal(monkeypatch, raw, suffix):
+    backend, session = _stub_backend(monkeypatch, language="de")
+    seen = []
+
+    def capture(text, language):
+        seen.append(text)
+        return [KOKORO_VOCAB["a"]]
+
+    monkeypatch.setattr(backend, "_phonemize_to_tokens", capture)
+    result = backend.synthesize(f"Wert {raw} {suffix}", _params())
+    try:
+        assert seen == [f"Wert {raw} {'Euro' if suffix == 'EUR' else suffix}"]
+        assert len(session.calls) == 1
+    finally:
+        result.audio_path.unlink()
+
+
+def test_synthesize_german_ordinary_numeric_pronunciation(monkeypatch):
+    backend, _ = _stub_backend(monkeypatch, language="de")
+    seen = []
+
+    def capture(text, language):
+        seen.append(text)
+        return [KOKORO_VOCAB["a"]]
+
+    monkeypatch.setattr(backend, "_phonemize_to_tokens", capture)
+    result = backend.synthesize("1 kg und 2,50 EUR bei -3,5 °C und 90 °", _params())
+    try:
+        assert seen == [
+            "ein Kilogramm und zwei Euro fünfzig bei minus drei komma fünf Grad Celsius "
+            "und neunzig Grad"
+        ]
+    finally:
+        result.audio_path.unlink()
+
+
 def test_synthesize_unknown_voice_raises(monkeypatch) -> None:
     backend, _ = _stub_backend(monkeypatch)
     params = SynthesizeParams(
