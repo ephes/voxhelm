@@ -159,6 +159,11 @@ clean contributor reference material are the preferred follow-up direction.
   digits; preserve longer numbers literally, with synthetic Kokoro regression coverage.
 - [x] Remove the German cardinal-label sentinel collision: render dots directly
   and preserve literal marker text alongside ordinary cardinal/ordinal fixtures.
+- [x] Preserve backend-provided speaker turns through sanitization: speaker
+  identity changes split repeat runs; mocked backend-to-format regressions cover
+  labeled and unlabeled boundaries, same-speaker loops and timed output.
+- [x] Narrow Amara credit detection to whole observed attributions; preserve
+  predicates and unknown phrasing through the public sanitizer and all formats.
 - [x] Clean up and commit the diarization implementation, including pyannote 4 `DiarizeOutput` unwrapping
   (`58f8154`: `transcriptions/diarization.extract_pyannote_annotation`, tests in `tests/test_diarization.py`).
 - [x] Resolve the pending `jobs` migration check:

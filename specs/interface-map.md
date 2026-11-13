@@ -203,6 +203,21 @@ The shipped operator UI intentionally stays within this current boundary: batch 
 
 Voxhelm uses Whisper-native JSON as its internal canonical structured transcript representation. The current implementation stores `text`, `json`, `vtt`, `dote`, and `podlove` artifacts. `django-cast` and the operator UI now consume those shared server-owned outputs instead of duplicating conversion logic.
 
+The ordinary transcription sanitizer runs before rendering and before local
+speaker diarization, but also preserves labels already supplied by a typed STT
+backend. Repetition runs require exactly equal speaker identities: a label
+change, including `None` to/from a label, splits the run. Consecutive `None`
+labels may collapse as before. Collapsed cues retain the common label and the
+run's time span. JSON, DOTe and Podlove retain these speaker turns; WebVTT
+retains the cue boundaries while continuing to omit labels.
+
+Amara credit removal recognizes only a whole-cue `Untertitel von Amara.org`,
+`Untertitelung von Amara.org` or standalone `Amara.org`, after case folding,
+whitespace normalization and surrounding-punctuation stripping. A sentence
+merely starting with `Untertitel` and ending in the domain is insufficient;
+genuine predicates and unknown attribution grammar survive every renderer.
+The existing whole-attribution ZDF/funk rules are unchanged.
+
 When diarization is enabled, backend-native speaker identifiers are normalized to stable generic labels such as `Speaker 1` and `Speaker 2`. DOTe renders those labels in `speakerDesignation`; Podlove renders them in both `speaker` and `voice`. WebVTT intentionally remains unchanged in the first diarization slice. Result metadata echoes the normalized diarization payload, including any accepted speaker-count hints.
 
 **Response:** `201 Created`

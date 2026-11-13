@@ -7,6 +7,12 @@
   unbounded fractional expansion; ordinary pronunciation remains unchanged.
 - Preserve literal `__GODE_CARDINAL_DOT__` input by rendering cardinal-label
   punctuation directly instead of reserving and globally restoring a marker.
+- Transcript repetition runs now stop at every speaker-label change, including
+  labeled/unlabeled boundaries; same-speaker and unlabeled artifact loops still
+  collapse with their shared identity and timing preserved.
+- Restrict Amara credit removal to whole subtitle attributions with `von` and
+  the standalone domain, preserving genuine topic sentences and unknown phrasing
+  that merely end in Amara.org.
 
 ## 0.1.13 (2026-11-12)
 
