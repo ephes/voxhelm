@@ -4,6 +4,8 @@ import os
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from django.db import IntegrityError, transaction
+from django.db.models import F
 
 
 class Command(BaseCommand):
@@ -34,23 +36,29 @@ class Command(BaseCommand):
             )
 
         user_model = get_user_model()
-        user, created = user_model.objects.get_or_create(
-            username=username,
-            defaults={"email": email, "is_staff": True, "is_active": True},
-        )
-        updated_fields: list[str] = []
-        if email and user.email != email:
-            user.email = email
-            updated_fields.append("email")
-        if not user.is_staff:
-            user.is_staff = True
-            updated_fields.append("is_staff")
-        if not user.is_active:
-            user.is_active = True
-            updated_fields.append("is_active")
-        user.set_password(password)
-        updated_fields.append("password")
-        user.save(update_fields=updated_fields)
+        # Hash before taking the writer lock or publishing any account fields.
+        prepared = user_model(username=username)
+        prepared.set_password(password)
+        try:
+            with transaction.atomic():
+                # A write obtains SQLite's writer lock before the read; on other
+                # databases this also locks the existing row until commit.
+                user_model.objects.filter(username=username).update(username=F("username"))
+                user = user_model.objects.select_for_update().filter(username=username).first()
+                created = user is None
+                if user is None:
+                    user = user_model(username=username)
+                if email:
+                    user.email = email
+                user.is_staff = True
+                user.is_active = True
+                user.password = prepared.password
+                if created:
+                    user.save(force_insert=True)
+                else:
+                    user.save(update_fields=["email", "is_staff", "is_active", "password"])
+        except IntegrityError as exc:
+            raise CommandError("Account changed concurrently; retry bootstrap_operator.") from exc
 
         action = "Created" if created else "Updated"
         self.stdout.write(self.style.SUCCESS(f"{action} operator account: {username}"))

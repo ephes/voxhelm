@@ -257,3 +257,27 @@ def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch
     assert failed.storage_key not in caplog.text
     staging.cleanup_expired_staged_media()
     assert not StagedMedia.objects.filter(expires_at=expired).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("record_fails", [False, True])
+def test_discard_failure_logs_staged_id_without_private_detail(monkeypatch, caplog, record_fails):
+    staged = staging.stage_uploaded_audio(
+        producer="synthetic",
+        upload=SimpleUploadedFile("discard.mp3", b"audio", content_type="audio/mpeg"),
+    )
+
+    def fail_delete(**kwargs):
+        raise OSError("synthetic-private-storage-error https://private.invalid/path")
+
+    monkeypatch.setattr(staging, "delete_staged_media", fail_delete)
+    if record_fails:
+
+        def fail_save(self, *args, **kwargs):
+            raise OSError("private")
+
+        monkeypatch.setattr(StagedMedia, "save", fail_save)
+    staging.discard_unfinished_staged_media(staged=staged)
+    action = "operator_recovery" if record_fails else "retry_on_expiry"
+    assert f"staged={staged.id} action={action}" in caplog.text
+    assert "private" not in caplog.text

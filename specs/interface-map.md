@@ -155,6 +155,14 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 
 **Request:** `POST /v1/jobs`
 
+After authentication, submission and worker-control JSON use the same envelope:
+object root, at most 2 MiB encoded bytes and 128 object/array nesting levels,
+unique members at every level and finite numbers. Invalid JSON, duplicate keys
+and decoder resource failures return a fixed HTTP 400 before state changes;
+oversized bodies return 413. Unexpected submission/upload backend RuntimeError
+returns HTTP 500 `Batch processing failed.` with fixed diagnostic categories;
+staging compensation and its retained retry records remain in effect.
+
 ```json
 {
   "job_type": "transcribe",
@@ -236,6 +244,10 @@ The producer-facing `id` is Voxhelm's stable job identifier. Voxhelm also stores
 #### 2.2.2 Job Status (Producer Polling)
 
 **Request:** `GET /v1/jobs/<job_id>`
+
+Missing/foreign jobs and jobs deleted during reconciliation/serialization share
+HTTP 404 `Job not found.` without recreation or retries. Other storage failures
+remain server errors.
 
 **Response:**
 

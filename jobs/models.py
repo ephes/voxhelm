@@ -241,3 +241,4 @@ class RetentionProgress(models.Model):
 
     name = models.CharField(max_length=64, primary_key=True)
     cursor = models.JSONField(default=dict)
+    generation = models.PositiveBigIntegerField(default=0)

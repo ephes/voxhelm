@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any
+from typing import Any, BinaryIO
 
 from django.conf import settings
 
@@ -143,7 +143,13 @@ class WindowTranscription:
 def resolve_window_runtime() -> tuple[str, Path]:
     """The ``whisper-cli`` path and the verified turbo model, or ``BackendUnavailableError``."""
     executable = resolve_whispercpp_binary(settings.VOXHELM_WHISPERCPP_BIN)
-    model_path = resolve_whispercpp_model_path(settings.VOXHELM_WINDOW_MODEL)
+    configured = resolve_whispercpp_model_path(settings.VOXHELM_WINDOW_MODEL)
+    # Resolve a symlinked model (such as a cache entry linking to a blob) once;
+    # the generation checks then open the real file without following links.
+    try:
+        model_path = configured.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise BackendUnavailableError("Window model is not readable.") from exc
     digest = model_sha256(model_path)
     if digest != WINDOW_MODEL_SHA256:
         raise BackendUnavailableError(
@@ -180,7 +186,14 @@ def transcribe_window(
     raise_if_cancelled(cancel_event)
     executable, model_path = resolve_window_runtime()
     clip_start = max(0.0, float(t) - window.pad_seconds)
-    with tempfile.TemporaryDirectory(prefix="voxhelm-window-") as temp_dir:
+    with (
+        open_window_model(model_path) as model_handle,
+        tempfile.TemporaryDirectory(prefix="voxhelm-window-") as temp_dir,
+    ):
+        generation = model_generation(os.fstat(model_handle.fileno()))
+        if model_sha256(model_path) != WINDOW_MODEL_SHA256:
+            raise BackendUnavailableError("Window model changed; retry with the pinned model.")
+        verify_model_generation(model_path, model_handle, generation)
         temp_root = Path(temp_dir)
         clip_path = temp_root / "clip.wav"
         decode_clip(
@@ -197,7 +210,7 @@ def transcribe_window(
         args = [
             executable,
             "-m",
-            str(model_path),
+            f"/dev/fd/{model_handle.fileno()}",
             "-f",
             str(clip_path),
             "-l",
@@ -220,14 +233,17 @@ def transcribe_window(
             "-of",
             str(output_base),
         ]
+        verify_model_generation(model_path, model_handle, generation)
         try:
             completed = run_cancellable_process(
                 args,
                 cancel_event=cancel_event,
                 timeout_seconds=settings.VOXHELM_WINDOW_TIMEOUT_SECONDS,
+                pass_fds=(model_handle.fileno(),),
             )
         except OSError as exc:
             raise RuntimeError(f"whisper.cpp could not be started: {exc}") from exc
+        verify_model_generation(model_path, model_handle, generation)
         # stdout carries the transcript; only the log may go into an error message.
         if completed.returncode != 0:
             raise RuntimeError(f"whisper.cpp window transcription failed: {_log_tail(completed)}")
@@ -424,25 +440,61 @@ def window_identity(executable: str) -> dict[str, Any]:
     }
 
 
-def model_sha256(model_path: Path) -> str:
-    """SHA-256 of the model file, cached per path, size, inode and modification time."""
+def model_generation(stat: os.stat_result) -> tuple[int, ...]:
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def open_window_model(path: Path) -> BinaryIO:
+    """Admit a regular descriptor without following links or blocking on a FIFO."""
     try:
-        stat = model_path.stat()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        handle = os.fdopen(descriptor, "rb")
+        try:
+            if not S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise BackendUnavailableError("Window model must be a regular file.")
+            os.set_blocking(handle.fileno(), True)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
     except OSError as exc:
-        raise BackendUnavailableError(f"Window model '{model_path}' is not readable.") from exc
-    return _model_sha256(str(model_path), stat.st_size, stat.st_ino, stat.st_mtime_ns)
+        raise BackendUnavailableError("Window model is not readable.") from exc
+
+
+def verify_model_generation(path: Path, handle: BinaryIO, generation: tuple[int, ...]) -> None:
+    try:
+        if (
+            model_generation(os.fstat(handle.fileno())) != generation
+            or model_generation(path.stat(follow_symlinks=False)) != generation
+        ):
+            raise BackendUnavailableError("Window model changed; retry with a stable model.")
+    except OSError as exc:
+        raise BackendUnavailableError("Window model is not readable.") from exc
+
+
+def model_sha256(model_path: Path) -> str:
+    """Hash one regular opened generation; metadata changes invalidate the cache."""
+    try:
+        stat = model_path.stat(follow_symlinks=False)
+        if not S_ISREG(stat.st_mode):
+            raise BackendUnavailableError("Window model must be a regular file.")
+        return _model_sha256(str(model_path), model_generation(stat))
+    except OSError as exc:
+        raise BackendUnavailableError("Window model is not readable.") from exc
 
 
 @lru_cache(maxsize=4)
-def _model_sha256(path: str, size: int, inode: int, mtime_ns: int) -> str:
-    del size, inode, mtime_ns
+def _model_sha256(path: str, generation: tuple[int, ...]) -> str:
     digest = hashlib.sha256()
+    model_path = Path(path)
     try:
-        with open(path, "rb") as handle:
+        with open_window_model(model_path) as handle:
+            verify_model_generation(model_path, handle, generation)
             while chunk := handle.read(_HASH_CHUNK_BYTES):
                 digest.update(chunk)
+            verify_model_generation(model_path, handle, generation)
     except OSError as exc:
-        raise BackendUnavailableError(f"Window model '{path}' is not readable.") from exc
+        raise BackendUnavailableError("Window model is not readable.") from exc
     return digest.hexdigest()
 
 

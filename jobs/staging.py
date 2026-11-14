@@ -127,19 +127,13 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
     try:
         delete_staged_media(staged=staged, missing_ok=False)
     except Exception:
-        logger.exception(
-            "Could not remove unfinished staged upload %s (%s); expiry cleanup will retry.",
-            staged.id,
-            staged.storage_key,
-        )
+        logger.error("batch_staging_cleanup_failure staged=%s action=retry_on_expiry", staged.id)
         try:
             staged.expires_at = timezone.now()
             staged.save()
         except Exception:
-            logger.exception(
-                "Could not keep a cleanup record for staged upload %s (%s).",
-                staged.id,
-                staged.storage_key,
+            logger.error(
+                "batch_staging_cleanup_record_failure staged=%s action=operator_recovery", staged.id
             )
 
 

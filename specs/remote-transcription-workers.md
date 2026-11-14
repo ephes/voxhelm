@@ -220,6 +220,11 @@ VOXHELM_WORKER_TOKENS="atlas=replace-worker-token"
 Token behavior:
 
 - Worker requests use `Authorization: Bearer <token>`.
+- After authentication, all worker-control JSON bodies share the batch submission
+  envelope: at most 2 MiB encoded bytes, 128 nesting levels, an object root,
+  unique member names at every level and finite numbers. Invalid/duplicate/resource
+  failures return fixed HTTP 400 invalid-JSON errors before worker/lease writes;
+  oversized bodies return 413. Field-specific limits below still apply.
 - A token maps to exactly one configured `worker_id`, for example `atlas`.
 - The request body may include `worker_id`, but the authenticated token identity wins.
 - Unknown or mismatched worker IDs return `401` or `403`.

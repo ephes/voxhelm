@@ -250,14 +250,17 @@ def _complete(client, job, claim, manifest):
 
 
 @pytest.mark.django_db
-def test_oversized_manifest_is_refused_before_store_access(client, settings, monkeypatch):
+@pytest.mark.parametrize("extra_count", [33, 10_000])
+def test_oversized_manifest_is_refused_before_store_access(
+    client, settings, monkeypatch, extra_count
+):
     job = submit_remote_job(client, settings, task_ref="manifest-budget")
     claim = claim_one(client).json()["job"]
     manifest = transcript_manifest(str(job.id), claim["attempt"])
     filler = dict(manifest[0])
     manifest = manifest + [
         {**filler, "name": f"extra-{i}.mp3", "storage_key": f"{filler['storage_key']}-{i}"}
-        for i in range(10_000)
+        for i in range(extra_count)
     ]
     from jobs import remote_workers
 
@@ -266,8 +269,9 @@ def test_oversized_manifest_is_refused_before_store_access(client, settings, mon
 
     monkeypatch.setattr(remote_workers, "get_artifact_store_for_identity", no_store)
     response = _complete(client, job, claim, manifest)
-    assert response.status_code == 400
-    assert "at most 32" in response.json()["error"]["message"]
+    assert response.status_code == (413 if extra_count == 10_000 else 400)
+    expected = "2 MiB" if extra_count == 10_000 else "at most 32"
+    assert expected in response.json()["error"]["message"]
     assert not JobArtifact.objects.filter(job=job).exists()
 
 

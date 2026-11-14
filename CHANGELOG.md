@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Update the locked OpenTelemetry API/SDK to 1.45.2 (semantic conventions
+  0.66b2), clearing the existing dependency-audit finding CVE-2026-126360.
+
+- Bound batch/worker JSON bytes and nesting, refuse duplicate members and
+  nonfinite numbers, and normalize decoder resource failures before writes.
+  The remote worker refuses a nonfinite request value locally before sending.
+- Return fixed private batch backend and staging compensation diagnostics while
+  preserving cleanup and retry records; cleanup failure logs name the staged id.
+- Hash operator passwords before publication and commit each complete account
+  update under a writer lock, with explicit retry on first-creation conflicts.
+- Publish retention continuation by generation compare-and-swap so stale
+  maintenance runs cannot replace newer progress, including explicit cursors.
+- Hash only stable regular opened window models, invalidate cached hashes on
+  change metadata and bind native window invocation to the checked descriptor.
+  A symlinked configured model is resolved once to its regular file.
+- Return owner-scoped 404 when a polled job disappears during reconciliation.
+
 - Write Piper audio incrementally with 30-minute and 128 MiB PCM ceilings;
   require stable positive mono/stereo 16-bit geometry and a complete nonempty
   WAV before returning metadata. Invalid or failed output is cleaned up.
