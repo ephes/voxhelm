@@ -83,8 +83,11 @@ publication. Local jobs and remote workers validate the entire cue list before
 writing the first transcript artifact; source audio intermediates may already
 exist. The same rejection policy applies to text, verbose JSON, VTT, DOTE and
 Podlove. Finite negative/reversed timestamps retain the existing policy:
-verbose JSON preserves raw boundaries; timed formats clamp reversed ends to
-starts and render negative times as zero.
+verbose JSON preserves raw boundaries. Timed formats quantize each endpoint once
+to integer milliseconds, clamp negative times to zero and extend zero, reversed
+or rounding-collapsed spans to a minimum of 1 ms. Text-only fallback cues follow
+the same rule. This preserves nonblank content in playable cues; overlapping or
+adjacent cues keep their original ordering and are not globally retimed.
 
 Known-speaker reference and segment embeddings must be nonempty and contain
 only finite coordinates. Invalid evidence raises `KnownSpeakerError`, aborting
@@ -124,13 +127,20 @@ cached only after successful device placement, so failed placement can be retrie
 
 The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)
 writes one cue per segment, each with a single payload line. Like `dote` and
-`podlove`, it skips segments with empty text and clamps an end time that lies
-before the start time to the start time. Cue text is escaped for WebVTT: `&`,
+`podlove`, it skips segments with empty text and uses quantized integer
+millisecond endpoints with a minimum 1 ms duration. Cue text is escaped for WebVTT: `&`,
 `<`, and `>` become `&amp;`, `&lt;`, and `&gt;`, `-->` becomes `->`, and line
 breaks inside a segment collapse to one space, so transcript text can neither
 inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
+
+The German drift check retains the original window words when a retry has no
+usable in-window words, even with strong matching language evidence. Nonblank,
+finite, positive-duration retry words must start inside the window; ends are
+clipped at its boundary. Empty/fully filtered retries record
+`rejection_reason: empty_retry` and count as rejected. Accepted replacements
+still carry `c: null`, preserving the absence of Parakeet confidence evidence.
 
 ## Kokoro inference and installed style validation
 

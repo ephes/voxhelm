@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Quantize VTT/DOTE/Podlove cues once to integer milliseconds and ensure a
+  minimum 1 ms duration, preserving verbose raw timing. Retain original drift
+  words on empty/fully filtered retries and record an explicit rejection.
+
 - Propagate WhisperKit caller cancellation through upload/header/body waits,
   closing owned resources and rejecting late success without fallback. Keep
   sidecar failure responses and logs private with fixed categories/status only.

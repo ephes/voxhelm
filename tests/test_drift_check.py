@@ -643,3 +643,35 @@ def test_remote_completion_with_another_drift_check_is_refused(
 
     assert response.status_code == 400
     assert message in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "retry_words",
+    [
+        [],
+        [{"w": "", "s": 30.2, "e": 30.3}],
+        [{"w": "outside", "s": 60.0, "e": 60.2}],
+        [{"w": "reversed", "s": 30.2, "e": 29.9}],
+    ],
+)
+def test_empty_or_unusable_retry_retains_original_words(retry_words):
+    original = words_at(30.0, DRIFTED)
+
+    def retry(*args, **kwargs):
+        return WindowTranscription(
+            t=30.0,
+            clip_start=29.0,
+            language="de",
+            language_probability=0.999,
+            words=retry_words,
+            identity={},
+        )
+
+    check = run_drift_check(AUDIO, original, language="de", retry=retry)
+    assert check.words == original
+    record = check.record["windows"][0]
+    assert record["accepted"] is False
+    assert record["rejection_reason"] == "empty_retry"
+    assert record["words_after"] == len(original)
+    assert check.record["summary"]["rejected"] == 1
+    assert check.record["summary"]["accepted"] == 0

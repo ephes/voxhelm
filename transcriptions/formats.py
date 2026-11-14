@@ -12,8 +12,8 @@ if TYPE_CHECKING:
 
 class SegmentLike(Protocol):
     id: int
-    start: float
-    end: float
+    start_ms: int
+    end_ms: int
     text: str
     speaker: str | None
 
@@ -64,7 +64,7 @@ def render_vtt(result: TranscriptionResult) -> str:
         if not cue_text:
             continue
         timestamp_line = (
-            f"{format_vtt_timestamp(segment.start)} --> {format_vtt_timestamp(segment.end)}"
+            f"{format_milliseconds(segment.start_ms)} --> {format_milliseconds(segment.end_ms)}"
         )
         lines.append(timestamp_line)
         lines.append(cue_text)
@@ -92,8 +92,8 @@ def render_dote(result: TranscriptionResult) -> dict[str, Any]:
     return {
         "lines": [
             {
-                "startTime": format_dote_timestamp(segment.start),
-                "endTime": format_dote_timestamp(segment.end),
+                "startTime": format_milliseconds(segment.start_ms, separator=","),
+                "endTime": format_milliseconds(segment.end_ms, separator=","),
                 "speakerDesignation": segment.speaker or "",
                 "text": segment.text,
             }
@@ -105,14 +105,12 @@ def render_dote(result: TranscriptionResult) -> dict[str, Any]:
 def render_podlove(result: TranscriptionResult) -> dict[str, Any]:
     transcripts = []
     for segment in normalized_segments(result):
-        start_ms = max(int(round(segment.start * 1000)), 0)
-        end_ms = max(int(round(segment.end * 1000)), 0)
         transcripts.append(
             {
-                "start": format_podlove_timestamp(segment.start),
-                "start_ms": start_ms,
-                "end": format_podlove_timestamp(segment.end),
-                "end_ms": end_ms,
+                "start": format_milliseconds(segment.start_ms),
+                "start_ms": segment.start_ms,
+                "end": format_milliseconds(segment.end_ms),
+                "end_ms": segment.end_ms,
                 "speaker": segment.speaker or "",
                 "voice": segment.speaker or "",
                 "text": segment.text,
@@ -161,29 +159,28 @@ class SimpleSegment:
         self.id = id
         self.start = start
         self.end = end
+        # Quantize once. Integer endpoints also preserve a positive duration for
+        # very large finite times, where adding 0.001 to a float would do nothing.
+        self.start_ms = max(int(round(start * 1000)), 0)
+        self.end_ms = max(int(round(end * 1000)), self.start_ms + 1)
         self.text = text
         self.speaker = speaker
 
 
-def format_vtt_timestamp(seconds: float) -> str:
-    milliseconds = max(int(round(seconds * 1000)), 0)
+def format_milliseconds(milliseconds: int, *, separator: str = ".") -> str:
     hours, remainder = divmod(milliseconds, 3_600_000)
     minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02}.{millis:03}"
+    seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02}:{minutes:02}:{seconds:02}{separator}{millis:03}"
+
+
+def format_vtt_timestamp(seconds: float) -> str:
+    return format_milliseconds(max(int(round(seconds * 1000)), 0))
 
 
 def format_dote_timestamp(seconds: float) -> str:
-    milliseconds = max(int(round(seconds * 1000)), 0)
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    whole_seconds, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{whole_seconds:02},{millis:03}"
+    return format_milliseconds(max(int(round(seconds * 1000)), 0), separator=",")
 
 
 def format_podlove_timestamp(seconds: float) -> str:
-    milliseconds = max(int(round(seconds * 1000)), 0)
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    whole_seconds, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{whole_seconds:02}.{millis:03}"
+    return format_milliseconds(max(int(round(seconds * 1000)), 0))

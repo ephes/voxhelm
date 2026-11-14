@@ -233,3 +233,10 @@ must be a UTF-8 object with at most 128 nesting levels, no duplicate members and
 only finite numbers. Rejected/missing output raises a fixed backend error before
 normalization; ordinary token timings are preserved. Window clips keep their
 existing 8 MiB file allowance and decoder compatibility.
+
+
+A window retry with no retained words can be a normal decoded response (for
+example all tokens fall outside the grid window). The drift caller records that
+as a rejected `empty_retry` and preserves the source words, regardless of matching
+language probability. It admits only nonblank, finite, positive word spans in the
+window and clips crossing ends to its boundary.

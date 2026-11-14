@@ -261,3 +261,16 @@ Rerun:
 uv run python evals/drift_check_g2.py run --out /tmp/g2
 uv run python evals/drift_check_g2.py analyse --out /tmp/g2
 ```
+
+
+## Lossless empty-retry fallback (2026-11-14)
+
+Matching detected language and probability in `[0.9, 1]` are necessary but no
+longer sufficient to replace a populated window. A retry must retain at least
+one nonblank word with finite positive timing, starting in `[t, t + 30)`;
+word ends are clipped at the window boundary. An empty retry or one whose words
+all fail this admission records `accepted: false`,
+`rejection_reason: "empty_retry"`, retains the original word count/content and
+increments `rejected`. Usable replacements still splice normally and have
+`c: null`; no confidence is inferred from absent words. This is an output
+admission safeguard around the existing frozen detection rule and word lists.
