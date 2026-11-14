@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Propagate WhisperKit caller cancellation through upload/header/body waits,
+  closing owned resources and rejecting late success without fallback. Keep
+  sidecar failure responses and logs private with fixed categories/status only.
+
 - Stream WhisperKit responses under separate transcript/error byte limits and
   strict object JSON admission, with one elapsed deadline spanning connect,
   upload, headers and body; resource failures do not trigger backend fallback.

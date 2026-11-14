@@ -284,3 +284,18 @@ error bodies at most 64 KiB. Overflow closes the response before decoding. Nativ
 JSON admission is also used here: UTF-8 object, depth <=128, no duplicate members
 or nonfinite numbers. Deadline, byte, read and decode failures are terminal for
 this request; unreachable connection failures retain backend-unavailable routing.
+
+
+## Cancellation and failure privacy (2026-11-14)
+
+The caller's cooperative event is checked before HTTP work, polled every 50 ms
+inside the exchange and checked again before result normalization. Cancellation
+cancels and awaits the request, closes response/upload resources, and propagates
+`InferenceCancelled` without fallback or publication. A late response cannot turn
+cancellation into success. Voxhelm releases its lane/file ownership; the sidecar's
+own inference cancellation remains outside Voxhelm's control.
+
+HTTP rejections expose only status; unreachable/read/deadline/JSON outcomes use
+fixed diagnostics. Operational logs use safe failure categories/status and never
+include response bodies, prompt/file data, URL userinfo or query strings. The
+public HTTP transport is used directly to avoid full-URL client log records.

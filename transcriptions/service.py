@@ -578,6 +578,7 @@ class WhisperKitBackend:
                 "WhisperKit is disabled. Set VOXHELM_WHISPERKIT_ENABLED=true to use it."
             )
 
+        _raise_if_cancelled(params)
         try:
             payload = call_whisperkit_server(
                 base_url=self.base_url,
@@ -586,15 +587,18 @@ class WhisperKitBackend:
                 language=params.language,
                 prompt=params.prompt,
                 timeout_seconds=self.timeout_seconds,
+                cancel_event=params.cancel_event,
             )
-        except OSError as exc:
+        except OSError:
+            _raise_if_cancelled(params)
+            _LOGGER.warning("WhisperKit sidecar failure: unreachable.")
             # Only transport-level failures are treated as backend unavailability.
             # HTTP/server-side failures stay visible instead of silently switching backends.
             raise BackendUnavailableError(
-                "WhisperKit server "
-                f"'{self.base_url}' is not reachable. Check the sidecar process and URL config."
-            ) from exc
+                "WhisperKit server is not reachable. Check the sidecar process and URL config."
+            ) from None
 
+        _raise_if_cancelled(params)
         return normalize_transcription_payload(
             payload,
             backend_name="whisperkit",
@@ -794,9 +798,18 @@ def call_whisperkit_server(
     model_name: str,
     language: str | None,
     prompt: str | None,
-    timeout_seconds: int,
+    timeout_seconds: float,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    parsed = urlparse(base_url)
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise InferenceCancelled("WhisperKit inference was cancelled by the caller.")
+
+    check_cancelled()
+    try:
+        parsed = urlparse(base_url)
+    except ValueError:
+        raise BackendUnavailableError("WhisperKit sidecar URL configuration is invalid.") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise BackendUnavailableError(
             "VOXHELM_WHISPERKIT_BASE_URL must be an absolute http(s) URL."
@@ -831,7 +844,10 @@ def call_whisperkit_server(
         ).encode("utf-8")
     )
     payload_suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    content_length = len(payload_prefix) + audio_path.stat().st_size + len(payload_suffix)
+    try:
+        content_length = len(payload_prefix) + audio_path.stat().st_size + len(payload_suffix)
+    except OSError:
+        raise RuntimeError("WhisperKit request media could not be read.") from None
 
     async def content():
         yield bytes(payload_prefix)
@@ -843,12 +859,10 @@ def call_whisperkit_server(
     async def exchange() -> dict[str, Any]:
         try:
             async with asyncio.timeout(timeout_seconds):
-                async with httpx.AsyncClient(
-                    timeout=timeout_seconds,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as client:
-                    async with client.stream(
+                # Use the public transport directly: AsyncClient's request log
+                # includes full URLs, which can carry private query parameters.
+                async with httpx.AsyncHTTPTransport() as transport:
+                    request = httpx.Request(
                         "POST",
                         f"{parsed.scheme}://{parsed.netloc}{request_path}",
                         content=content(),
@@ -857,7 +871,9 @@ def call_whisperkit_server(
                             "Content-Length": str(content_length),
                             "Accept-Encoding": "identity",
                         },
-                    ) as response:
+                    )
+                    response = await transport.handle_async_request(request)
+                    try:
                         limit = (
                             WHISPERKIT_ERROR_MAX_BYTES
                             if response.status_code >= 400
@@ -872,31 +888,55 @@ def call_whisperkit_server(
                             body.extend(chunk)
                         if response.status_code >= 400:
                             status = response.status_code
-                            detail = body.decode("utf-8", errors="replace").strip()
+                            _LOGGER.warning("WhisperKit sidecar failure: HTTP %s.", status)
                             raise RuntimeError(
-                                f"WhisperKit transcription failed with HTTP {status}: {detail}"
+                                f"WhisperKit transcription failed with HTTP {status}."
                             )
                         try:
                             return decode_json_object(bytes(body))
                         except (ValueError, RecursionError) as exc:
                             raise RuntimeError("WhisperKit server returned invalid JSON.") from exc
+                    finally:
+                        await response.aclose()
         except (TimeoutError, httpx.TimeoutException) as exc:
             raise RuntimeError(
                 "WhisperKit exchange exceeded the configured elapsed deadline."
             ) from exc
         except httpx.ConnectError as exc:
             raise OSError("WhisperKit server is not reachable.") from exc
-        except httpx.HTTPError as exc:
-            raise RuntimeError("WhisperKit response transport failed.") from exc
+        except httpx.HTTPError:
+            _LOGGER.warning("WhisperKit sidecar failure: response transport.")
+            raise RuntimeError("WhisperKit response transport failed.") from None
+        except OSError:
+            raise RuntimeError("WhisperKit request media could not be read.") from None
+        except ValueError:
+            raise RuntimeError("WhisperKit sidecar configuration is invalid.") from None
 
     # Match the worker-control transport: own an isolated loop so sync callers can
     # interrupt the entire upload/read and close streams before releasing the lane.
     # A cancelled OS DNS lookup may finish later, without owning an HTTP stream/file.
     loop = asyncio.new_event_loop()
     task = loop.create_task(exchange())
+
+    async def cancel_on_signal() -> None:
+        assert cancel_event is not None
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.05)
+        task.cancel()
+
+    watcher = loop.create_task(cancel_on_signal()) if cancel_event is not None else None
     try:
-        return loop.run_until_complete(task)
+        try:
+            payload = loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            check_cancelled()
+            raise
+        check_cancelled()
+        return payload
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            loop.run_until_complete(asyncio.gather(watcher, return_exceptions=True))
         if not task.done():
             task.cancel()
             loop.run_until_complete(asyncio.gather(task, return_exceptions=True))

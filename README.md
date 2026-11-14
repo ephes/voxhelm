@@ -1493,6 +1493,15 @@ levels, unique members and finite numbers. Size, deadline, read and JSON failure
 fail the request without silently switching inference backends; only an unreachable
 sidecar retains the existing backend-unavailable fallback policy.
 
+Caller cancellation reaches the WhisperKit upload, header wait and response read.
+It closes the owned HTTP transport and upload file before releasing inference
+ownership, raises `InferenceCancelled`, and discards even a late successful
+response without fallback. It stops Voxhelm's wait; it cannot guarantee that the
+independent sidecar stops inference after its client disconnects.
+Public sidecar failures expose fixed categories or HTTP status only. Logs carry
+those same safe categories, never response bodies, prompts, upload paths or URL
+credentials/query strings. The transport avoids full-URL HTTP client logging.
+
 Current limitation: the lane scheduler gates Voxhelm's HTTP, batch, and Wyoming
 entry points, but it does not reach inside the WhisperKit sidecar itself. Once
 Voxhelm has admitted a WhisperKit request, the sidecar's internal inference

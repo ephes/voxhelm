@@ -108,3 +108,178 @@ def test_whisperkit_deadline_covers_slow_progress(sidecar, tmp_path, phase):
             audio_bytes=16 * 1024 * 1024 if phase == "upload" else 16,
         )
     assert time.monotonic() - started < 1.5
+
+
+@pytest.mark.parametrize("phase", ["upload", "headers", "body"])
+def test_whisperkit_backend_cancels_owned_exchange(sidecar, tmp_path, phase, monkeypatch):
+    from lane_scheduler import InferenceCancelled
+
+    sidecar[1]["name"] = phase
+    path = tmp_path / "synthetic.wav"
+    path.write_bytes(b"x" * (16 * 1024 * 1024 if phase == "upload" else 16))
+    event = threading.Event()
+    opened = []
+    path_open = type(path).open
+
+    def record_open(self, *args, **kwargs):
+        handle = path_open(self, *args, **kwargs)
+        if self == path:
+            opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(type(path), "open", record_open)
+
+    def cancel():
+        assert sidecar[1]["received"].wait(2)
+        time.sleep(0.1)
+        event.set()
+
+    watcher = threading.Thread(target=cancel, daemon=True)
+    watcher.start()
+    backend = service.WhisperKitBackend(
+        enabled=True,
+        base_url=sidecar[0],
+        model_name="synthetic",
+        timeout_seconds=2,
+    )
+    started = time.monotonic()
+    with pytest.raises(InferenceCancelled):
+        backend.transcribe(
+            path, service.TranscribeParams("whisperkit", None, None, cancel_event=event)
+        )
+    watcher.join(2)
+    assert time.monotonic() - started < 1.2
+    assert all(handle.closed for handle in opened)
+
+
+def test_whisperkit_cancelled_before_start_never_calls_transport(monkeypatch, tmp_path):
+    from lane_scheduler import InferenceCancelled
+
+    event = threading.Event()
+    event.set()
+
+    def unexpected(**kwargs):
+        pytest.fail("cancelled inference started HTTP work")
+
+    monkeypatch.setattr(service, "call_whisperkit_server", unexpected)
+    backend = service.WhisperKitBackend(
+        enabled=True, base_url="http://localhost", model_name="x", timeout_seconds=1
+    )
+    with pytest.raises(InferenceCancelled):
+        backend.transcribe(
+            tmp_path / "absent.wav",
+            service.TranscribeParams("auto", None, None, cancel_event=event),
+        )
+
+
+def test_whisperkit_http_error_omits_private_context(sidecar, tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    sidecar[1].update(name="error", body=b"PRIVATE_PROMPT_SENTINEL")
+    url = (
+        sidecar[0].replace("http://", "http://user:PRIVATE_PASSWORD_SENTINEL@")
+        + "?key=PRIVATE_QUERY_SENTINEL"
+    )
+    path = tmp_path / "PRIVATE_PATH_SENTINEL.wav"
+    path.write_bytes(b"synthetic")
+    backend = service.WhisperKitBackend(
+        enabled=True, base_url=url, model_name="x", timeout_seconds=2
+    )
+    with pytest.raises(RuntimeError) as caught:
+        backend.transcribe(
+            path, service.TranscribeParams("whisperkit", "PRIVATE_PROMPT_SENTINEL", None)
+        )
+    assert "HTTP 503" in str(caught.value)
+    public = str(caught.value) + caplog.text
+    assert "PRIVATE_" not in public
+
+
+def test_whisperkit_unreachable_omits_url_and_exception(monkeypatch, tmp_path, caplog):
+    def unreachable(**kwargs):
+        raise OSError("PRIVATE_PATH_SENTINEL")
+
+    monkeypatch.setattr(service, "call_whisperkit_server", unreachable)
+    backend = service.WhisperKitBackend(
+        enabled=True,
+        base_url="http://user:PRIVATE_PASSWORD_SENTINEL@localhost?key=PRIVATE_QUERY_SENTINEL",
+        model_name="x",
+        timeout_seconds=1,
+    )
+    with pytest.raises(service.BackendUnavailableError) as caught:
+        backend.transcribe(tmp_path / "input", service.TranscribeParams("whisperkit", None, None))
+    assert "not reachable" in str(caught.value)
+    assert "PRIVATE_" not in str(caught.value) + caplog.text
+
+
+def test_whisperkit_api_error_is_private(client, monkeypatch, sidecar, caplog):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    sidecar[1].update(name="error", body=b"PRIVATE_PROMPT_SENTINEL")
+    backend = service.WhisperKitBackend(
+        enabled=True,
+        base_url=sidecar[0] + "?key=PRIVATE_QUERY_SENTINEL",
+        model_name="x",
+        timeout_seconds=2,
+    )
+    monkeypatch.setattr(
+        service,
+        "get_backend_services_for_model",
+        lambda _: [service.BackendInvocation("whisperkit", backend)],
+    )
+    response = client.post(
+        "/v1/audio/transcriptions",
+        {
+            "file": SimpleUploadedFile("synthetic.wav", b"synthetic", content_type="audio/wav"),
+            "model": "whisper-1",
+        },
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 500
+    assert "HTTP 503" in response.json()["error"]["message"]
+    assert "PRIVATE_" not in response.content.decode() + caplog.text
+
+
+def test_whisperkit_late_success_after_cancellation_is_discarded(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
+    from lane_scheduler import InferenceCancelled
+
+    event = threading.Event()
+    ownership = []
+
+    @contextmanager
+    def admit(*args, **kwargs):
+        ownership.append("admitted")
+        try:
+            yield
+        finally:
+            ownership.append("released")
+
+    def late_success(**kwargs):
+        assert kwargs["cancel_event"] is event
+        event.set()
+        return {"text": "late synthetic result"}
+
+    class ForbiddenFallback:
+        def transcribe(self, *args):
+            pytest.fail("cancellation ran a fallback backend")
+
+    backend = service.WhisperKitBackend(
+        enabled=True, base_url="http://localhost", model_name="x", timeout_seconds=1
+    )
+    monkeypatch.setattr(service, "call_whisperkit_server", late_success)
+    monkeypatch.setattr(service, "admit_local_inference", admit)
+    monkeypatch.setattr(
+        service,
+        "get_backend_services_for_params",
+        lambda _: [
+            service.BackendInvocation("whisperkit", backend),
+            service.BackendInvocation("fallback", ForbiddenFallback()),
+        ],
+    )
+    with pytest.raises(InferenceCancelled):
+        service.transcribe_audio(
+            tmp_path / "input.wav", service.TranscribeParams("auto", None, None, cancel_event=event)
+        )
+    assert ownership == ["admitted", "released"]
