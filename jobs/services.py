@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
@@ -75,12 +76,14 @@ from transcriptions.known_speaker import (
     MIN_MIXED_WINDOW_HOP,
     REFERENCE_MAX_FRAMES,
     KnownSpeakerConfig,
+    KnownSpeakerConfigurationError,
     ReferenceAudio,
     build_speakers_artifact,
     decode_mono_16k,
     extract_reference_windows,
     get_known_speaker_backend,
     known_speaker_config_from_mapping,
+    normalized_speaker_name,
     resegmentation_enabled,
     run_known_speaker_postprocess,
 )
@@ -728,6 +731,7 @@ def parse_known_speakers(value: object) -> list[dict[str, Any]]:
         )
     known_speakers: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_names: set[str] = set()
     for raw_speaker in value:
         speaker = ensure_object(raw_speaker, "diarization.known_speakers[]")
         speaker_id = optional_string(speaker.get("id"))
@@ -739,6 +743,10 @@ def parse_known_speakers(value: object) -> list[dict[str, Any]]:
         name = optional_string(speaker.get("name"))
         if not name:
             raise ApiError("Each diarization.known_speakers entry requires a non-empty name.")
+        normalized_name = normalized_speaker_name(name)
+        if normalized_name in seen_names:
+            raise ApiError("Duplicate normalized diarization.known_speakers name.")
+        seen_names.add(normalized_name)
         references = parse_known_speaker_references(speaker.get("references"))
         known_speakers.append({"id": speaker_id, "name": name, "references": references})
     return known_speakers
@@ -847,6 +855,10 @@ def parse_known_speaker_config(value: object) -> dict[str, Any]:
         raise ApiError(
             f"diarization.known_speaker.mixed_window_hop must be at least {MIN_MIXED_WINDOW_HOP}."
         )
+    try:
+        known_speaker_config_from_mapping(normalized)
+    except KnownSpeakerConfigurationError as exc:
+        raise ApiError(f"diarization.known_speaker.{exc}") from exc
     return normalized
 
 
@@ -1426,6 +1438,7 @@ def run_known_speaker_for_job(
     audio_path: Path,
     result: TranscriptionResult,
     source_media: DownloadedMedia | None = None,
+    cancel_event: Event | None = None,
 ) -> tuple[TranscriptionResult, dict[str, Any]]:
     config = known_speaker_config_for_job(job)
     references = build_known_speaker_references(job, source_media=source_media)
@@ -1439,6 +1452,7 @@ def run_known_speaker_for_job(
         raw_turns=raw_turns,
         config=config,
         backend=backend,
+        cancel_event=cancel_event,
     )
     return outcome.result, build_speakers_artifact(outcome)
 

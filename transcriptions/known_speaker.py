@@ -28,24 +28,26 @@ backend, so the classification logic stays testable without torch/pyannote.
 
 from __future__ import annotations
 
+import heapq
 import importlib
 import math
 import os
 import selectors
 import subprocess
 import tempfile
+import unicodedata
 import wave
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic
 from typing import Any, Mapping, Protocol, Sequence
 
 from django.conf import settings
 
-from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
+from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
 from transcriptions.diarization import (
     SpeakerTurn,
     SpeakerTurnIndex,
@@ -57,7 +59,6 @@ from transcriptions.diarization import (
 from transcriptions.service import (
     TranscriptionResult,
     TranscriptionSegment,
-    TranscriptionWord,
 )
 
 KNOWN_SPEAKER_STRATEGY = "pyannote_known_speaker"
@@ -139,6 +140,7 @@ KNOWN_SPEAKER_NUMBER_OPTIONS = (
 # than the whole clip, matching the research spike's 16 high-energy 5s windows.
 REFERENCE_WINDOW_SECONDS = 5.0
 REFERENCE_MAX_WINDOWS = 16
+MAX_TRACK_FRAMES = 32_768
 SAMPLE_RATE = 16_000
 # Ten minutes of mono PCM16 (19.2 MB), before float32 conversion (38.4 MB).
 REFERENCE_MAX_FRAMES = 600 * SAMPLE_RATE
@@ -189,23 +191,45 @@ class KnownSpeakerConfig:
 
 def known_speaker_config_from_mapping(config_data: Mapping[str, Any]) -> KnownSpeakerConfig:
     """Build a config from a stored/claimed ``diarization.known_speaker`` mapping."""
-    defaults = KnownSpeakerConfig()
-
-    def number(name: str) -> float:
-        return float(config_data.get(name, getattr(defaults, name)))
-
-    return KnownSpeakerConfig(
-        embedding_model=str(config_data.get("embedding_model") or defaults.embedding_model),
-        min_segment_duration=number("min_segment_duration"),
-        auto_accept_margin=number("auto_accept_margin"),
-        min_top_similarity=number("min_top_similarity"),
-        mixed_window_duration=number("mixed_window_duration"),
-        mixed_window_hop=number("mixed_window_hop"),
-        mixed_window_margin=number("mixed_window_margin"),
-        mixed_window_min_similarity=number("mixed_window_min_similarity"),
-        turn_corroborated_min_similarity=number("turn_corroborated_min_similarity"),
-        resegment_hop=number("resegment_hop"),
+    defaults = asdict(KnownSpeakerConfig())
+    config = KnownSpeakerConfig(
+        **{key: config_data.get(key, value) for key, value in defaults.items()}
     )
+    return validate_known_speaker_config(config)
+
+
+def validate_known_speaker_config(config: KnownSpeakerConfig) -> KnownSpeakerConfig:
+    """One typed numeric domain for API, stored jobs and direct callers."""
+    values = asdict(config)
+    if not isinstance(config.embedding_model, str) or not config.embedding_model.strip():
+        raise KnownSpeakerConfigurationError("embedding_model must be a nonempty string.")
+    values["embedding_model"] = config.embedding_model.strip()
+    for name in KNOWN_SPEAKER_NUMBER_OPTIONS:
+        raw = values[name]
+        try:
+            number = float(raw)
+        except TypeError, ValueError, OverflowError:
+            raise KnownSpeakerConfigurationError(f"{name} must be a finite number.") from None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(number):
+            raise KnownSpeakerConfigurationError(f"{name} must be a finite number.")
+        maximum = math.inf if "margin" in name or "similarity" in name else 600
+        if not 0 <= number <= maximum:
+            raise KnownSpeakerConfigurationError(f"{name} must be between 0 and {maximum}.")
+        minimum = (
+            MIN_MIXED_WINDOW_DURATION
+            if name == "mixed_window_duration"
+            else MIN_MIXED_WINDOW_HOP
+            if name in {"mixed_window_hop", "resegment_hop"}
+            else 0
+        )
+        if number < minimum and (number != 0 or name == "mixed_window_hop"):
+            raise KnownSpeakerConfigurationError(f"{name} must be at least {minimum} (or 0 off).")
+        values[name] = number
+    return KnownSpeakerConfig(**values)
+
+
+def normalized_speaker_name(name: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", name).split()).casefold()
 
 
 def resegmentation_enabled(config: KnownSpeakerConfig) -> bool:
@@ -439,6 +463,7 @@ def find_mixed_windows(
     centroids: Mapping[str, Sequence[float]],
     config: KnownSpeakerConfig,
     backend: KnownSpeakerEmbeddingBackendProtocol,
+    cancel_event: Event | None = None,
 ) -> list[MixedWindow]:
     """Return the sub-windows that clearly belong to a different known speaker.
 
@@ -455,7 +480,7 @@ def find_mixed_windows(
         # no evidence and too short for the embedding model.
         if len(window) < min_samples:
             continue
-        classification = classify_embedding(backend.embed(window, SAMPLE_RATE), centroids)
+        classification = classify_embedding(_embed(backend, window, cancel_event), centroids)
         if (
             classification.top_speaker != segment_speaker
             and classification.margin >= config.mixed_window_margin
@@ -657,22 +682,60 @@ def extract_reference_windows(samples: Any, sample_rate: int) -> list[Any]:
     return windows
 
 
+def check_known_speaker_cancellation(cancel_event: Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise InferenceCancelled("Known-speaker postprocessing was cancelled.")
+
+
+def _embed(
+    backend: KnownSpeakerEmbeddingBackendProtocol, samples: Any, cancel_event: Event | None
+) -> list[float]:
+    check_known_speaker_cancellation(cancel_event)
+    embedding = backend.embed(samples, SAMPLE_RATE)
+    check_known_speaker_cancellation(cancel_event)
+    return embedding
+
+
+def check_track_budget(job_audio_samples: Any, config: KnownSpeakerConfig) -> None:
+    size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
+    hop = max(config.resegment_hop, MIN_MIXED_WINDOW_HOP)
+    if MAX_TRACK_FRAMES * hop + size <= len(job_audio_samples) / SAMPLE_RATE:
+        raise KnownSpeakerConfigurationError(
+            f"Known-speaker track exceeds the {MAX_TRACK_FRAMES}-frame/model-operation budget; "
+            "increase resegment_hop or disable resegmentation."
+        )
+
+
 def build_speaker_centroids(
     references: Sequence[ReferenceAudio],
     backend: KnownSpeakerEmbeddingBackendProtocol,
+    cancel_event: Event | None = None,
 ) -> dict[str, list[float]]:
     """Compute one normalized centroid per named speaker from reference windows.
 
     References for the same speaker name are merged so a contributor can supply
     multiple clips or source ranges.
     """
+    names: dict[str, str] = {}
+    identities: dict[str, str] = {}
+    for reference in references:
+        normalized = normalized_speaker_name(reference.name)
+        if (
+            not normalized
+            or not reference.speaker_id
+            or names.get(normalized, reference.speaker_id) != reference.speaker_id
+            or identities.get(reference.speaker_id, reference.name) != reference.name
+        ):
+            raise KnownSpeakerConfigurationError("Known-speaker name/identity collision.")
+        names[normalized] = reference.speaker_id
+        identities[reference.speaker_id] = reference.name
     embeddings_by_name: dict[str, list[list[float]]] = {}
     for reference in references:
         for window in reference.windows:
             if len(window) == 0:
                 continue
             embeddings_by_name.setdefault(reference.name, []).append(
-                backend.embed(window, SAMPLE_RATE)
+                _embed(backend, window, cancel_event)
             )
     centroids: dict[str, list[float]] = {}
     for name, embeddings in embeddings_by_name.items():
@@ -691,12 +754,15 @@ def build_speaker_track(
     centroids: Mapping[str, Sequence[float]],
     config: KnownSpeakerConfig,
     backend: KnownSpeakerEmbeddingBackendProtocol,
+    cancel_event: Event | None = None,
 ) -> list[TrackFrame]:
     """Classify a sliding window over the whole file against the centroids.
 
     A frame is clear when it meets the mixed-segment veto's margin and
     similarity thresholds; music, silence and overlapping speech are not.
     """
+    check_known_speaker_cancellation(cancel_event)
+    check_track_budget(job_audio_samples, config)
     size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
     hop = max(config.resegment_hop, MIN_MIXED_WINDOW_HOP)
     total = len(job_audio_samples) / SAMPLE_RATE
@@ -705,7 +771,7 @@ def build_speaker_track(
     while index * hop + size <= total:
         start = index * hop
         window = slice_samples(job_audio_samples, SAMPLE_RATE, start, start + size)
-        classification = classify_embedding(backend.embed(window, SAMPLE_RATE), centroids)
+        classification = classify_embedding(_embed(backend, window, cancel_event), centroids)
         frames.append(
             TrackFrame(
                 center=start + size / 2,
@@ -783,51 +849,65 @@ def split_segment_at_turns(
     """
     if not segment.words or len(turns) < 2:
         return [segment]
-    pieces: list[tuple[str, list[TranscriptionWord]]] = []
-    for word in segment.words:
+    # Each node owns a contiguous word range. Folding changes links/ranges,
+    # never copies accumulated words. Only the affected node needs rechecking.
+    speakers: list[str] = []
+    first: list[int] = []
+    stop: list[int] = []
+    for index, word in enumerate(segment.words):
         speaker = _turn_speaker_at((word.start + word.end) / 2, turns, turn_starts)
-        if pieces and pieces[-1][0] == speaker:
-            pieces[-1][1].append(word)
+        if speakers and speakers[-1] == speaker:
+            stop[-1] = index + 1
         else:
-            pieces.append((speaker, [word]))
+            speakers.append(speaker)
+            first.append(index)
+            stop.append(index + 1)
+    previous = [index - 1 for index in range(len(speakers))]
+    following = [index + 1 for index in range(len(speakers))]
+    following[-1] = -1
 
-    def bounds(position: int) -> tuple[float, float]:
-        start = segment.start if position == 0 else pieces[position][1][0].start
-        end = segment.end if position + 1 == len(pieces) else pieces[position + 1][1][0].start
+    def merge(left: int, right: int, speaker: str) -> int:
+        stop[left] = stop[right]
+        speakers[left] = speaker
+        following[left] = following[right]
+        if following[right] != -1:
+            previous[following[right]] = left
+        return left
+
+    def bounds(node: int) -> tuple[float, float]:
+        start = segment.start if node == 0 else segment.words[first[node]].start
+        end = segment.end if following[node] == -1 else segment.words[first[following[node]]].start
         return start, end
 
-    def too_small(position: int) -> bool:
-        # Judged on the boundaries the piece would be emitted with, so no piece
-        # can come out empty, reversed or sharing its start with the next one.
-        start, end = bounds(position)
-        words = pieces[position][1]
-        return (
-            len(words) < RESEGMENT_MIN_PIECE_WORDS
-            or words[-1].end - words[0].start < RESEGMENT_MIN_PIECE_SECONDS
+    node = 0
+    while node != -1 and following[0] != -1:
+        start, end = bounds(node)
+        small = (
+            stop[node] - first[node] < RESEGMENT_MIN_PIECE_WORDS
+            or segment.words[stop[node] - 1].end - segment.words[first[node]].start
+            < RESEGMENT_MIN_PIECE_SECONDS
             or end - start < RESEGMENT_MIN_PIECE_SECONDS
         )
-
-    while len(pieces) > 1:
-        small = next((i for i in range(len(pieces)) if too_small(i)), None)
-        if small is None:
-            break
-        target = small - 1 if small > 0 else 1
-        speaker = pieces[target][0]
-        first, second = sorted((small, target))
-        pieces[first : second + 1] = [(speaker, pieces[first][1] + pieces[second][1])]
-        # Folding can leave two neighbours with the same speaker.
-        joined: list[tuple[str, list[TranscriptionWord]]] = []
-        for piece in pieces:
-            if joined and joined[-1][0] == piece[0]:
-                joined[-1][1].extend(piece[1])
-            else:
-                joined.append(piece)
-        pieces = joined
-    if len(pieces) < 2:
+        if not small:
+            node = following[node]
+            continue
+        if previous[node] != -1:
+            node = merge(previous[node], node, speakers[previous[node]])
+        else:
+            node = merge(node, following[node], speakers[following[node]])
+        left = previous[node]
+        if left != -1 and speakers[left] == speakers[node]:
+            node = merge(left, node, speakers[node])
+        right = following[node]
+        if right != -1 and speakers[right] == speakers[node]:
+            node = merge(node, right, speakers[node])
+    if following[0] == -1:
         return [segment]
     split: list[TranscriptionSegment] = []
-    for position, (_speaker, words) in enumerate(pieces):
-        start, end = bounds(position)
+    node = 0
+    while node != -1:
+        start, end = bounds(node)
+        words = segment.words[first[node] : stop[node]]
         split.append(
             TranscriptionSegment(
                 id=segment.id,
@@ -838,6 +918,7 @@ def split_segment_at_turns(
                 words=tuple(words),
             )
         )
+        node = following[node]
     return split
 
 
@@ -867,16 +948,21 @@ def resolve_overlapping_turns(turns: Sequence[SpeakerTurn]) -> list[SpeakerTurn]
     ordered = sorted(turns, key=lambda turn: (turn.start, turn.end, turn.speaker))
     bounds = sorted({turn.start for turn in ordered} | {turn.end for turn in ordered})
     resolved: list[SpeakerTurn] = []
-    active: list[SpeakerTurn] = []
+    # Max latest-start/speaker precedence via a min heap of negative ranks.
+    # Expired entries are removed lazily; each turn is pushed/popped once.
+    ranks = {speaker: rank for rank, speaker in enumerate(sorted({t.speaker for t in ordered}))}
+    active: list[tuple[float, int, float, int]] = []
     position = 0
     for left, right in zip(bounds, bounds[1:], strict=False):
         while position < len(ordered) and ordered[position].start <= left:
-            active.append(ordered[position])
+            turn = ordered[position]
+            heapq.heappush(active, (-turn.start, -ranks[turn.speaker], turn.end, position))
             position += 1
-        active = [turn for turn in active if turn.end > left]
+        while active and active[0][2] <= left:
+            heapq.heappop(active)
         if not active:
             continue
-        speaker = max(active, key=lambda turn: (turn.start, turn.speaker)).speaker
+        speaker = ordered[active[0][3]].speaker
         if resolved and resolved[-1].speaker == speaker and resolved[-1].end == left:
             resolved[-1] = SpeakerTurn(start=resolved[-1].start, end=right, speaker=speaker)
         else:
@@ -899,11 +985,13 @@ def overlay_unmapped_turns(
     if not turns:
         turns = [SpeakerTurn(start=0.0, end=math.inf, speaker="")]
     pieces: list[SpeakerTurn] = []
+    ends = [turn.end for turn in unmapped]
     for turn in turns:
         start = turn.start
-        for other in unmapped:
-            if other.end <= start or other.start >= turn.end:
-                continue
+        index = bisect_right(ends, start)
+        while index < len(unmapped) and unmapped[index].start < turn.end:
+            other = unmapped[index]
+            index += 1
             if other.start > start:
                 pieces.append(SpeakerTurn(start=start, end=other.start, speaker=turn.speaker))
             start = max(start, other.end)
@@ -1076,6 +1164,7 @@ def classify_segments(
     config: KnownSpeakerConfig,
     backend: KnownSpeakerEmbeddingBackendProtocol,
     track_frames: Sequence[TrackFrame] = (),
+    cancel_event: Event | None = None,
 ) -> list[KnownSpeakerSegment]:
     """Classify every transcript segment against the known-speaker centroids.
 
@@ -1097,6 +1186,7 @@ def classify_segments(
             centroids=centroids,
             config=config,
             backend=backend,
+            cancel_event=cancel_event,
         )
 
     classifications: list[SegmentClassification] = []
@@ -1109,7 +1199,7 @@ def classify_segments(
         duration = max(segment.end - segment.start, 0.0)
         window = slice_samples(job_audio_samples, SAMPLE_RATE, segment.start, segment.end)
         window = pad_to_min_duration(window, SAMPLE_RATE, config.min_segment_duration)
-        embedding = backend.embed(window, SAMPLE_RATE)
+        embedding = _embed(backend, window, cancel_event)
         classification = classify_embedding(embedding, centroids)
         confident = is_confident(classification, duration=duration, config=config)
         mixed_windows: list[MixedWindow] = []
@@ -1133,6 +1223,7 @@ def classify_segments(
     label_speakers = map_raw_labels_to_speakers(label_votes)
     segments: list[KnownSpeakerSegment] = []
     for index, segment in enumerate(result.segments):
+        check_known_speaker_cancellation(cancel_event)
         classification = classifications[index]
         confident = confident_flags[index]
         mixed_windows = mixed_by_index[index]
@@ -1354,6 +1445,7 @@ def run_known_speaker_postprocess(
     raw_turns: list[SpeakerTurn],
     config: KnownSpeakerConfig,
     backend: KnownSpeakerEmbeddingBackendProtocol,
+    cancel_event: Event | None = None,
 ) -> KnownSpeakerOutcome:
     """Classify transcript segments against known-speaker references.
 
@@ -1366,11 +1458,15 @@ def run_known_speaker_postprocess(
     identity only after review/approval. The per-segment candidates, confidence,
     margin, uncertainty, and raw labels live in the ``speakers`` sidecar.
     """
+    config = validate_known_speaker_config(config)
+    check_known_speaker_cancellation(cancel_event)
+    if resegmentation_enabled(config) and any(segment.words for segment in result.segments):
+        check_track_budget(job_audio_samples, config)
     if not references:
         raise KnownSpeakerConfigurationError(
             "Known-speaker diarization requires at least one speaker reference."
         )
-    centroids = build_speaker_centroids(references, backend)
+    centroids = build_speaker_centroids(references, backend, cancel_event=cancel_event)
     track_frames: list[TrackFrame] = []
     turns: list[SpeakerTurn] = []
     resegmented_segment_count = 0
@@ -1383,6 +1479,7 @@ def run_known_speaker_postprocess(
             centroids=centroids,
             config=config,
             backend=backend,
+            cancel_event=cancel_event,
         )
         turns = track_turns(track_frames)
         result, resegmented_segment_count = resegment_result(transcribed, turns)
@@ -1393,6 +1490,7 @@ def run_known_speaker_postprocess(
         raw_turns=raw_turns,
         config=config,
         backend=backend,
+        cancel_event=cancel_event,
         track_frames=track_frames,
     )
     unmapped = unmapped_label_turns(segments, raw_turns) if track_frames else []
@@ -1409,8 +1507,10 @@ def run_known_speaker_postprocess(
             raw_turns=raw_turns,
             config=config,
             backend=backend,
+            cancel_event=cancel_event,
             track_frames=track_frames,
         )
+    check_known_speaker_cancellation(cancel_event)
     summary = summarize_known_speaker(
         segments,
         centroids=centroids,

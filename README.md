@@ -1550,3 +1550,15 @@ like a decode timeout, without exposing tool output. Worker-control JSON integer
 and nesting limit failures produce the fixed invalid-JSON worker error. Nesting
 limits vary between Python builds; regressions inject that parser failure rather
 than depending on a particular recursion threshold.
+
+Known-speaker execution validates stored and claimed settings as strictly as API
+submission, rejects ambiguous normalized display names, cooperates with remote
+lease cancellation between embeddings, and caps the whole-file track at 32,768
+frames/model calls. See [known-speaker admission and work budgets](specs/known-speaker-diarization.md#configuration-and-display-name-admission).
+
+Automatic voice routing accepts only finite de/en confidence in `[0.90, 1]`;
+malformed detector evidence keeps the pinned voice and language. Piper discovery
+reads each `.onnx.json` through a nonblocking, no-follow descriptor, requires a
+regular file, and limits declared/actual config bytes to 1 MiB. FIFO, symlink,
+oversized and malformed configs are skipped independently, leaving other voices
+available. Discovery never loads model data.

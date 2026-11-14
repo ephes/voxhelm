@@ -365,6 +365,7 @@ class LeaseHeartbeater:
         self._lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._lost = threading.Event()
+        self.cancel_event = self._lost
         self._progress: dict[str, Any] = {}
         self._thread = threading.Thread(target=self._run, name=f"voxhelm-lease-{job_id}")
 
@@ -505,6 +506,7 @@ def process_claim(
                 if strategy == KNOWN_SPEAKER_STRATEGY:
                     heartbeater.update(phase="known_speaker_diarization")
                     result, speakers_artifact_payload = run_known_speaker_for_claim(
+                        cancel_event=heartbeater.cancel_event,
                         diarization=diarization,
                         audio_path=audio_path,
                         result=result,
@@ -821,6 +823,7 @@ def run_known_speaker_for_claim(
     audio_path: Path,
     result: TranscriptionResult,
     source_media: DownloadedMedia | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[TranscriptionResult, dict[str, Any]]:
     config = known_speaker_config_from_claim(diarization)
     references = known_speaker_references_from_claim(diarization, source_media=source_media)
@@ -834,6 +837,7 @@ def run_known_speaker_for_claim(
         raw_turns=raw_turns,
         config=config,
         backend=backend,
+        cancel_event=cancel_event,
     )
     return outcome.result, build_speakers_artifact(outcome)
 
