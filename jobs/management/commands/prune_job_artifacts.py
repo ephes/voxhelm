@@ -4,6 +4,7 @@ import json
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import F
 
 from jobs.models import RetentionProgress
 from jobs.retention import prune_job_artifacts
@@ -42,7 +43,7 @@ class Command(BaseCommand):
         del args
         dry_run = bool(options["dry_run"])
         progress = None
-        if options["cursor"] is None and not dry_run:
+        if not dry_run:
             progress, _ = RetentionProgress.objects.get_or_create(name="job-artifacts")
         try:
             cursor = (
@@ -56,9 +57,15 @@ class Command(BaseCommand):
         except (ValueError, TypeError) as exc:
             raise CommandError(str(exc)) from exc
         if not dry_run:
-            RetentionProgress.objects.update_or_create(
-                name="job-artifacts", defaults={"cursor": result.next_cursor}
-            )
+            assert progress is not None
+            published = RetentionProgress.objects.filter(
+                pk=progress.pk, generation=progress.generation
+            ).update(cursor=result.next_cursor, generation=F("generation") + 1)
+            if not published:
+                self.stdout.write(
+                    "Shared cursor changed concurrently; this run's continuation was not saved. "
+                    "Retry without --cursor to resume the current sweep."
+                )
         self.stdout.write("Resume cursor: " + json.dumps(result.next_cursor, sort_keys=True))
         verb = "Would delete" if dry_run else "Deleted"
         for artifact in result.deleted:

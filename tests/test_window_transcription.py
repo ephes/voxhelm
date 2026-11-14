@@ -37,6 +37,7 @@ if args == ["--version"]:
     print("whisper.cpp version: 1.9.5")
     sys.exit(0)
 Path({record!r}).write_text(json.dumps(args))
+Path({record!r} + ".model").write_bytes(Path(args[args.index("-m") + 1]).read_bytes())
 mode = Path({mode!r}).read_text().strip()
 print("[00:00:00.000 --> 00:00:02.000]   {marker}")
 if mode == "fail":
@@ -265,7 +266,10 @@ def test_window_returns_words_language_probability_and_identity(window_runtime) 
     assert result.as_record()["identity"] == result.identity
 
     whisper_args = window_runtime.whisper_args()
-    assert whisper_args[whisper_args.index("-m") + 1] == str(window_runtime.model)
+    assert whisper_args[whisper_args.index("-m") + 1].startswith("/dev/fd/")
+    assert (
+        window_runtime.model.parent.parent / "whisper-args.json.model"
+    ).read_bytes() == b"turbo weights"
     flags = {
         flag: whisper_args[whisper_args.index(flag) + 1]
         for flag in ("-l", "-t", "-p", "-bs", "-bo", "-tp", "-tpi", "-ml")
@@ -488,3 +492,125 @@ def test_detected_language_reads_the_log_and_checks_the_result() -> None:
         detected_language("", {"result": {"language": "en"}})
     with pytest.raises(RuntimeError, match="exactly one"):
         detected_language(log + log, {"result": {"language": "en"}})
+
+
+def test_model_change_between_stat_and_open_is_not_cached(window_runtime, monkeypatch):
+    original = windows._model_sha256
+    changed = False
+
+    def swap(*args):
+        nonlocal changed
+        if not changed:
+            changed = True
+            replacement = window_runtime.model.with_suffix(".new")
+            replacement.write_bytes(b"different weights")
+            replacement.replace(window_runtime.model)
+        return original(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(windows, "_model_sha256", swap)
+        with pytest.raises(BackendUnavailableError):
+            windows.model_sha256(window_runtime.model)
+    assert (
+        windows.model_sha256(window_runtime.model)
+        == hashlib.sha256(b"different weights").hexdigest()
+    )
+
+
+def test_in_place_model_change_with_restored_mtime_invalidates_hash(window_runtime):
+    import os
+
+    model = window_runtime.model
+    assert windows.model_sha256(model) == hashlib.sha256(b"turbo weights").hexdigest()
+    before = model.stat()
+    model.write_bytes(b"other weights")  # same length
+    os.utime(model, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert windows.model_sha256(model) == hashlib.sha256(b"other weights").hexdigest()
+
+
+@pytest.mark.django_db
+def test_model_change_during_clip_decode_refuses_launch(window_runtime, monkeypatch):
+    decode = windows.decode_clip
+
+    def replace(*args, **kwargs):
+        decode(*args, **kwargs)
+        window_runtime.model.write_bytes(b"other weights")
+
+    monkeypatch.setattr(windows, "decode_clip", replace)
+    with pytest.raises(BackendUnavailableError):
+        transcribe_window(window_runtime.source, 0)
+    assert not window_runtime.whisper_ran()
+    assert_nothing_left(window_runtime)
+
+
+@pytest.mark.django_db
+def test_model_swap_at_launch_cannot_change_native_input(window_runtime, monkeypatch):
+    run = windows.run_cancellable_process
+
+    def swap_at_launch(args, **kwargs):
+        if "-m" in args:
+            replacement = window_runtime.model.with_suffix(".new")
+            replacement.write_bytes(b"wrong native generation")
+            replacement.replace(window_runtime.model)
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(windows, "run_cancellable_process", swap_at_launch)
+    with pytest.raises(BackendUnavailableError):
+        transcribe_window(window_runtime.source, 0)
+    record = window_runtime.model.parent.parent / "whisper-args.json.model"
+    assert record.read_bytes() == b"turbo weights"
+    assert_nothing_left(window_runtime)
+
+
+def test_hash_cache_reuses_only_successful_unchanged_generations(window_runtime, monkeypatch):
+    original = windows.open_window_model
+    reads = []
+
+    def open_model(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(windows, "open_window_model", open_model)
+    expected = windows.model_sha256(window_runtime.model)
+    assert windows.model_sha256(window_runtime.model) == expected
+    assert len(reads) == 1
+    windows._model_sha256.cache_clear()
+
+    def fail(path):
+        raise OSError("synthetic read failure")
+
+    monkeypatch.setattr(windows, "open_window_model", fail)
+    with pytest.raises(BackendUnavailableError):
+        windows.model_sha256(window_runtime.model)
+    monkeypatch.setattr(windows, "open_window_model", open_model)
+    assert windows.model_sha256(window_runtime.model) == expected
+    assert len(reads) == 2
+
+
+def test_model_change_while_hashing_does_not_publish_cache(window_runtime, monkeypatch):
+    digest_factory = windows.hashlib.sha256
+    changed = False
+
+    def make_digest():
+        real = digest_factory()
+
+        class MutatingDigest:
+            def update(self, chunk):
+                nonlocal changed
+                real.update(chunk)
+                if not changed:
+                    changed = True
+                    window_runtime.model.write_bytes(b"other weights")
+
+            def hexdigest(self):
+                return real.hexdigest()
+
+        return MutatingDigest()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(windows.hashlib, "sha256", make_digest)
+        with pytest.raises(BackendUnavailableError):
+            windows.model_sha256(window_runtime.model)
+    assert (
+        windows.model_sha256(window_runtime.model) == digest_factory(b"other weights").hexdigest()
+    )

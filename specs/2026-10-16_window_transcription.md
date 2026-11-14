@@ -199,3 +199,20 @@ Rerun:
 VOXHELM_WINDOW_MODEL=/Users/jochen/workspaces/ws-podcast-ad-reassess-20261012/models/ggml-large-v3-turbo.bin \
     uv run python evals/window_retry_compare.py --out /tmp/window-compare.json
 ```
+
+## Opened model generation (2026-11-14)
+
+`model_sha256` admits a regular nonblocking/no-follow descriptor and verifies
+its device, inode, size, nanosecond mtime and ctime against the current pathname
+before and after hashing. Only a successful stable hash enters the four-entry
+cache. Replacement, in-place modification (even with mtime restored) and failed
+reads cannot publish a mismatched identity.
+
+`transcribe_window` keeps a checked descriptor open through clip decoding and
+whisper-cli execution, passes it explicitly to the child and selects it through
+`-m /dev/fd/<n>`. Generation checks before launch and after completion refuse
+changes; replacement in the final launch gap cannot redirect the child to new
+bytes. In-place writes during native inference are detected by the postcheck and
+discard the result; publish complete replacements while workers are stopped.
+These guarantees assume reliable filesystem change metadata. Synthetic subprocess
+regressions read the inherited descriptor without loading any real model.

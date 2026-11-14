@@ -1,5 +1,14 @@
 # Voxhelm Backlog
 
+## Batch and maintenance boundaries (2026-11-14)
+
+- [x] Bound and strictly decode batch/worker JSON before state changes, keep
+  backend failures private, and provision operator credentials atomically.
+- [x] Fence shared retention continuation by generation, bind window model
+  identity to a checked opened generation, and handle concurrent poll deletion.
+- Regression coverage uses synthetic HTTP requests, model bytes and independent
+  SQLite processes; no model download, inference or production media is needed.
+
 ## Remote transcription workers / `atlas.local`
 
 Concept added on 2026-05-30: [`specs/remote-transcription-workers.md`](specs/remote-transcription-workers.md).

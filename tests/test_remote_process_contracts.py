@@ -59,3 +59,11 @@ def test_process_oracles_detect_counterfactual_lock_removal(tmp_path, scenario, 
         mutation=mutation,
         expect_failure=True,
     )
+
+
+def test_concurrent_bootstrap_publishes_only_complete_accounts(tmp_path):
+    run_contract(tmp_path, "tests.round93_contracts", "bootstrap")
+
+
+def test_stale_prune_process_cannot_replace_newer_continuation(tmp_path):
+    run_contract(tmp_path, "tests.round93_contracts", "retention")

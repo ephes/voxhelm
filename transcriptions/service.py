@@ -612,6 +612,7 @@ def run_cancellable_process(
     terminate_grace_seconds: float = 5.0,
     timeout_seconds: float | None = None,
     env: Mapping[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run a child process, terminating it when ``cancel_event`` is set.
 
@@ -633,6 +634,7 @@ def run_cancellable_process(
         encoding="utf-8",
         errors="replace",
         env=None if env is None else dict(env),
+        pass_fds=pass_fds,
     ) as process:
         try:
             while True:

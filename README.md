@@ -395,6 +395,12 @@ are preserved. Use shell quoting for intentional spaces, for example
 `--password ' passphrase '`. Usernames and email addresses still have surrounding
 whitespace removed.
 
+Bootstrap hashes before publishing any fields, then locks/reloads and saves the
+complete credential set in one transaction. Hash/save failures leave both new and
+existing accounts unchanged. Concurrent updates commit in lock order; a blank
+email preserves the latest stored email. If a concurrent first creation conflicts
+on the username, the command refuses with a retry instruction; rerun it explicitly.
+
 The operator login form also preserves password whitespace. Earlier versions
 trimmed bootstrap passwords: rerunning bootstrap now replaces that trimmed
 credential with the exact supplied value. Remove unintended whitespace (such as
@@ -599,7 +605,10 @@ plus one lookahead row per phase. Results are bounded to this batch. The command
 storage failures, so existing scheduled invocations resume without new arguments.
 An exhausted sweep resets to `{}` to retry failures/refusals and pick up rows inserted
 behind the cursor. `--cursor '<json>'` overrides the saved starting point; `{}` restarts
-a sweep. Run the command serially; overlapping runs may repeat work or rewind progress.
+a sweep. Cursor publication uses a generation compare-and-swap: overlapping runs
+may repeat deletion checks, but a stale run cannot overwrite a newer continuation.
+It reports that its continuation was not saved; retry without `--cursor` to use the
+current saved progress. No cursor lock spans storage calls.
 A dry run starts at `{}`, uses the same limits and never updates saved progress; its cursor is for preview only. Do not pass a dry-run
 cursor to a deleting run. Each prefix still lists its own objects for the existing
 all-objects allowlist check. A sweep can leave newly eligible job rows for the next sweep.
@@ -1591,3 +1600,31 @@ regular file, and limits declared/actual config bytes to 1 MiB. FIFO, symlink,
 oversized and malformed configs are skipped independently, leaving other voices
 available; a model without a config is skipped quietly. Discovery never loads
 model data.
+
+### Batch request and polling boundaries
+
+Batch submission and every worker-control JSON request require an object, at most
+2 MiB of encoded bytes and 128 nested object/array levels. Duplicate members at any
+level, nonfinite numbers, integer conversion limits and decoder resource failures
+return a fixed HTTP 400 invalid-JSON error before job, worker or lease writes;
+oversized bodies return 413. Authentication runs before reading/decoding the body.
+The endpoint reads at most the byte ceiling plus one; the HTTP server may already
+have buffered/spooled the transport body.
+
+Unexpected batch upload/submission backend `RuntimeError` returns HTTP 500
+`Batch processing failed.` and logs only a fixed operation category, without
+exception text or traceback. Existing staging compensation still removes owned
+partial objects and rows, retaining its retry record if compensation fails.
+A job deleted after its owner-scoped polling lookup returns HTTP 404
+`Job not found.` if it disappears during reconciliation/serialization. Other
+storage errors retain their server-error outcome.
+
+Window model hashes are cached for at most four regular opened generations by
+device, inode, size, nanosecond modification and change times. Hashing verifies the
+opened descriptor and current pathname before publishing the digest. Window
+transcription inherits the checked descriptor as `/dev/fd/<n>` into whisper-cli,
+checks the generation before launch and after completion, and refuses changed
+models without returning output. Publish complete model replacements while workers
+are stopped; in-place writes during native inference cannot be prevented by the
+reader, but detected changes discard the result. Metadata must reliably identify
+changes; restart workers on filesystems that do not provide this guarantee.

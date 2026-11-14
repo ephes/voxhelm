@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -29,6 +30,7 @@ from transcriptions.errors import ApiError
 from transcriptions.views import openai_error_response, require_bearer_token
 
 LOGGER = logging.getLogger(__name__)
+JSON_REQUEST_MAX_BYTES = 2 * 1024 * 1024
 
 
 @csrf_exempt
@@ -46,8 +48,11 @@ def uploads_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse(serialize_staged_media(staged_media), status=201)
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
-    except RuntimeError as exc:
-        return openai_error_response(str(exc), status=500, error_type="server_error")
+    except RuntimeError:
+        LOGGER.error("batch_backend_failure operation=upload")
+        return openai_error_response(
+            "Batch processing failed.", status=500, error_type="server_error"
+        )
 
 
 @csrf_exempt
@@ -55,21 +60,17 @@ def uploads_collection(request: HttpRequest) -> JsonResponse:
 def jobs_collection(request: HttpRequest) -> JsonResponse:
     try:
         producer = require_bearer_token(request)
-        if not (request.content_type or "").lower().startswith("application/json"):
-            raise ApiError("Batch job submission requires application/json.")
-        try:
-            payload = json.loads(request.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ApiError("Request body was not valid JSON.") from exc
-        if not isinstance(payload, dict):
-            raise ApiError("Request body must be a JSON object.")
+        payload = parse_json_object_request(request, "Batch job submission")
         job, created = create_job_from_payload(producer=producer, payload=payload)
         status = 201 if created else 200
         return JsonResponse(serialize_job(job), status=status)
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
-    except RuntimeError as exc:
-        return openai_error_response(str(exc), status=500, error_type="server_error")
+    except RuntimeError:
+        LOGGER.error("batch_backend_failure operation=submission")
+        return openai_error_response(
+            "Batch processing failed.", status=500, error_type="server_error"
+        )
 
 
 @csrf_exempt
@@ -154,13 +155,64 @@ def work_fail(request: HttpRequest, job_id: UUID) -> JsonResponse:
 def parse_json_object_request(request: HttpRequest, context: str) -> dict[str, object]:
     if not (request.content_type or "").lower().startswith("application/json"):
         raise ApiError(f"{context} requires application/json.")
+    raw = request.read(JSON_REQUEST_MAX_BYTES + 1)
+    if len(raw) > JSON_REQUEST_MAX_BYTES:
+        raise ApiError("JSON request exceeds the 2 MiB limit.", status=413)
     try:
-        payload = json.loads(request.body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        check_json_depth(raw)
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=unique_json_object,
+            parse_constant=reject_json_constant,
+            parse_float=finite_json_float,
+        )
+    except (ValueError, RecursionError) as exc:
         raise ApiError("Request body was not valid JSON.") from exc
     if not isinstance(payload, dict):
         raise ApiError("Request body must be a JSON object.")
     return payload
+
+
+def check_json_depth(raw: bytes) -> None:
+    # Count only structural delimiters outside strings, before decoder allocation.
+    depth = 0
+    quoted = escaped = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > 128:
+                raise ValueError("JSON nesting exceeds 128 levels")
+        elif byte in (93, 125):
+            depth -= 1
+
+
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON member")
+        result[key] = value
+    return result
+
+
+def reject_json_constant(value: str) -> object:
+    raise ValueError("Nonfinite JSON number")
+
+
+def finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Nonfinite JSON number")
+    return number
 
 
 @csrf_exempt
@@ -170,8 +222,12 @@ def job_detail(request: HttpRequest, job_id: UUID) -> JsonResponse | HttpRespons
         producer = require_bearer_token(request)
         if request.method == "DELETE":
             return delete_job(producer=producer, job_id=job_id)
-        job = get_object_or_404(Job, id=job_id, producer=producer)
+        job = Job.objects.get(id=job_id, producer=producer)
         return JsonResponse(serialize_job(job))
+    except Job.DoesNotExist:
+        return openai_error_response(
+            "Job not found.", status=404, error_type="invalid_request_error"
+        )
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
 
