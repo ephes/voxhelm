@@ -18,6 +18,11 @@ from time import monotonic, sleep
 _LOGGER = logging.getLogger(__name__)
 
 OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES = 64 * 1024
+# run_native_process retains at most OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES across both pipes.
+_STDERR_HEAD_BYTES = 52 * 1024
+_STDERR_TAIL_BYTES = 8 * 1024
+_STDOUT_HEAD_BYTES = 2 * 1024
+_STDOUT_TAIL_BYTES = 2 * 1024
 OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES = 2048
 
 
@@ -127,7 +132,14 @@ def run_native_process(
     env: Mapping[str, str] | None,
     pass_fds: tuple[int, ...],
 ) -> subprocess.CompletedProcess[str]:
-    """Capture bounded diagnostic tails, preserving return codes and process ownership."""
+    """Drain both pipes keeping a bounded head and tail of each (64 KiB in total).
+
+    stderr keeps its first 52 KiB and last 8 KiB, stdout its first and last 2 KiB.
+
+    Output beyond that is discarded, not refused: whisper-cli prints every
+    transcript segment to stdout, so long jobs exceed any small cap. Return
+    codes and process-group ownership are preserved.
+    """
     deadline = None if timeout is None else monotonic() + timeout
     check_cancelled()
     process = subprocess.Popen(
@@ -139,8 +151,13 @@ def run_native_process(
         env=None if env is None else dict(env),
         pass_fds=pass_fds,
     )
-    tails = {"stdout": bytearray(), "stderr": bytearray()}
-    received = 0
+    # stderr carries parsed evidence (whisper-cli's "auto-detected language:" line
+    # follows its model-load log) and the error text, so it gets most of the budget;
+    # stdout is only read for short answers (ffprobe, --version).
+    streams = {
+        "stdout": _HeadTail(head=_STDOUT_HEAD_BYTES, tail=_STDOUT_TAIL_BYTES),
+        "stderr": _HeadTail(head=_STDERR_HEAD_BYTES, tail=_STDERR_TAIL_BYTES),
+    }
     try:
         assert process.stdout is not None and process.stderr is not None
         with selectors.DefaultSelector() as selector:
@@ -159,14 +176,10 @@ def run_native_process(
                         if not chunk:
                             selector.unregister(key.fileobj)
                             continue
-                        received += len(chunk)
-                        if received > OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES:
-                            raise RuntimeError(
-                                "Native inference exceeded the diagnostic output limit."
-                            )
-                        # Some backends parse language/version evidence from these
-                        # streams. Keep admitted output intact within the shared cap.
-                        tails[key.data].extend(chunk)
+                        # whisper-cli prints every transcript segment to stdout, so
+                        # long jobs legitimately exceed the cap: keep a bounded head
+                        # (language/version evidence) and tail (errors), drop the rest.
+                        streams[key.data].add(chunk)
                 else:
                     if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
                         break
@@ -194,6 +207,37 @@ def run_native_process(
     return subprocess.CompletedProcess(
         args,
         process.returncode,
-        tails["stdout"].decode("utf-8", errors="replace"),
-        tails["stderr"].decode("utf-8", errors="replace"),
+        streams["stdout"].text(),
+        streams["stderr"].text(),
     )
+
+
+class _HeadTail:
+    """A bounded copy of one stream: its first ``head`` and last ``tail`` bytes."""
+
+    def __init__(self, *, head: int, tail: int) -> None:
+        self.head_limit = head
+        self.tail_limit = tail
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.omitted = 0
+
+    def add(self, chunk: bytes) -> None:
+        room = self.head_limit - len(self.head)
+        if room > 0:
+            self.head.extend(chunk[:room])
+            chunk = chunk[room:]
+        if not chunk:
+            return
+        self.tail.extend(chunk)
+        excess = len(self.tail) - self.tail_limit
+        if excess > 0:
+            del self.tail[:excess]
+            self.omitted += excess
+
+    def text(self) -> str:
+        head = self.head.decode("utf-8", errors="replace")
+        tail = self.tail.decode("utf-8", errors="replace")
+        if not self.omitted:
+            return head + tail
+        return f"{head}\n[{self.omitted} bytes of output omitted]\n{tail}"

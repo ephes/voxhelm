@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 
 from transcriptions import service
+from transcriptions.owned_process import OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES
 
 
 @pytest.mark.parametrize("pipe", [1, 2])
-def test_native_diagnostic_flood_is_refused_and_reaped(monkeypatch, pipe):
+def test_native_output_flood_keeps_bounded_head_and_tail_and_reaps(monkeypatch, pipe):
     children = []
     popen = subprocess.Popen
 
@@ -21,14 +22,63 @@ def test_native_diagnostic_flood_is_refused_and_reaped(monkeypatch, pipe):
         return child
 
     monkeypatch.setattr(subprocess, "Popen", record)
-    with pytest.raises(RuntimeError, match="diagnostic output limit"):
-        service.run_cancellable_process(
-            [sys.executable, "-c", f"import os; os.write({pipe}, b'x' * 2000000)"],
-            cancel_event=None,
-        )
+    completed = service.run_cancellable_process(
+        [
+            sys.executable,
+            "-c",
+            f"import os; os.write({pipe}, b'HEAD' + b'x' * 2000000 + b'TAIL'); os._exit(3)",
+        ],
+        cancel_event=None,
+    )
+    flooded = completed.stdout if pipe == 1 else completed.stderr
+    assert completed.returncode == 3
+    assert flooded.startswith("HEAD") and flooded.endswith("TAIL")
+    assert "bytes of output omitted]" in flooded
+    retained = len(completed.stdout.encode()) + len(completed.stderr.encode())
+    assert retained <= OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES + 64
     assert children[0].returncode is not None
     assert children[0].stdout is not None and children[0].stdout.closed
     assert children[0].stderr is not None and children[0].stderr.closed
+
+
+def test_long_successful_native_output_is_not_refused():
+    # whisper-cli prints each segment to stdout; a long episode writes far more
+    # than the retained 64 KiB and must still succeed.
+    segment = "[00:00:00.000 --> 00:00:02.000]  some transcript text\n"
+    completed = service.run_cancellable_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('auto-detected language: de\\n'); "
+            f"sys.stdout.write({segment!r} * 5000)",
+        ],
+        cancel_event=None,
+    )
+    assert completed.returncode == 0
+    assert completed.stderr == "auto-detected language: de\n"
+    assert completed.stdout.startswith(segment)
+    assert completed.stdout.endswith(segment)
+
+
+def test_language_evidence_after_a_long_model_load_log_is_kept():
+    # Window runs parse "auto-detected language:" from stderr; it follows the
+    # model-load log, which some builds make long, while stdout floods.
+    completed = service.run_cancellable_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('ggml_metal: kernel loaded\\n' * 1600); "
+            "sys.stderr.write('auto-detected language: de (p = 0.987654)\\n'); "
+            "sys.stderr.write('whisper_print_timings: per window\\n' * 1000); sys.stderr.flush(); "
+            "sys.stdout.write('[00:00:00.000 --> 00:00:02.000]  text\\n' * 20000)",
+        ],
+        cancel_event=None,
+    )
+    assert completed.returncode == 0
+    # The line sits past 40 KiB, followed by more than the 8 KiB tail of later log
+    # lines: only the 52 KiB stderr head keeps it.
+    assert "bytes of output omitted]" in completed.stderr
+    assert completed.stderr.count("auto-detected language: de (p = 0.987654)") == 1
 
 
 @pytest.mark.parametrize(

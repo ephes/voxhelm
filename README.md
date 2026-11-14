@@ -24,9 +24,14 @@ drained and discarded so noisy but decodable media still succeeds, and on
 every exit path the whole group is killed, so the decode deadline also covers
 descendants holding its pipes.
 
-Native inference drains both diagnostic pipes under a combined 64 KiB ceiling,
-retaining at most 64 KiB across both pipes. Overflow fails the inference and retires
-its process group; cancellation and deadlines also retire owned descendants.
+Native inference drains both output pipes and retains at most 64 KiB across both:
+stderr keeps its first 52 KiB and last 8 KiB (parsed evidence such as whisper-cli's
+detected-language line follows its model-load log; errors come last), stdout its
+first and last 2 KiB, with a marker for an omitted middle. Output
+beyond that is discarded, not refused, because whisper-cli prints every transcript
+segment to stdout and long episodes exceed any small cap; the transcript itself is
+read from the JSON file. Cancellation and deadlines retire the owned process group
+and its descendants.
 Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
 unique members, finite numbers). Invalid output fails before normalization or
