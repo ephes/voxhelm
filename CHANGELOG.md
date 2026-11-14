@@ -14,7 +14,7 @@
   strict object JSON admission, with one elapsed deadline spanning connect,
   upload, headers and body; resource failures do not trigger backend fallback.
 
-- Bound native inference stdout/stderr to 64 KiB with 2 KiB retained tails and
+- Bound native inference stdout/stderr to 64 KiB with bounded retained output and
   owned process-group cleanup; admit standalone WhisperCpp transcript files
   through a regular no-follow descriptor and strict bounded object JSON.
 

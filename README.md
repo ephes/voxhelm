@@ -25,7 +25,7 @@ every exit path the whole group is killed, so the decode deadline also covers
 descendants holding its pipes.
 
 Native inference drains both diagnostic pipes under a combined 64 KiB ceiling,
-retaining at most a 2 KiB tail per pipe. Overflow fails the inference and retires
+retaining at most 64 KiB across both pipes. Overflow fails the inference and retires
 its process group; cancellation and deadlines also retire owned descendants.
 Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,

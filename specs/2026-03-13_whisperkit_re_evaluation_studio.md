@@ -296,6 +296,7 @@ cancellation into success. Voxhelm releases its lane/file ownership; the sidecar
 own inference cancellation remains outside Voxhelm's control.
 
 HTTP rejections expose only status; unreachable/read/deadline/JSON outcomes use
-fixed diagnostics. Operational logs use safe failure categories/status and never
-include response bodies, prompt/file data, URL userinfo or query strings. The
+fixed diagnostics, including malformed transcript field conversions. Operational
+logs use safe failure categories/status and never include response bodies,
+prompt/file data, URL userinfo or query strings. The
 public HTTP transport is used directly to avoid full-URL client log records.

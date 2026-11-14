@@ -220,12 +220,13 @@ regressions read the inherited descriptor without loading any real model.
 ## Native diagnostic ownership (2026-11-14)
 
 All calls through the native inference supervisor now drain both stdout and stderr
-incrementally with a combined 64 KiB ceiling and retain only the last 2 KiB per
-pipe. Exceeding the ceiling fails the inference. Cancellation and deadlines stop
+incrementally with a combined 64 KiB ceiling and retain admitted output within
+that same ceiling, including language/version evidence used by callers.
+Exceeding the ceiling fails the inference. Cancellation and deadlines stop
 the owned process group, including descendants retaining pipes; cancellation is
 checked again before returning. Small-output success and nonzero return codes
 keep their existing meaning. Language evidence remains available in the bounded
-stderr tail or the native JSON payload.
+stderr output; native JSON supplies the matching language code.
 
 The standalone WhisperCpp backend shares the window reader's regular,
 nonblocking, no-follow file admission, with a 64 MiB transcript ceiling. Its JSON

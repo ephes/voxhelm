@@ -283,3 +283,95 @@ def test_whisperkit_late_success_after_cancellation_is_discarded(monkeypatch, tm
             tmp_path / "input.wav", service.TranscribeParams("auto", None, None, cancel_event=event)
         )
     assert ownership == ["admitted", "released"]
+
+
+def test_whisperkit_cancellation_during_normalization_is_discarded(monkeypatch, tmp_path):
+    from lane_scheduler import InferenceCancelled
+
+    event = threading.Event()
+    monkeypatch.setattr(service, "call_whisperkit_server", lambda **_: {"text": "synthetic"})
+
+    def normalize(*args, **kwargs):
+        event.set()
+        return service.TranscriptionResult("synthetic", "de", [])
+
+    monkeypatch.setattr(service, "normalize_transcription_payload", normalize)
+    backend = service.WhisperKitBackend(
+        enabled=True, base_url="http://localhost", model_name="x", timeout_seconds=1
+    )
+    with pytest.raises(InferenceCancelled):
+        backend.transcribe(
+            tmp_path / "input", service.TranscribeParams("auto", None, None, cancel_event=event)
+        )
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_whisperkit_stops_at_limit_plus_one_closes_and_never_falls_back(
+    monkeypatch, tmp_path, status
+):
+    from contextlib import nullcontext
+
+    import httpx
+
+    limit = 1024 if status == 200 else 128
+    consumed = []
+    closed = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for chunk in (b"x" * limit, b"x"):
+                consumed.append(len(chunk))
+                yield chunk
+            pytest.fail("read continued after limit + 1")
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def respond(request):
+        return httpx.Response(status, stream=Stream())
+
+    monkeypatch.setattr(service.httpx, "AsyncHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr(service, "WHISPERKIT_RESPONSE_MAX_BYTES", 1024)
+    monkeypatch.setattr(service, "WHISPERKIT_ERROR_MAX_BYTES", 128)
+    monkeypatch.setattr(service, "admit_local_inference", lambda *args, **kwargs: nullcontext())
+    backend = service.WhisperKitBackend(
+        enabled=True, base_url="http://synthetic", model_name="x", timeout_seconds=1
+    )
+
+    class ForbiddenFallback:
+        def transcribe(self, *args):
+            pytest.fail("resource refusal ran fallback inference")
+
+    monkeypatch.setattr(
+        service,
+        "get_backend_services_for_params",
+        lambda _: [
+            service.BackendInvocation("whisperkit", backend),
+            service.BackendInvocation("fallback", ForbiddenFallback()),
+        ],
+    )
+    path = tmp_path / "input.wav"
+    path.write_bytes(b"synthetic")
+    with pytest.raises(RuntimeError, match="response byte limit"):
+        service.transcribe_audio(path, service.TranscribeParams("auto", None, None))
+    assert sum(consumed) == limit + 1
+    assert closed == [True]
+
+
+def test_whisperkit_malformed_transcript_does_not_echo_values(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(
+        service,
+        "call_whisperkit_server",
+        lambda **_: {
+            "segments": [{"text": "synthetic", "id": "PRIVATE_RESPONSE_SENTINEL"}],
+        },
+    )
+    backend = service.WhisperKitBackend(
+        enabled=True,
+        base_url="http://localhost",
+        model_name="x",
+        timeout_seconds=1,
+    )
+    with pytest.raises(RuntimeError, match="invalid transcript") as caught:
+        backend.transcribe(tmp_path / "input", service.TranscribeParams("auto", None, None))
+    assert "PRIVATE_" not in str(caught.value) + caplog.text

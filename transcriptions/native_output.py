@@ -24,8 +24,13 @@ def read_native_json(path: Path, *, limit: int) -> bytes:
             raise RuntimeError("whisper.cpp JSON output is not a regular file.") from exc
         raise
     with os.fdopen(descriptor, "rb") as handle:
-        if not S_ISREG(os.fstat(handle.fileno()).st_mode):
+        metadata = os.fstat(handle.fileno())
+        if not S_ISREG(metadata.st_mode):
             raise RuntimeError("whisper.cpp JSON output is not a regular file.")
+        if metadata.st_size > limit:
+            raise RuntimeError(
+                f"whisper.cpp JSON output exceeded the {limit // (1024 * 1024)} MiB window limit."
+            )
         os.set_blocking(handle.fileno(), True)
         raw = handle.read(limit + 1)
     if len(raw) > limit:

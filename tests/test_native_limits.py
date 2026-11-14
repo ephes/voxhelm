@@ -67,3 +67,18 @@ def test_whispercpp_refuses_untrusted_transcript(monkeypatch, tmp_path, kind):
         RuntimeError, match="whisper.cpp transcription produced invalid JSON output"
     ):
         backend.transcribe(tmp_path / "input.wav", service.TranscribeParams("auto", None, None))
+
+
+def test_native_output_keeps_admitted_language_evidence():
+    from transcriptions.windows import detected_language
+
+    completed = service.run_cancellable_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write("
+            "'auto-detected language: de (p = 0.990000)\\n' + 'x' * 8192)",
+        ],
+        cancel_event=None,
+    )
+    assert detected_language(completed.stderr, {"result": {"language": "de"}}) == ("de", 0.99)

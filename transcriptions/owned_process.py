@@ -160,13 +160,13 @@ def run_native_process(
                             selector.unregister(key.fileobj)
                             continue
                         received += len(chunk)
-                        tail = tails[key.data]
-                        tail.extend(chunk)
-                        del tail[:-OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES]
                         if received > OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES:
                             raise RuntimeError(
                                 "Native inference exceeded the diagnostic output limit."
                             )
+                        # Some backends parse language/version evidence from these
+                        # streams. Keep admitted output intact within the shared cap.
+                        tails[key.data].extend(chunk)
                 else:
                     if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
                         break

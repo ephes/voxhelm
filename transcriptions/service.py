@@ -11,12 +11,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -599,11 +600,18 @@ class WhisperKitBackend:
             ) from None
 
         _raise_if_cancelled(params)
-        return normalize_transcription_payload(
-            payload,
-            backend_name="whisperkit",
-            model_name=self.model_name,
-        )
+        try:
+            result = normalize_transcription_payload(
+                payload,
+                backend_name="whisperkit",
+                model_name=self.model_name,
+            )
+        except TypeError, ValueError, OverflowError:
+            _raise_if_cancelled(params)
+            _LOGGER.warning("WhisperKit sidecar failure: invalid transcript.")
+            raise RuntimeError("WhisperKit server returned an invalid transcript.") from None
+        _raise_if_cancelled(params)
+        return result
 
 
 _MLX_LOCK = Lock()
@@ -880,12 +888,15 @@ def call_whisperkit_server(
                             else WHISPERKIT_RESPONSE_MAX_BYTES
                         )
                         body = bytearray()
-                        async for chunk in response.aiter_raw():
-                            if len(chunk) > limit - len(body):
-                                raise RuntimeError(
-                                    "WhisperKit server exceeded the response byte limit."
-                                )
-                            body.extend(chunk)
+                        async with aclosing(
+                            cast(AsyncGenerator[bytes, None], response.aiter_raw())
+                        ) as chunks:
+                            async for chunk in chunks:
+                                if len(chunk) > limit - len(body):
+                                    raise RuntimeError(
+                                        "WhisperKit server exceeded the response byte limit."
+                                    )
+                                body.extend(chunk)
                         if response.status_code >= 400:
                             status = response.status_code
                             _LOGGER.warning("WhisperKit sidecar failure: HTTP %s.", status)
@@ -909,7 +920,7 @@ def call_whisperkit_server(
             raise RuntimeError("WhisperKit response transport failed.") from None
         except OSError:
             raise RuntimeError("WhisperKit request media could not be read.") from None
-        except ValueError:
+        except ValueError, httpx.InvalidURL:
             raise RuntimeError("WhisperKit sidecar configuration is invalid.") from None
 
     # Match the worker-control transport: own an isolated loop so sync callers can
