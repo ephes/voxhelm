@@ -16,7 +16,8 @@
 
 - Bound retained native inference stdout/stderr to 64 KiB (head and tail of each
   pipe; long whisper.cpp segment output is truncated, not refused) with
-  owned process-group cleanup; admit standalone WhisperCpp transcript files
+  owned process-group cleanup, also when a descendant keeps a pipe open after
+  the child exited; admit standalone WhisperCpp transcript files
   through a regular no-follow descriptor and strict bounded object JSON.
 
 - Update the locked OpenTelemetry API/SDK to 1.45.2 (semantic conventions

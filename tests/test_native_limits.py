@@ -132,3 +132,30 @@ def test_native_output_keeps_admitted_language_evidence():
         cancel_event=None,
     )
     assert detected_language(completed.stderr, {"result": {"language": "de"}}) == ("de", 0.99)
+
+
+def test_exited_child_with_pipe_holding_descendant_returns_and_retires_it(tmp_path):
+    import time
+
+    pid_file = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
+        "print('done', flush=True)"
+    )
+    started = time.monotonic()
+    completed = service.run_cancellable_process([sys.executable, "-c", script], cancel_event=None)
+    assert time.monotonic() - started < 15
+    assert completed.returncode == 0
+    assert completed.stdout.startswith("done")
+    grandchild = int(pid_file.read_text())
+    for _ in range(100):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(grandchild, 9)
+        raise AssertionError("pipe-holding descendant survived")

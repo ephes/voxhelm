@@ -30,8 +30,10 @@ detected-language line follows its model-load log; errors come last), stdout its
 first and last 2 KiB, with a marker for an omitted middle. Output
 beyond that is discarded, not refused, because whisper-cli prints every transcript
 segment to stdout and long episodes exceed any small cap; the transcript itself is
-read from the JSON file. Cancellation and deadlines retire the owned process group
-and its descendants.
+read from the JSON file. Once the child exits, pipes still held by its descendants
+are drained for at most 2 s before the owned process group is retired, so a leftover
+descendant cannot stall the job. Cancellation and deadlines also retire the owned
+process group and its descendants.
 Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
 unique members, finite numbers). Invalid output fails before normalization or

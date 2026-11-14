@@ -23,6 +23,8 @@ _STDERR_HEAD_BYTES = 52 * 1024
 _STDERR_TAIL_BYTES = 8 * 1024
 _STDOUT_HEAD_BYTES = 2 * 1024
 _STDOUT_TAIL_BYTES = 2 * 1024
+# After the direct child exits, pipes still held by descendants are drained this long.
+_EXITED_DRAIN_SECONDS = 2.0
 OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES = 2048
 
 
@@ -158,6 +160,7 @@ def run_native_process(
         "stdout": _HeadTail(head=_STDOUT_HEAD_BYTES, tail=_STDOUT_TAIL_BYTES),
         "stderr": _HeadTail(head=_STDERR_HEAD_BYTES, tail=_STDERR_TAIL_BYTES),
     }
+    exited_drain_until: float | None = None
     try:
         assert process.stdout is not None and process.stderr is not None
         with selectors.DefaultSelector() as selector:
@@ -170,6 +173,16 @@ def run_native_process(
                 wait = (
                     poll_seconds if deadline is None else min(poll_seconds, deadline - monotonic())
                 )
+                if exited_drain_until is None and os.waitid(
+                    os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                ):
+                    # A descendant may still hold a pipe open after the child exited:
+                    # drain what is buffered briefly, then let the group cleanup run.
+                    exited_drain_until = monotonic() + _EXITED_DRAIN_SECONDS
+                if exited_drain_until is not None and monotonic() >= exited_drain_until:
+                    break
+                if exited_drain_until is not None:
+                    wait = min(wait, max(0.0, exited_drain_until - monotonic()))
                 if selector.get_map():
                     for key, _ in selector.select(max(0, wait)):
                         chunk = os.read(key.fd, 8192)
