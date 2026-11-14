@@ -140,9 +140,14 @@ Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
 publication. Valid samples keep the existing clipping and 16-bit PCM conversion.
 Installed voicepacks must contain real numeric, finite float32-compatible styles
-shaped `(rows, 1, 256)`, with at least one row. Token counts still clamp to the
+shaped `(rows, 1, 256)`, with 1–512 rows. Before NumPy allocation, the selected
+NPY v1/v2 member must have a bounded header (10,000 bytes), a matching complete
+payload and at most 2 MiB of expanded numeric data (up to 16 bytes per value). Token counts still clamp to the
 last row. Invalid packs raise a controlled backend-unavailable error and are
-never cached; replacing the file allows a subsequent load to recover.
+never cached; replacing the file allows a subsequent load to recover. ONNX,
+voicepack and Piper model/config loaders recheck all their artifact identities
+after loading. A changed generation fails with a retryable backend-unavailable
+error before cache publication; a mixed Piper model/config pair is discarded.
 
 Kokoro refuses nonblank text that yields no supported phoneme tokens with an
 actionable client error (HTTP 400 on the sync speech API). Supported one-character utterances and punctuation tokens

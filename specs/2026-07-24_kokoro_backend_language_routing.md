@@ -128,7 +128,12 @@ One new backend, one routing layer, minimal surgery elsewhere:
   length guards the edge; a boundary test pins the indexing at the exact
   chunk limit (no off-by-two, no out-of-range).
   Installed packs must contain finite real numeric float32-compatible styles
-  shaped `(rows, 1, 256)` with at least one row; invalid packs fail before caching.
+  shaped `(rows, 1, 256)` with 1–512 rows. Before array loading, admit the
+  selected NPY v1/v2 member with a 10,000-byte header limit, at most 2 MiB
+  expanded numeric data and an exact payload length. Invalid packs fail before
+  caching. Model and pack identities are rechecked after loading; changes fail
+  with backend-unavailable and are never cached. Piper similarly rechecks both
+  model and config before publishing a loaded voice.
   Inference audio must be a nonempty finite mono vector or a single mono batch.
   **Token limit & chunking (hard requirement):** Kokoro models accept ~510
   phoneme tokens per call, and the voicepack is length-indexed — the style

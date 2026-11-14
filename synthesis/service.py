@@ -596,6 +596,7 @@ def load_piper_voice(voice: InstalledVoice):
             return cached
 
         loaded_voice = PiperVoice.load(identity[0][0], config_path=identity[1][0])
+        require_artifact_generation((voice.model_path, voice.config_path), identity)
         # Discard superseded versions at these paths before publishing the new entry.
         for existing in list(_PIPER_VOICE_CACHE):
             if (existing[0][0], existing[1][0]) == (identity[0][0], identity[1][0]):
@@ -610,6 +611,17 @@ def piper_artifact_identity(path: Path) -> ArtifactIdentity:
     resolved = path.resolve(strict=True)
     stat = resolved.stat()
     return (resolved, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def require_artifact_generation(
+    paths: tuple[Path, ...], identities: tuple[ArtifactIdentity, ...]
+) -> None:
+    try:
+        unchanged = tuple(piper_artifact_identity(path) for path in paths) == identities
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise BackendUnavailableError("Synthesis model artifacts changed during loading; retry.")
 
 
 def cleanup_paths(*paths: Path) -> None:
