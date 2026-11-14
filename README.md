@@ -140,9 +140,14 @@ Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
 publication. Valid samples keep the existing clipping and 16-bit PCM conversion.
 Installed voicepacks must contain real numeric, finite float32-compatible styles
-shaped `(rows, 1, 256)`, with at least one row. Token counts still clamp to the
+shaped `(rows, 1, 256)`, with 1–512 rows. Before NumPy allocation, the selected
+NPY v1–v3 member must have a bounded header (10,000 bytes), a matching complete
+payload and at most 2 MiB of expanded numeric data (up to 16 bytes per value). Token counts still clamp to the
 last row. Invalid packs raise a controlled backend-unavailable error and are
-never cached; replacing the file allows a subsequent load to recover.
+never cached; replacing the file allows a subsequent load to recover. ONNX,
+voicepack and Piper model/config loaders recheck all their artifact identities
+after loading. A changed generation fails with a retryable backend-unavailable
+error before cache publication; a mixed Piper model/config pair is discarded.
 
 Kokoro refuses nonblank text that yields no supported phoneme tokens with an
 actionable client error (HTTP 400 on the sync speech API). Supported one-character utterances and punctuation tokens
@@ -152,6 +157,28 @@ conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
 86,400,000 PCM bytes at 24 kHz mono). Duration comes from written frames. Late
 inference errors, cancellation and cap overflow remove the partial WAV before
 any artifact is published.
+
+Piper consumes the supported audio-chunk API into an owned WAV. It accepts
+16-bit PCM with one or two channels and a fixed positive sample rate up to
+192 kHz. Chunks must be nonempty, frame-aligned and retain the first chunk's
+geometry. Before each write, cumulative frames and bytes must fit both 30 minutes
+at that rate and 128 MiB of PCM. Speed still sets Piper's length scale. A complete,
+nonempty PCM WAV is required before returning a result: RIFF size, geometry,
+written frame count and readable payload are checked with reads of at most
+64 KiB. Empty, truncated, inconsistent or oversized output fails synthesis and
+removes the owned partial WAV; duration comes from verified written frames.
+
+Synthesis voice keys resolve exactly first. Case-insensitive aliases must match
+only one configured voice across the registry and in each backend; ambiguous
+aliases return a bounded input error (HTTP 400). Use the exact spelling to select
+between colliding keys. Defaults retain their exact configured identity; an
+ambiguous language-routing mapping keeps the pinned voice.
+
+If synthesis, cancellation or conversion fails and removing an owned temporary
+WAV/export also fails, the original failure propagates. Each cleanup is attempted,
+and a fixed warning reports recovery is needed without paths, text or filesystem
+diagnostics. The orphan remains for operator recovery and no successful result
+is returned. Cleanup after a successful result retains its existing behavior.
 
 ## Historical fingerprint upgrades
 

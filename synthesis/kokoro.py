@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from synthesis.service import (
     ArtifactIdentity,
@@ -37,7 +37,10 @@ from synthesis.service import (
     SynthesisResult,
     SynthesizeParams,
     VoiceNotInstalledError,
+    cleanup_failed_synthesis,
     piper_artifact_identity,
+    require_artifact_generation,
+    resolve_voice_key,
 )
 
 if TYPE_CHECKING:
@@ -306,11 +309,7 @@ class KokoroBackend:
         requested = (voice or "").strip()
         if not requested:
             return self._default_model()
-        exact = self.models.get(requested)
-        if exact is not None:
-            return exact
-        lowered = {key.lower(): key for key in self.models}
-        alias = lowered.get(requested.lower())
+        alias = resolve_voice_key(self.models, requested)
         if alias is not None:
             return self.models[alias]
         available = ", ".join(sorted(self.models)) or "none configured"
@@ -379,6 +378,7 @@ class KokoroBackend:
             except ImportError as exc:
                 raise BackendUnavailableError(_EXTRA_HINT) from exc
             session = ort.InferenceSession(str(identity[0]), providers=["CPUExecutionProvider"])
+            require_artifact_generation((Path(model_path),), (identity,))
             for existing in list(_SESSION_CACHE):
                 if existing[0] == identity[0]:
                     del _SESSION_CACHE[existing]
@@ -397,24 +397,27 @@ class KokoroBackend:
                 _VOICEPACK_CACHE.move_to_end(cache_key)
                 return cached
             try:
-                with np.load(identity[0], allow_pickle=False) as pack:
-                    if voicepack_key not in pack:
-                        raise BackendUnavailableError(
-                            "Voicepack is missing the configured style key."
-                        )
-                    raw_style = pack[voicepack_key]
-                    if (
-                        raw_style.ndim != 3
-                        or raw_style.shape[0] < 1
-                        or raw_style.shape[1:] != (1, 256)
-                        or raw_style.dtype.kind not in "fiu"
-                    ):
-                        raise BackendUnavailableError(
-                            "Voicepack must contain numeric styles shaped (rows, 1, 256)."
-                        )
-                    style = np.array(raw_style, dtype=np.float32, copy=True)
-                    if not np.isfinite(style).all():
-                        raise BackendUnavailableError("Voicepack styles must be finite.")
+                with identity[0].open("rb") as source:
+                    _admit_style_member(source, voicepack_key)
+                    pack = np.load(source, allow_pickle=False)
+                    with pack:
+                        if voicepack_key not in pack:
+                            raise BackendUnavailableError(
+                                "Voicepack is missing the configured style key."
+                            )
+                        raw_style = pack[voicepack_key]
+                        if (
+                            raw_style.ndim != 3
+                            or raw_style.shape[0] < 1
+                            or raw_style.shape[1:] != (1, 256)
+                            or raw_style.dtype.kind not in "fiu"
+                        ):
+                            raise BackendUnavailableError(
+                                "Voicepack must contain numeric styles shaped (rows, 1, 256)."
+                            )
+                        style = np.array(raw_style, dtype=np.float32, copy=True)
+                        if not np.isfinite(style).all():
+                            raise BackendUnavailableError("Voicepack styles must be finite.")
             except (
                 OSError,
                 ValueError,
@@ -426,6 +429,7 @@ class KokoroBackend:
                 raise BackendUnavailableError(
                     "Voicepack could not be loaded as numeric styles."
                 ) from exc
+            require_artifact_generation((Path(voicepack_path),), (identity,))
             for existing in list(_VOICEPACK_CACHE):
                 if existing[0][0] == identity[0] and existing[0] != identity:
                     del _VOICEPACK_CACHE[existing]
@@ -433,6 +437,65 @@ class KokoroBackend:
             if len(_VOICEPACK_CACHE) > _CACHE_LIMIT:
                 _VOICEPACK_CACHE.popitem(last=False)
             return style
+
+
+# Standard packs retain 512 rows (510 tokens plus model boundary slots).
+_STYLE_MAX_ROWS = 512
+_STYLE_HEADER_BYTES = 10_000
+_STYLE_MAX_BYTES = _STYLE_MAX_ROWS * 256 * 16
+
+
+def _admit_style_member(source: BinaryIO, key: str) -> None:
+    """Bound the selected expanded NPY member before NumPy allocates its array."""
+    np = _require_numpy()
+    with zipfile.ZipFile(source) as archive:
+        # NpzFile gives a raw filename precedence over its implicit .npy alias.
+        # Admit exactly that member, including configured keys with a .npy suffix.
+        entries = archive.infolist()
+        members = [entry for entry in entries if entry.filename == key]
+        if not members:
+            members = [entry for entry in entries if entry.filename == f"{key}.npy"]
+        if len(members) != 1:
+            raise BackendUnavailableError("Voicepack must contain one configured style member.")
+        member = members[0]
+        if member.file_size > _STYLE_MAX_BYTES + _STYLE_HEADER_BYTES:
+            raise BackendUnavailableError("Voicepack style exceeds the expanded byte limit.")
+        with archive.open(member) as data:
+            version = np.lib.format.read_magic(data)
+            if version not in {(1, 0), (2, 0), (3, 0)}:
+                raise BackendUnavailableError("Voicepack style uses an unsupported NPY version.")
+            length_bytes = 2 if version == (1, 0) else 4
+            encoded_length = data.read(length_bytes)
+            if (
+                len(encoded_length) != length_bytes
+                or int.from_bytes(encoded_length, "little") > _STYLE_HEADER_BYTES
+            ):
+                raise BackendUnavailableError("Voicepack style header exceeds the byte limit.")
+            # NumPy checks max_header_size only after reading the header itself.
+            data.seek(8)
+            if version == (1, 0):
+                shape, _, dtype = np.lib.format.read_array_header_1_0(
+                    data, max_header_size=_STYLE_HEADER_BYTES
+                )
+            else:
+                # Numeric NPY v3 headers are ASCII and share the v2 length layout.
+                shape, _, dtype = np.lib.format.read_array_header_2_0(
+                    data, max_header_size=_STYLE_HEADER_BYTES
+                )
+            if (
+                len(shape) != 3
+                or not 1 <= shape[0] <= _STYLE_MAX_ROWS
+                or shape[1:] != (1, 256)
+                or dtype.kind not in "fiu"
+                or dtype.itemsize > 16
+            ):
+                raise BackendUnavailableError(
+                    "Voicepack styles must be numeric with shape (1..512, 1, 256)."
+                )
+            size = shape[0] * 256 * dtype.itemsize
+            if size > _STYLE_MAX_BYTES or member.file_size != data.tell() + size:
+                raise BackendUnavailableError("Voicepack style payload size is invalid.")
+    source.seek(0)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -558,7 +621,7 @@ def _write_wav(audio_parts: Iterable[np.ndarray]) -> tuple[Path, int]:
                 raise RuntimeError("Kokoro returned no audio samples.")
     except BaseException:
         # The caller never receives the path on inference, cancellation or write failure.
-        audio_path.unlink(missing_ok=True)
+        cleanup_failed_synthesis(audio_path)
         raise
     return audio_path, frames
 

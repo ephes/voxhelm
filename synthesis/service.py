@@ -8,6 +8,7 @@ import stat
 import tempfile
 import wave
 from collections import OrderedDict
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -24,6 +25,8 @@ AUTO_BACKEND_MODEL_NAMES = {"auto", "piper", "tts-1", "tts-1-hd"}
 AUDIO_OUTPUT_FORMATS = {"wav", "mp3", "ogg"}
 MIN_TTS_SPEED = 0.25
 MAX_TTS_SPEED = 4.0
+PIPER_MAX_OUTPUT_SECONDS = 30 * 60
+PIPER_MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 CONTENT_TYPES = {
     "wav": "audio/wav",
     "mp3": "audio/mpeg",
@@ -77,11 +80,7 @@ class VoiceRegistry:
         if not key:
             return None
         by_key = self.by_key()
-        exact = by_key.get(key)
-        if exact is not None:
-            return exact
-        lowered = {existing.lower(): existing for existing in by_key}
-        alias = lowered.get(key.lower())
+        alias = resolve_voice_key(by_key, key)
         return by_key[alias] if alias is not None else None
 
     def resolve_backend(self, *, voice: str | None, request_model: str) -> str:
@@ -178,19 +177,17 @@ class PiperBackend:
                         min(1.0 / MIN_TTS_SPEED, 1.0 / params.speed),
                     )
 
-                with wave.open(str(temp_wav), "wb") as wav_writer:
-                    voice.synthesize_wav(text, wav_writer, synthesis_config)
+                geometry, frame_count = _write_piper_audio(
+                    temp_wav, voice.synthesize(text, syn_config=synthesis_config)
+                )
 
-            with wave.open(str(temp_wav), "rb") as wav_reader:
-                frame_rate = wav_reader.getframerate()
-                frame_width = wav_reader.getsampwidth()
-                channels = wav_reader.getnchannels()
-                frame_count = wav_reader.getnframes()
+            _validate_piper_wav(temp_wav, geometry=geometry, frames=frame_count)
+            frame_rate, frame_width, channels = geometry
         except BaseException:
-            temp_wav.unlink(missing_ok=True)
+            cleanup_failed_synthesis(temp_wav)
             raise
 
-        duration_seconds = round(frame_count / frame_rate, 3) if frame_rate else 0.0
+        duration_seconds = round(frame_count / frame_rate, 3)
         return SynthesisResult(
             audio_path=temp_wav,
             backend_name="piper",
@@ -213,11 +210,7 @@ class PiperBackend:
 
         requested_voice = (voice or "").strip()
         if requested_voice:
-            exact = installed.get(requested_voice)
-            if exact is not None:
-                return exact
-            lowered = {item.lower(): item for item in installed}
-            alias = lowered.get(requested_voice.lower())
+            alias = resolve_voice_key(installed, requested_voice)
             if alias is not None:
                 return installed[alias]
             resolved_language = self.language_voices.get(normalize_language_key(requested_voice))
@@ -238,6 +231,81 @@ class PiperBackend:
             return installed[default_voice]
 
         return next(iter(installed.values()))
+
+
+def _write_piper_audio(path: Path, chunks: Iterable[Any]) -> tuple[tuple[int, int, int], int]:
+    geometry = None
+    frames = total_bytes = 0
+    with wave.open(str(path), "wb") as writer:
+        # Even a first-chunk failure must close without masking the original error.
+        writer.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+        for chunk in chunks:
+            current = (chunk.sample_rate, chunk.sample_width, chunk.sample_channels)
+            rate, width, channels = current
+            if (
+                any(type(value) is not int for value in current)
+                or not 0 < rate <= 192000
+                or width != 2
+                or channels not in (1, 2)
+            ):
+                raise RuntimeError("Piper returned unsupported PCM geometry.")
+            if geometry is not None and current != geometry:
+                raise RuntimeError("Piper changed PCM geometry during synthesis.")
+            pcm = chunk.audio_int16_bytes
+            if not isinstance(pcm, bytes) or not pcm or len(pcm) % (width * channels):
+                raise RuntimeError("Piper returned empty or incomplete PCM frames.")
+            chunk_frames = len(pcm) // (width * channels)
+            if (
+                frames + chunk_frames > rate * PIPER_MAX_OUTPUT_SECONDS
+                or total_bytes + len(pcm) > PIPER_MAX_OUTPUT_BYTES
+            ):
+                raise RuntimeError("Piper audio exceeded the output limit (30 minutes / 128 MiB).")
+            if geometry is None:
+                geometry = current
+                writer.setparams((channels, width, rate, 0, "NONE", "not compressed"))
+            writer.writeframes(pcm)
+            frames += chunk_frames
+            total_bytes += len(pcm)
+            del pcm, chunk
+        if geometry is None:
+            raise RuntimeError("Piper returned no audio samples.")
+    return geometry, frames
+
+
+def _validate_piper_wav(path: Path, *, geometry: tuple[int, int, int], frames: int) -> None:
+    """Check the owned PCM WAV completely, retaining at most 64 KiB per read."""
+    try:
+        with wave.open(str(path), "rb") as reader:
+            with path.open("rb") as source:
+                header = source.read(12)
+            size = path.stat().st_size
+            if (
+                len(header) != 12
+                or header[:4] != b"RIFF"
+                or header[8:] != b"WAVE"
+                or int.from_bytes(header[4:8], "little") + 8 != size
+                or size > PIPER_MAX_OUTPUT_BYTES + 44
+            ):
+                raise RuntimeError("Piper returned an incomplete WAV container.")
+            actual = (reader.getframerate(), reader.getsampwidth(), reader.getnchannels())
+            if (
+                actual != geometry
+                or reader.getcomptype() != "NONE"
+                or reader.getnframes() != frames
+                or frames <= 0
+            ):
+                raise RuntimeError("Piper returned inconsistent WAV geometry or frame count.")
+            block_size = geometry[1] * geometry[2]
+            remaining = frames * block_size
+            while remaining:
+                data = reader.readframes(min(remaining, 65536) // block_size)
+                if not data or len(data) % block_size:
+                    raise RuntimeError("Piper returned incomplete WAV audio.")
+                remaining -= len(data)
+            if reader.readframes(1):
+                raise RuntimeError("Piper returned excess or partial WAV frames.")
+    except (wave.Error, EOFError) as exc:
+        raise RuntimeError("Piper returned invalid WAV audio.") from exc
 
 
 def get_backend_service(params: SynthesizeParams | None = None) -> BackendProtocol:
@@ -486,7 +554,7 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
         )
     except BaseException:
         # Failures and interruptions must not leak the reserved output.
-        target_path.unlink(missing_ok=True)
+        cleanup_failed_synthesis(target_path)
         raise
 
     return ExportedAudio(
@@ -596,6 +664,7 @@ def load_piper_voice(voice: InstalledVoice):
             return cached
 
         loaded_voice = PiperVoice.load(identity[0][0], config_path=identity[1][0])
+        require_artifact_generation((voice.model_path, voice.config_path), identity)
         # Discard superseded versions at these paths before publishing the new entry.
         for existing in list(_PIPER_VOICE_CACHE):
             if (existing[0][0], existing[1][0]) == (identity[0][0], identity[1][0]):
@@ -610,6 +679,42 @@ def piper_artifact_identity(path: Path) -> ArtifactIdentity:
     resolved = path.resolve(strict=True)
     stat = resolved.stat()
     return (resolved, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def require_artifact_generation(
+    paths: tuple[Path, ...], identities: tuple[ArtifactIdentity, ...]
+) -> None:
+    try:
+        unchanged = tuple(piper_artifact_identity(path) for path in paths) == identities
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise BackendUnavailableError("Synthesis model artifacts changed during loading; retry.")
+
+
+def resolve_voice_key(keys: Collection[str], requested: str) -> str | None:
+    """Exact configured identities win; normalized aliases must be unique."""
+    if requested in keys:
+        return requested
+    match = None
+    for key in keys:
+        if key.casefold() == requested.casefold():
+            if match is not None:
+                raise SynthesisInputError(
+                    "Ambiguous voice alias. Use an exact configured voice key."
+                )
+            match = key
+    return match
+
+
+def cleanup_failed_synthesis(*paths: Path) -> None:
+    """Best-effort owned cleanup while an original failure is propagating."""
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # No exception text, paths or source input in cleanup diagnostics.
+            _LOGGER.warning("Synthesis audio cleanup failed; owned temporary file needs recovery.")
 
 
 def cleanup_paths(*paths: Path) -> None:

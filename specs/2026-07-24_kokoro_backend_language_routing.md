@@ -128,7 +128,14 @@ One new backend, one routing layer, minimal surgery elsewhere:
   length guards the edge; a boundary test pins the indexing at the exact
   chunk limit (no off-by-two, no out-of-range).
   Installed packs must contain finite real numeric float32-compatible styles
-  shaped `(rows, 1, 256)` with at least one row; invalid packs fail before caching.
+  shaped `(rows, 1, 256)` with 1–512 rows. Before array loading, admit the
+  selected NPY v1–v3 member with a 10,000-byte header limit, at most 2 MiB
+  expanded numeric data and an exact payload length. The admitted member must
+  match NumPy’s exact-filename/implicit-suffix resolution; duplicate selected
+  members are refused. Invalid packs fail before
+  caching. Model and pack identities are rechecked after loading; changes fail
+  with backend-unavailable and are never cached. Piper similarly rechecks both
+  model and config before publishing a loaded voice.
   Inference audio must be a nonempty finite mono vector or a single mono batch.
   **Token limit & chunking (hard requirement):** Kokoro models accept ~510
   phoneme tokens per call, and the voicepack is length-indexed — the style
@@ -411,3 +418,14 @@ to the Kokoro backend regardless of `VOXHELM_TTS_BACKEND`:
 
 Piper stays installed throughout. Code rollback = revert the voxhelm
 commits (each slice is one commit).
+
+### Voice identity and failed-output ownership
+
+Exact voice keys take precedence across the combined registry and in each backend.
+Case-insensitive aliases must be unique; ambiguity raises a bounded client input
+error without listing configuration values. Exact defaults remain stable. Routing
+keeps the pinned voice when its mapped alias is ambiguous.
+
+Failure or cancellation owns partial WAV cleanup. A failed unlink must preserve
+the initiating exception and emit only a fixed recovery warning; owned orphan files
+remain available for operator recovery. Conversion uses the same failure policy.

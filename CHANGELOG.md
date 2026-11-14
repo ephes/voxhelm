@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Write Piper audio incrementally with 30-minute and 128 MiB PCM ceilings;
+  require stable positive mono/stereo 16-bit geometry and a complete nonempty
+  WAV before returning metadata. Invalid or failed output is cleaned up.
+
+- Reject ambiguous case-insensitive voice aliases while preserving exact keys,
+  defaults and pinned routing. Preserve synthesis/conversion failures and
+  cancellation if temporary-file cleanup fails, logging a fixed recovery warning.
+
+- Bound installed Kokoro style metadata and expanded array size before NumPy
+  loading, matching exact ZIP key resolution; refuse changed ONNX, voicepack and
+  Piper model/config generations before cache publication, allowing a stable retry.
+
 - German synthesis: preserve numeric tokens longer than 64 digits literally
   across units, EUR and temperatures, avoiding integer conversion failures and
   unbounded fractional expansion; ordinary pronunciation remains unchanged.
