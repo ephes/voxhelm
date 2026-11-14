@@ -8,6 +8,7 @@ import stat
 import tempfile
 import wave
 from collections import OrderedDict
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -77,11 +78,7 @@ class VoiceRegistry:
         if not key:
             return None
         by_key = self.by_key()
-        exact = by_key.get(key)
-        if exact is not None:
-            return exact
-        lowered = {existing.lower(): existing for existing in by_key}
-        alias = lowered.get(key.lower())
+        alias = resolve_voice_key(by_key, key)
         return by_key[alias] if alias is not None else None
 
     def resolve_backend(self, *, voice: str | None, request_model: str) -> str:
@@ -187,7 +184,7 @@ class PiperBackend:
                 channels = wav_reader.getnchannels()
                 frame_count = wav_reader.getnframes()
         except BaseException:
-            temp_wav.unlink(missing_ok=True)
+            cleanup_failed_synthesis(temp_wav)
             raise
 
         duration_seconds = round(frame_count / frame_rate, 3) if frame_rate else 0.0
@@ -213,11 +210,7 @@ class PiperBackend:
 
         requested_voice = (voice or "").strip()
         if requested_voice:
-            exact = installed.get(requested_voice)
-            if exact is not None:
-                return exact
-            lowered = {item.lower(): item for item in installed}
-            alias = lowered.get(requested_voice.lower())
+            alias = resolve_voice_key(installed, requested_voice)
             if alias is not None:
                 return installed[alias]
             resolved_language = self.language_voices.get(normalize_language_key(requested_voice))
@@ -486,7 +479,7 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
         )
     except BaseException:
         # Failures and interruptions must not leak the reserved output.
-        target_path.unlink(missing_ok=True)
+        cleanup_failed_synthesis(target_path)
         raise
 
     return ExportedAudio(
@@ -622,6 +615,31 @@ def require_artifact_generation(
         unchanged = False
     if not unchanged:
         raise BackendUnavailableError("Synthesis model artifacts changed during loading; retry.")
+
+
+def resolve_voice_key(keys: Collection[str], requested: str) -> str | None:
+    """Exact configured identities win; normalized aliases must be unique."""
+    if requested in keys:
+        return requested
+    match = None
+    for key in keys:
+        if key.casefold() == requested.casefold():
+            if match is not None:
+                raise SynthesisInputError(
+                    "Ambiguous voice alias. Use an exact configured voice key."
+                )
+            match = key
+    return match
+
+
+def cleanup_failed_synthesis(*paths: Path) -> None:
+    """Best-effort owned cleanup while an original failure is propagating."""
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # No exception text, paths or source input in cleanup diagnostics.
+            _LOGGER.warning("Synthesis audio cleanup failed; owned temporary file needs recovery.")
 
 
 def cleanup_paths(*paths: Path) -> None:

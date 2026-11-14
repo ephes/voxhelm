@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reject ambiguous case-insensitive voice aliases while preserving exact keys,
+  defaults and pinned routing. Preserve synthesis/conversion failures and
+  cancellation if temporary-file cleanup fails, logging a fixed recovery warning.
+
 - Bound installed Kokoro style metadata and expanded array size before NumPy
   loading; refuse changed ONNX, voicepack and Piper model/config generations
   before cache publication, allowing a stable retry.

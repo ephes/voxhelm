@@ -158,6 +158,18 @@ conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
 inference errors, cancellation and cap overflow remove the partial WAV before
 any artifact is published.
 
+Synthesis voice keys resolve exactly first. Case-insensitive aliases must match
+only one configured voice across the registry and in each backend; ambiguous
+aliases return a bounded input error (HTTP 400). Use the exact spelling to select
+between colliding keys. Defaults retain their exact configured identity; an
+ambiguous language-routing mapping keeps the pinned voice.
+
+If synthesis, cancellation or conversion fails and removing an owned temporary
+WAV/export also fails, the original failure propagates. Each cleanup is attempted,
+and a fixed warning reports recovery is needed without paths, text or filesystem
+diagnostics. The orphan remains for operator recovery and no successful result
+is returned. Cleanup after a successful result retains its existing behavior.
+
 ## Historical fingerprint upgrades
 
 Migration 0008 backfills only the database selected by `migrate --database`.

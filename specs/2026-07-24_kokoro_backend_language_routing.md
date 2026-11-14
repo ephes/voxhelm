@@ -416,3 +416,14 @@ to the Kokoro backend regardless of `VOXHELM_TTS_BACKEND`:
 
 Piper stays installed throughout. Code rollback = revert the voxhelm
 commits (each slice is one commit).
+
+### Voice identity and failed-output ownership
+
+Exact voice keys take precedence across the combined registry and in each backend.
+Case-insensitive aliases must be unique; ambiguity raises a bounded client input
+error without listing configuration values. Exact defaults remain stable. Routing
+keeps the pinned voice when its mapped alias is ambiguous.
+
+Failure or cancellation owns partial WAV cleanup. A failed unlink must preserve
+the initiating exception and emit only a fixed recovery warning; owned orphan files
+remain available for operator recovery. Conversion uses the same failure policy.

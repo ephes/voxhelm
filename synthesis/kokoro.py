@@ -37,8 +37,10 @@ from synthesis.service import (
     SynthesisResult,
     SynthesizeParams,
     VoiceNotInstalledError,
+    cleanup_failed_synthesis,
     piper_artifact_identity,
     require_artifact_generation,
+    resolve_voice_key,
 )
 
 if TYPE_CHECKING:
@@ -307,11 +309,7 @@ class KokoroBackend:
         requested = (voice or "").strip()
         if not requested:
             return self._default_model()
-        exact = self.models.get(requested)
-        if exact is not None:
-            return exact
-        lowered = {key.lower(): key for key in self.models}
-        alias = lowered.get(requested.lower())
+        alias = resolve_voice_key(self.models, requested)
         if alias is not None:
             return self.models[alias]
         available = ", ".join(sorted(self.models)) or "none configured"
@@ -617,7 +615,7 @@ def _write_wav(audio_parts: Iterable[np.ndarray]) -> tuple[Path, int]:
                 raise RuntimeError("Kokoro returned no audio samples.")
     except BaseException:
         # The caller never receives the path on inference, cancellation or write failure.
-        audio_path.unlink(missing_ok=True)
+        cleanup_failed_synthesis(audio_path)
         raise
     return audio_path, frames
 
