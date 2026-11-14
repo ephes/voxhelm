@@ -216,3 +216,28 @@ bytes. In-place writes during native inference are detected by the postcheck and
 discard the result; publish complete replacements while workers are stopped.
 These guarantees assume reliable filesystem change metadata. Synthetic subprocess
 regressions read the inherited descriptor without loading any real model.
+
+## Native diagnostic ownership (2026-11-14)
+
+All calls through the native inference supervisor now drain both stdout and stderr
+incrementally with a combined 64 KiB ceiling and retain admitted output within
+that same ceiling, including language/version evidence used by callers.
+Exceeding the ceiling fails the inference. Cancellation and deadlines stop
+the owned process group, including descendants retaining pipes; cancellation is
+checked again before returning. Small-output success and nonzero return codes
+keep their existing meaning. Language evidence remains available in the bounded
+stderr output; native JSON supplies the matching language code.
+
+The standalone WhisperCpp backend shares the window reader's regular,
+nonblocking, no-follow file admission, with a 64 MiB transcript ceiling. Its JSON
+must be a UTF-8 object with at most 128 nesting levels, no duplicate members and
+only finite numbers. Rejected/missing output raises a fixed backend error before
+normalization; ordinary token timings are preserved. Window clips keep their
+existing 8 MiB file allowance and decoder compatibility.
+
+
+A window retry with no retained words can be a normal decoded response (for
+example all tokens fall outside the grid window). The drift caller records that
+as a rejected `empty_retry` and preserves the source words, regardless of matching
+language probability. It admits only nonblank, finite, positive word spans in the
+window and clips crossing ends to its boundary.

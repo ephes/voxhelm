@@ -117,11 +117,11 @@ def test_nonfinite_cue_rejected_before_any_transcript_publication(
     store.put_bytes.assert_not_called()
 
 
-def test_finite_negative_reversed_timestamps_keep_existing_policy():
+def test_finite_negative_reversed_timestamps_keep_raw_and_gain_positive_duration():
     result = TranscriptionResult("speech", "de", [TranscriptionSegment(0, -1.0, -2.0, "speech")])
     assert formats.render_verbose_json(result)["segments"][0]["end"] == -2.0
-    assert "00:00:00.000 --> 00:00:00.000" in formats.render_vtt(result)
-    assert formats.render_podlove(result)["transcripts"][0]["end_ms"] == 0
+    assert "00:00:00.000 --> 00:00:00.001" in formats.render_vtt(result)
+    assert formats.render_podlove(result)["transcripts"][0]["end_ms"] == 1
 
 
 @pytest.mark.parametrize(

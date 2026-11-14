@@ -12,8 +12,8 @@ of 2026-10-15, the post-hoc acceptance rule of its REPORT.md):
    the window when English >= 4 and English / (English + German) >= 0.10.
 3. Retry: re-transcribe each flagged window with whisper large-v3-turbo on
    ``[t - 1, t + 31]``, language detected on the clip (``transcribe_window``).
-4. Accept: only when the detected language is the episode language with p >= 0.9;
-   otherwise Parakeet's words stay.
+4. Accept: only when the detected language is the episode language with p >= 0.9
+   and the retry has usable in-window words; otherwise Parakeet's words stay.
 5. Splice: every Parakeet word starting in ``[t, t + 30)`` of an accepted window is
    replaced by the retry's words, which start in the same range (``splice.py``).
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 from collections.abc import Callable
@@ -157,6 +158,35 @@ def splice_words(
     return spliced
 
 
+def usable_retry_words(
+    words: list[dict[str, Any]],
+    *,
+    start: float,
+    end: float,
+) -> list[dict[str, Any]]:
+    """Keep finite, nonblank words starting inside this window, clipping their ends."""
+    usable = []
+    for word in words:
+        text, word_start, word_end = word.get("w"), word.get("s"), word.get("e")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if (
+            isinstance(word_start, bool)
+            or not isinstance(word_start, int | float)
+            or isinstance(word_end, bool)
+            or not isinstance(word_end, int | float)
+        ):
+            continue
+        try:
+            if not math.isfinite(word_start) or not math.isfinite(word_end):
+                continue
+        except OverflowError:
+            continue
+        if start <= word_start < end and word_end > word_start:
+            usable.append({"w": text, "s": word_start, "e": min(word_end, end)})
+    return usable
+
+
 def empty_summary() -> dict[str, Any]:
     return {"windows": 0, "flagged": 0, "accepted": 0, "rejected": 0, "retry_seconds": 0.0}
 
@@ -220,10 +250,18 @@ def run_drift_check(
             )
             elapsed = monotonic() - started
             retry_seconds += elapsed
-            accepted = (
-                result.language == language
-                and result.language_probability >= rule.accept_probability
+            replacement = usable_retry_words(
+                result.words,
+                start=index * rule.window_seconds,
+                end=(index + 1) * rule.window_seconds,
             )
+            accepted = (
+                bool(replacement)
+                and result.language == language
+                and rule.accept_probability <= result.language_probability <= 1.0
+            )
+            if not replacement:
+                record["rejection_reason"] = "empty_retry"
             record.update(
                 {
                     "language": result.language,
@@ -236,9 +274,9 @@ def run_drift_check(
             if accepted:
                 replacements[index] = [
                     {"w": word["w"], "s": word["s"], "e": word["e"], "c": None}
-                    for word in result.words
+                    for word in replacement
                 ]
-                record["words_after"] = len(result.words)
+                record["words_after"] = len(replacement)
             summary["flagged"] += 1
             summary["accepted" if accepted else "rejected"] += 1
         records.append(record)

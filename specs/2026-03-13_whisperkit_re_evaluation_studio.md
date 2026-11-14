@@ -272,3 +272,31 @@ Primary sources that most influenced the conclusion:
   `https://github.com/argmaxinc/WhisperKit/tree/main/Sources/WhisperKitCLI`
 - WhisperKit model support/default recommendation table:
   `https://github.com/argmaxinc/WhisperKit/blob/main/Sources/WhisperKit/Core/Models.swift`
+
+
+## HTTP resource contract (2026-11-14)
+
+The experimental backend streams uploads and raw response bytes through an owned
+async transport. One monotonic asyncio timeout covers connect, upload, headers and
+body, independently of per-operation socket timeouts. No model or live worker is
+used by the loopback regression peers. Transcript bodies retain at most 64 MiB;
+error bodies at most 64 KiB. Overflow closes the response before decoding. Native
+JSON admission is also used here: UTF-8 object, depth <=128, no duplicate members
+or nonfinite numbers. Deadline, byte, read and decode failures are terminal for
+this request; unreachable connection failures retain backend-unavailable routing.
+
+
+## Cancellation and failure privacy (2026-11-14)
+
+The caller's cooperative event is checked before HTTP work, polled every 50 ms
+inside the exchange and checked again before result normalization. Cancellation
+cancels and awaits the request, closes response/upload resources, and propagates
+`InferenceCancelled` without fallback or publication. A late response cannot turn
+cancellation into success. Voxhelm releases its lane/file ownership; the sidecar's
+own inference cancellation remains outside Voxhelm's control.
+
+HTTP rejections expose only status; unreachable/read/deadline/JSON outcomes use
+fixed diagnostics, including malformed transcript field conversions. Operational
+logs use safe failure categories/status and never include response bodies,
+prompt/file data, URL userinfo or query strings. The
+public HTTP transport is used directly to avoid full-URL client log records.

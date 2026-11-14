@@ -24,6 +24,19 @@ drained and discarded so noisy but decodable media still succeeds, and on
 every exit path the whole group is killed, so the decode deadline also covers
 descendants holding its pipes.
 
+Native inference drains both output pipes and retains at most 64 KiB across both:
+stderr keeps its first 52 KiB and last 8 KiB (parsed evidence such as whisper-cli's
+detected-language line follows its model-load log; errors come last), stdout its
+first and last 2 KiB, with a marker for an omitted middle. Output
+beyond that is discarded, not refused, because whisper-cli prints every transcript
+segment to stdout and long episodes exceed any small cap; the transcript itself is
+read from the JSON file. Cancellation and deadlines retire the owned process group
+and its descendants.
+Standalone WhisperCpp transcript output must be a regular file opened without
+following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
+unique members, finite numbers). Invalid output fails before normalization or
+artifact publication. No models are needed for the synthetic admission tests.
+
 ## Transcript Sanitization
 
 Whisper occasionally emits artifacts that the decode-level guards
@@ -75,8 +88,11 @@ publication. Local jobs and remote workers validate the entire cue list before
 writing the first transcript artifact; source audio intermediates may already
 exist. The same rejection policy applies to text, verbose JSON, VTT, DOTE and
 Podlove. Finite negative/reversed timestamps retain the existing policy:
-verbose JSON preserves raw boundaries; timed formats clamp reversed ends to
-starts and render negative times as zero.
+verbose JSON preserves raw boundaries. Timed formats quantize each endpoint once
+to integer milliseconds, clamp negative times to zero and extend zero, reversed
+or rounding-collapsed spans to a minimum of 1 ms. Text-only fallback cues follow
+the same rule. This preserves nonblank content in playable cues; overlapping or
+adjacent cues keep their original ordering and are not globally retimed.
 
 Known-speaker reference and segment embeddings must be nonempty and contain
 only finite coordinates. Invalid evidence raises `KnownSpeakerError`, aborting
@@ -116,13 +132,20 @@ cached only after successful device placement, so failed placement can be retrie
 
 The `vtt` format (sync `response_format=vtt` and the batch `vtt` artifact)
 writes one cue per segment, each with a single payload line. Like `dote` and
-`podlove`, it skips segments with empty text and clamps an end time that lies
-before the start time to the start time. Cue text is escaped for WebVTT: `&`,
+`podlove`, it skips segments with empty text and uses quantized integer
+millisecond endpoints with a minimum 1 ms duration. Cue text is escaped for WebVTT: `&`,
 `<`, and `>` become `&amp;`, `&lt;`, and `&gt;`, `-->` becomes `->`, and line
 breaks inside a segment collapse to one space, so transcript text can neither
 inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
+
+The German drift check retains the original window words when a retry has no
+usable in-window words, even with strong matching language evidence. Nonblank,
+finite, positive-duration retry words must start inside the window; ends are
+clipped at its boundary. Empty/fully filtered retries record
+`rejection_reason: empty_retry` and count as rejected. Accepted replacements
+still carry `c: null`, preserving the absence of Parakeet confidence evidence.
 
 ## Kokoro inference and installed style validation
 
@@ -1474,6 +1497,25 @@ Operational caveat: keep treating WhisperKit as experimental on `studio`. The
 benchmark follow-on kept it competitive, but the tuned long-form run still
 logged a Metal GPU recovery error, so the deployed default remains
 `whispercpp`.
+
+The sidecar HTTP exchange uses one elapsed budget,
+`VOXHELM_WHISPERKIT_TIMEOUT_SECONDS` (default 900 seconds), including connection,
+request upload, response headers and the complete response body. Slow progress
+does not renew it. Responses are streamed with a 64 MiB transcript limit and a
+separate 64 KiB HTTP-error limit; the transport closes on overflow or expiry.
+Successful responses must be strict UTF-8 object JSON with at most 128 nesting
+levels, unique members and finite numbers. Size, deadline, read and JSON failures
+fail the request without silently switching inference backends; only an unreachable
+sidecar retains the existing backend-unavailable fallback policy.
+
+Caller cancellation reaches the WhisperKit upload, header wait and response read.
+It closes the owned HTTP transport and upload file before releasing inference
+ownership, raises `InferenceCancelled`, and discards even a late successful
+response without fallback. It stops Voxhelm's wait; it cannot guarantee that the
+independent sidecar stops inference after its client disconnects.
+Public sidecar failures expose fixed categories or HTTP status only. Logs carry
+those same safe categories, never response bodies, prompts, upload paths or URL
+credentials/query strings. The transport avoids full-URL HTTP client logging.
 
 Current limitation: the lane scheduler gates Voxhelm's HTTP, batch, and Wyoming
 entry points, but it does not reach inside the WhisperKit sidecar itself. Once

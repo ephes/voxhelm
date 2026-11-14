@@ -54,7 +54,7 @@ def test_render_vtt_escapes_payload_and_keeps_one_cue_per_segment() -> None:
     )
     assert vtt == (
         "WEBVTT\n\n"
-        "00:00:01.000 --> 00:00:01.000\nQ&amp;A: a &lt;b&gt; c -&gt; d\n\n"
+        "00:00:01.000 --> 00:00:01.001\nQ&amp;A: a &lt;b&gt; c -&gt; d\n\n"
         "00:00:02.000 --> 00:00:03.000\nZeile eins Zeile zwei\n"
     )
     assert _cue_payloads(vtt) == ["Q&amp;A: a &lt;b&gt; c -&gt; d", "Zeile eins Zeile zwei"]
@@ -74,8 +74,40 @@ def test_render_vtt_skips_empty_segments() -> None:
 
 def test_render_vtt_falls_back_to_single_cue_without_segments() -> None:
     vtt = render_vtt(_result(text="Nur Text & mehr\nzweite Zeile"))
-    assert vtt == "WEBVTT\n\n00:00:00.000 --> 00:00:00.000\nNur Text &amp; mehr zweite Zeile\n"
+    assert vtt == "WEBVTT\n\n00:00:00.000 --> 00:00:00.001\nNur Text &amp; mehr zweite Zeile\n"
 
 
 def test_render_vtt_empty_result_has_only_header() -> None:
     assert render_vtt(_result()) == "WEBVTT\n"
+
+
+def test_all_timed_exports_have_positive_quantized_duration():
+    from transcriptions.formats import render_dote, render_podlove, render_verbose_json
+
+    pairs = [(0, 0), (1, 0.5), (0.0001, 0.0002), (-2, -1), (1.00049, 1.00051)]
+    result = _result(
+        *[
+            TranscriptionSegment(id=i, start=start, end=end, text=f"Cue {i}")
+            for i, (start, end) in enumerate(pairs)
+        ]
+    )
+    expected = [(0, 1), (1000, 1001), (0, 1), (0, 1), (1000, 1001)]
+    podlove = render_podlove(result)["transcripts"]
+    assert [(cue["start_ms"], cue["end_ms"]) for cue in podlove] == expected
+    for cue in podlove:
+        assert cue["end_ms"] > cue["start_ms"]
+        assert cue["start"] != cue["end"]
+    vtt_times = [line for line in render_vtt(result).splitlines() if " --> " in line]
+    assert len(vtt_times) == len(pairs)
+    assert all(line.split(" --> ")[0] != line.split(" --> ")[1] for line in vtt_times)
+    assert all(cue["startTime"] != cue["endTime"] for cue in render_dote(result)["lines"])
+    assert [(cue["start"], cue["end"]) for cue in render_verbose_json(result)["segments"]] == pairs
+
+
+def test_text_only_timed_exports_have_one_millisecond_duration():
+    from transcriptions.formats import render_dote, render_podlove
+
+    result = _result(text="Synthetic")
+    assert render_podlove(result)["transcripts"][0]["end_ms"] == 1
+    assert render_dote(result)["lines"][0]["endTime"] == "00:00:00,001"
+    assert "00:00:00.000 --> 00:00:00.001" in render_vtt(result)

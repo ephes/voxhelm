@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -27,6 +26,12 @@ from jobs.retention import JobNotDeletable, RefusedDeletion, delete_job_for_prod
 from jobs.services import create_job_from_payload, serialize_job
 from jobs.staging import serialize_staged_media, stage_uploaded_audio
 from transcriptions.errors import ApiError
+from transcriptions.json_input import (
+    check_json_depth,
+    finite_json_float,
+    reject_json_constant,
+    unique_json_object,
+)
 from transcriptions.views import openai_error_response, require_bearer_token
 
 LOGGER = logging.getLogger(__name__)
@@ -171,48 +176,6 @@ def parse_json_object_request(request: HttpRequest, context: str) -> dict[str, o
     if not isinstance(payload, dict):
         raise ApiError("Request body must be a JSON object.")
     return payload
-
-
-def check_json_depth(raw: bytes) -> None:
-    # Count only structural delimiters outside strings, before decoder allocation.
-    depth = 0
-    quoted = escaped = False
-    for byte in raw:
-        if quoted:
-            if escaped:
-                escaped = False
-            elif byte == 92:
-                escaped = True
-            elif byte == 34:
-                quoted = False
-        elif byte == 34:
-            quoted = True
-        elif byte in (91, 123):
-            depth += 1
-            if depth > 128:
-                raise ValueError("JSON nesting exceeds 128 levels")
-        elif byte in (93, 125):
-            depth -= 1
-
-
-def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON member")
-        result[key] = value
-    return result
-
-
-def reject_json_constant(value: str) -> object:
-    raise ValueError("Nonfinite JSON number")
-
-
-def finite_json_float(value: str) -> float:
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError("Nonfinite JSON number")
-    return number
 
 
 @csrf_exempt

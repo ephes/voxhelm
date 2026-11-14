@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Quantize VTT/DOTE/Podlove cues once to integer milliseconds and ensure a
+  minimum 1 ms duration, preserving verbose raw timing. Retain original drift
+  words on empty/fully filtered retries and record an explicit rejection.
+
+- Propagate WhisperKit caller cancellation through upload/header/body waits,
+  closing owned resources and rejecting late success without fallback. Keep
+  sidecar failure responses and logs private with fixed categories/status only.
+
+- Stream WhisperKit responses under separate transcript/error byte limits and
+  strict object JSON admission, with one elapsed deadline spanning connect,
+  upload, headers and body; resource failures do not trigger backend fallback.
+
+- Bound retained native inference stdout/stderr to 64 KiB (head and tail of each
+  pipe; long whisper.cpp segment output is truncated, not refused) with
+  owned process-group cleanup; admit standalone WhisperCpp transcript files
+  through a regular no-follow descriptor and strict bounded object JSON.
+
 - Update the locked OpenTelemetry API/SDK to 1.45.2 (semantic conventions
   0.66b2), clearing the existing dependency-audit finding CVE-2026-126360.
 

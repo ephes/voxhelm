@@ -11,12 +11,18 @@ import os
 import selectors
 import signal
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic, sleep
 
 _LOGGER = logging.getLogger(__name__)
 
 OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES = 64 * 1024
+# run_native_process retains at most OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES across both pipes.
+_STDERR_HEAD_BYTES = 52 * 1024
+_STDERR_TAIL_BYTES = 8 * 1024
+_STDOUT_HEAD_BYTES = 2 * 1024
+_STDOUT_TAIL_BYTES = 2 * 1024
 OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES = 2048
 
 
@@ -114,3 +120,124 @@ def run_owned_process(
             diagnostic.decode("utf-8", errors="replace").strip() or "(no output)",
         )
         raise RuntimeError(messages.failure)
+
+
+def run_native_process(
+    args: list[str],
+    *,
+    check_cancelled: Callable[[], None],
+    timeout: float | None,
+    poll_seconds: float,
+    terminate_grace_seconds: float,
+    env: Mapping[str, str] | None,
+    pass_fds: tuple[int, ...],
+) -> subprocess.CompletedProcess[str]:
+    """Drain both pipes keeping a bounded head and tail of each (64 KiB in total).
+
+    stderr keeps its first 52 KiB and last 8 KiB, stdout its first and last 2 KiB.
+
+    Output beyond that is discarded, not refused: whisper-cli prints every
+    transcript segment to stdout, so long jobs exceed any small cap. Return
+    codes and process-group ownership are preserved.
+    """
+    deadline = None if timeout is None else monotonic() + timeout
+    check_cancelled()
+    process = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=None if env is None else dict(env),
+        pass_fds=pass_fds,
+    )
+    # stderr carries parsed evidence (whisper-cli's "auto-detected language:" line
+    # follows its model-load log) and the error text, so it gets most of the budget;
+    # stdout is only read for short answers (ffprobe, --version).
+    streams = {
+        "stdout": _HeadTail(head=_STDOUT_HEAD_BYTES, tail=_STDOUT_TAIL_BYTES),
+        "stderr": _HeadTail(head=_STDERR_HEAD_BYTES, tail=_STDERR_TAIL_BYTES),
+    }
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while True:
+                check_cancelled()
+                if deadline is not None and monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout or 0)
+                wait = (
+                    poll_seconds if deadline is None else min(poll_seconds, deadline - monotonic())
+                )
+                if selector.get_map():
+                    for key, _ in selector.select(max(0, wait)):
+                        chunk = os.read(key.fd, 8192)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        # whisper-cli prints every transcript segment to stdout, so
+                        # long jobs legitimately exceed the cap: keep a bounded head
+                        # (language/version evidence) and tail (errors), drop the rest.
+                        streams[key.data].add(chunk)
+                else:
+                    if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                        break
+                    sleep(max(0, wait))
+    except BaseException:
+        # Cooperate first, then retire the entire group, including pipe-owning descendants.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError, PermissionError:
+            pass
+        grace = monotonic() + terminate_grace_seconds
+        while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            if monotonic() >= grace:
+                break
+            sleep(0.01)
+        raise
+    finally:
+        _kill_process_group(process)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        process.wait()
+    check_cancelled()
+    return subprocess.CompletedProcess(
+        args,
+        process.returncode,
+        streams["stdout"].text(),
+        streams["stderr"].text(),
+    )
+
+
+class _HeadTail:
+    """A bounded copy of one stream: its first ``head`` and last ``tail`` bytes."""
+
+    def __init__(self, *, head: int, tail: int) -> None:
+        self.head_limit = head
+        self.tail_limit = tail
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.omitted = 0
+
+    def add(self, chunk: bytes) -> None:
+        room = self.head_limit - len(self.head)
+        if room > 0:
+            self.head.extend(chunk[:room])
+            chunk = chunk[room:]
+        if not chunk:
+            return
+        self.tail.extend(chunk)
+        excess = len(self.tail) - self.tail_limit
+        if excess > 0:
+            del self.tail[:excess]
+            self.omitted += excess
+
+    def text(self) -> str:
+        head = self.head.decode("utf-8", errors="replace")
+        tail = self.tail.decode("utf-8", errors="replace")
+        if not self.omitted:
+            return head + tail
+        return f"{head}\n[{self.omitted} bytes of output omitted]\n{tail}"
