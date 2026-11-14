@@ -150,6 +150,17 @@ One new backend, one routing layer, minimal surgery elsewhere:
   attribution comment with upstream URL + revision) and apply it before
   phonemization for German synthesis only. Vendored file is excluded from
   strict lint if needed but covered by tests.
+  - Numeric-token admission (2026-11): unit, EUR and degree substitutions
+    accept at most 64 digits across integer and fractional parts, excluding
+    sign and separator. Longer matches retain their literal number (including
+    leading zeros); no integer conversion or per-digit expansion is attempted.
+    The independent EUR abbreviation may still become Euro. Date, time and
+    ordinal patterns already have smaller fixed digit bounds. This policy is
+    independent of total text length and does not change Python's digit limit.
+  - Cardinal labels (`Kapitel 2.`, `Seite 4.`, etc.) emit their spoken number
+    and dot directly; subsequent ordinal rules cannot match the words. No
+    reserved sentinel or global restoration is used, so literal marker-looking
+    input and whitespace outside pronunciation substitutions are preserved.
   - Local deviation (2026-10): a number that ends a sentence ("im Jahr
     2024.", "Die Antwort ist 42.") is read as a cardinal, or as a year after
     "Jahr", and keeps its full stop so `split_sentences` still sees the

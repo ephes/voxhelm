@@ -23,6 +23,8 @@
 #   stop at the end of the text or before a capitalised sentence starter
 #   (pronoun, article, conjunction or adverb, see SENTENCE_STARTERS).
 # - year_to_words reads 1100-1999 as spoken years ("neunzehnhundertneunzig").
+# - Numeric substitutions preserve tokens above 64 digits without conversion.
+# - Cardinal labels emit their punctuation directly; no text markers are reserved.
 from __future__ import annotations
 
 import re
@@ -157,7 +159,12 @@ SENTENCE_STARTERS = frozenset(
 )
 
 MONTHS = r"(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)"
-CARDINAL_LABEL_DOT_PLACEHOLDER = "__GODE_CARDINAL_DOT__"
+MAX_NUMERIC_TOKEN_DIGITS = 64
+
+
+def _supports_numeric_token(raw: str) -> bool:
+    # Count both sides of a decimal together, without converting any digits.
+    return len(raw.lstrip("-").replace(",", "").replace(".", "")) <= MAX_NUMERIC_TOKEN_DIGITS
 
 
 def number_to_words(number: int) -> str:
@@ -284,6 +291,8 @@ def _normalize_numbered_units(text: str) -> str:
             _gender: str | None = gender,
         ) -> str:
             raw = match.group(1)
+            if not _supports_numeric_token(raw):
+                return match.group(0)
             number_word = _number_word_with_gender(raw, _gender)
             unit_word = _unit_form(raw, _singular, _plural)
             return f"{number_word} {unit_word}"
@@ -306,6 +315,8 @@ def _normalize_euro_amounts(text: str) -> str:
     def replace_euro_amount(match: re.Match[str]) -> str:
         euros_raw = match.group(1)
         cents_raw = match.group(2)
+        if not _supports_numeric_token(euros_raw + cents_raw):
+            return match.group(0)
         euros_word = _number_word_with_gender(euros_raw, None)
         cents = int(cents_raw.ljust(2, "0")[:2])
 
@@ -321,14 +332,16 @@ def _normalize_euro_amounts(text: str) -> str:
     )
 
 
-def _protect_cardinal_label_numbers(text: str) -> str:
+def _normalize_cardinal_label_numbers(text: str) -> str:
     """Read label numbers as cardinals, not ordinals, before sentence boundaries."""
     label_pattern = r"(Nummer|laufende\s+Nummer|Gleis|Kapitel|Absatz|Seite)"
 
     def replace_label_number(match: re.Match[str]) -> str:
         label = match.group(1)
         number = int(match.group(2))
-        return f"{label} {number_to_words(number)}{CARDINAL_LABEL_DOT_PLACEHOLDER}"
+        # The bounded label number is now a word, so later numeric patterns
+        # cannot consume its full stop. No sentinel or restoration is needed.
+        return f"{label} {number_to_words(number)}."
 
     return re.sub(
         rf"(?i)\b{label_pattern}\s+(\d{{1,6}})\.(?=\s|$)",
@@ -348,16 +361,20 @@ def normalize_german_text(text: str) -> str:
     for pattern, replacement in ABBREVIATIONS:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
-    text = _protect_cardinal_label_numbers(text)
+    text = _normalize_cardinal_label_numbers(text)
 
     def replace_temperature(match: re.Match[str]) -> str:
         raw_value = match.group(1)
+        if not _supports_numeric_token(raw_value):
+            return match.group(0)
         prefix = "minus " if raw_value.startswith("-") else ""
         value = decimal_to_words(raw_value.lstrip("-"))
         return f"{prefix}{value} Grad Celsius"
 
     def replace_degree_without_unit(match: re.Match[str]) -> str:
         raw_value = match.group(1)
+        if not _supports_numeric_token(raw_value):
+            return match.group(0)
         prefix = "minus " if raw_value.startswith("-") else ""
         value = decimal_to_words(raw_value.lstrip("-"))
         return f"{prefix}{value} Grad"
@@ -471,7 +488,6 @@ def normalize_german_text(text: str) -> str:
         replace_ordinal,
         text,
     )
-    text = text.replace(CARDINAL_LABEL_DOT_PLACEHOLDER, ".")
     text = re.sub(r"(?i)\bHbf\b\.?", "Hauptbahnhof", text)
     text = re.sub(r"(?i)\bEUR\b", "Euro", text)
 

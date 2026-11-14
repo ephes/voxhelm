@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 DEFAULT_REPEAT_THRESHOLD = 4
 
 # Adjacent cues may have at most one second of silence; overlaps must still
-# progress forward in time. Longer gaps split otherwise identical runs.
+# progress forward in time. Longer gaps and speaker changes split runs.
 MAX_REPEAT_GAP_SECONDS = 1.0
 
 # A run of 4+ dots (optionally space-separated) is a degenerate artifact. A
@@ -46,7 +46,8 @@ _EDGE_CHARS = " \t\r\n.,;:!?-–—…\"'`„“”»«()[]{}"
 
 # Subtitle-credit hallucination family. Each pattern matches the *whole* cue as a
 # terminal attribution — a credit ends at the broadcaster name (optionally
-# "für funk") with an optional trailing year, or trails off on "amara.org". This
+# "für funk") with an optional trailing year, or attributes subtitles "von
+# Amara.org". The standalone domain is also a known credit. This
 # is what distinguishes a credit from genuine topic talk that merely mentions
 # subtitles or a broadcaster and then continues into a real predicate. All of
 # these are therefore left untouched: "Das ZDF hat darüber berichtet.",
@@ -60,7 +61,7 @@ _CREDIT_PATTERNS = (
         r"^untertitel(?:ung)?(?:\s+im auftrag)?\s+des\s+zdf"
         r"(?:\s+für\s+funk)?(?:[,\s]+\d{4})?$"
     ),
-    re.compile(r"^untertitel(?:ung)?\b.*\bamara\.org$"),
+    re.compile(r"^untertitel(?:ung)?\s+von\s+amara\.org$"),
     re.compile(r"^amara\.org$"),
 )
 
@@ -144,6 +145,7 @@ def _collapse_loops(
             while (
                 run_end < count
                 and _comparison_key(segments[run_end].text) == key
+                and segments[run_end].speaker == segments[run_end - 1].speaker
                 and segments[run_end].start >= segments[run_end - 1].start
                 and segments[run_end].end >= segments[run_end - 1].end
                 and segments[run_end].start - segments[run_end - 1].end <= MAX_REPEAT_GAP_SECONDS

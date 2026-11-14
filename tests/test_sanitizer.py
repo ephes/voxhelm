@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import pytest
+
 from transcriptions import formats
 from transcriptions.sanitizer import sanitize_result
-from transcriptions.service import TranscriptionResult, TranscriptionSegment, TranscriptionWord
+from transcriptions.service import (
+    BackendInvocation,
+    TranscribeParams,
+    TranscriptionResult,
+    TranscriptionSegment,
+    TranscriptionWord,
+    transcribe_audio,
+)
 
 
 def _result(segments: list[TranscriptionSegment]) -> TranscriptionResult:
@@ -13,6 +24,73 @@ def _result(segments: list[TranscriptionSegment]) -> TranscriptionResult:
         backend_name="whisper.cpp",
         model_name="ggml-large-v3.bin",
     )
+
+
+@pytest.fixture
+def transcribe_with_backend(monkeypatch, tmp_path, settings):
+    settings.VOXHELM_SANITIZE_TRANSCRIPT = True
+    settings.VOXHELM_SANITIZE_REPEAT_THRESHOLD = 4
+    settings.VOXHELM_LANE_SCHEDULER_ENABLED = False
+
+    def run(segments):
+        backend = Mock()
+        backend.transcribe.return_value = _result(segments)
+        monkeypatch.setattr(
+            "transcriptions.service.get_backend_services_for_params",
+            lambda _params: [BackendInvocation("synthetic", backend)],
+        )
+        audio_path = tmp_path / "synthetic.wav"
+        params = TranscribeParams(request_model="auto", prompt=None, language="de")
+        result = transcribe_audio(audio_path, params)
+        backend.transcribe.assert_called_once_with(audio_path, params)
+        return result
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("speakers", "expected_speakers", "expected_starts", "expected_ends"),
+    [
+        (["A", "B", "A", "B"], ["A", "B", "A", "B"], [0, 1, 2, 3], [1, 2, 3, 4]),
+        (["A"] * 4, ["A"], [0], [4]),
+        ([None] * 4, [None], [0], [4]),
+        (["A", "A", None, None], ["A", "A", None, None], [0, 1, 2, 3], [1, 2, 3, 4]),
+        ([None] * 4 + ["A"] * 4 + [None] * 4, [None, "A", None], [0, 4, 8], [4, 8, 12]),
+        (["A"] * 4 + ["B"] * 4, ["A", "B"], [0, 4], [4, 8]),
+    ],
+)
+def test_backend_speaker_boundaries_survive_sanitization_and_formats(
+    transcribe_with_backend, speakers, expected_speakers, expected_starts, expected_ends
+):
+    segments = [
+        TranscriptionSegment(
+            id=index,
+            start=float(index),
+            end=float(index + 1),
+            text="Ja.",
+            speaker=speaker,
+        )
+        for index, speaker in enumerate(speakers)
+    ]
+    result = transcribe_with_backend(segments)
+
+    assert [segment.speaker for segment in result.segments] == expected_speakers
+    assert [segment.start for segment in result.segments] == expected_starts
+    assert [segment.end for segment in result.segments] == expected_ends
+    verbose = formats.render_verbose_json(result)
+    assert [segment.get("speaker") for segment in verbose["segments"]] == expected_speakers
+    assert [segment["start"] for segment in verbose["segments"]] == expected_starts
+    assert [segment["end"] for segment in verbose["segments"]] == expected_ends
+    assert (
+        verbose["text"] == formats.render_text(result) == " ".join(["Ja."] * len(expected_speakers))
+    )
+    assert formats.render_vtt(result).splitlines().count("Ja.") == len(expected_speakers)
+    assert [line["speakerDesignation"] for line in formats.render_dote(result)["lines"]] == [
+        speaker or "" for speaker in expected_speakers
+    ]
+    assert [entry["speaker"] for entry in formats.render_podlove(result)["transcripts"]] == [
+        speaker or "" for speaker in expected_speakers
+    ]
 
 
 def test_collapses_repeated_sentence_loop_to_single_segment() -> None:
@@ -109,6 +187,73 @@ def test_drops_amara_and_untertitel_von_credits() -> None:
     result = sanitize_result(_result(segments))
 
     assert [segment.text for segment in result.segments] == ["Inhalt."]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Untertitel diskutieren wir heute auf Amara.org",
+        "Untertitelung veröffentlichen wir auf Amara.org.",
+        "Untertitel von Filmen bearbeiten wir auf Amara.org.",
+        "Untertitelung: Mehr erfahren auf Amara.org.",
+        "Untertitel durch Amara.org",  # Unknown attribution grammar is preserved too.
+        "Wir reden über Untertitel von Amara.org.",
+        "Untertitel von Amara.org helfen uns.",
+    ],
+)
+def test_backend_amara_topic_speech_survives_sanitization_and_formats(
+    transcribe_with_backend, text
+):
+    segments = [
+        TranscriptionSegment(id=0, start=0.0, end=1.0, text="Vorher."),
+        TranscriptionSegment(id=1, start=1.0, end=3.0, text=text),
+        TranscriptionSegment(id=2, start=3.0, end=4.0, text="Nachher."),
+    ]
+    result = transcribe_with_backend(segments)
+
+    assert result.segments == segments
+    assert formats.render_text(result) == f"Vorher. {text} Nachher."
+    assert formats.render_verbose_json(result)["segments"][1]["text"] == text
+    assert text in formats.render_vtt(result).splitlines()
+    assert formats.render_dote(result)["lines"][1]["text"] == text
+    assert formats.render_podlove(result)["transcripts"][1]["text"] == text
+
+
+@pytest.mark.parametrize(
+    "credit",
+    [
+        "Amara.org",
+        "Amara.org.",
+        "Untertitel von Amara.org",
+        "Untertitelung von Amara.org.",
+        "  UNTERTITEL   von  AMARA.ORG! ",
+    ],
+)
+def test_backend_terminal_amara_credits_disappear_from_all_formats(transcribe_with_backend, credit):
+    result = transcribe_with_backend(
+        [
+            TranscriptionSegment(id=0, start=0.0, end=1.0, text="Vorher."),
+            TranscriptionSegment(id=1, start=1.0, end=3.0, text=credit),
+            TranscriptionSegment(id=2, start=3.0, end=4.0, text="Nachher."),
+        ]
+    )
+
+    assert formats.render_text(result) == "Vorher. Nachher."
+    assert [cue["text"] for cue in formats.render_verbose_json(result)["segments"]] == [
+        "Vorher.",
+        "Nachher.",
+    ]
+    assert formats.render_vtt(result).splitlines().count("Vorher.") == 1
+    assert formats.render_vtt(result).splitlines().count("Nachher.") == 1
+    assert "amara" not in formats.render_vtt(result).casefold()
+    assert [cue["text"] for cue in formats.render_dote(result)["lines"]] == [
+        "Vorher.",
+        "Nachher.",
+    ]
+    assert [cue["text"] for cue in formats.render_podlove(result)["transcripts"]] == [
+        "Vorher.",
+        "Nachher.",
+    ]
 
 
 def test_drops_dot_run_punctuation_only_cue_and_keeps_real_continuation() -> None:

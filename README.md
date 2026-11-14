@@ -42,15 +42,23 @@ diarization in each. It removes two artifact classes:
   `VOXHELM_SANITIZE_REPEAT_THRESHOLD` (default `4`) consecutive repeats, with
   at most **one second** between the previous cue end and the next cue start.
   Longer gaps and backward-moving starts or ends split runs. Overlapping cues
-  are eligible only when neither boundary moves backward. The repeat threshold
+  are eligible only when neither boundary moves backward. A speaker-label change
+  also splits a run, including a change between a label and an absent label
+  (`None`). Consecutive unlabeled cues may still collapse together. When a run
+  collapses, its shared speaker label is retained. The repeat threshold
   catches the observed loops (9–84×) while leaving natural backchannels and
   rhetorical repetition inside a single cue untouched.
 - **Non-speech / credit hallucinations** — subtitle-credit cues
   (`Untertitelung des ZDF, 2020`, `Untertitel im Auftrag des ZDF für funk, 2017`,
-  `Untertitel von Amara.org`, and the related `Untertitel…`/`Amara.org` family)
+  `Untertitel von Amara.org`, `Untertitelung von Amara.org`, or standalone
+  `Amara.org`, ignoring case, whitespace and surrounding punctuation)
   and punctuation-only noise such as long dot-runs are dropped. A long dot-run
   embedded in an otherwise-real segment is stripped while the real text and
   adjacent genuine segments survive.
+
+Amara credits must match those complete attribution forms. Topic sentences such
+as `Untertitel diskutieren wir heute auf Amara.org` and unknown attribution
+phrasing remain intact, even when they end in that domain.
 
 The sanitizer is conservative by design: it biases toward false negatives over
 removing genuine speech, only ever removes or collapses artifact segments, and
@@ -117,6 +125,16 @@ consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
 
 ## Kokoro inference and installed style validation
+
+German preprocessing expands numeric units, EUR amounts and temperatures only
+when the complete numeric token has at most 64 digits (integer and fractional
+parts combined; sign and separator excluded). Longer numbers keep their literal
+spelling, including leading zeros, without integer conversion or fractional
+digit expansion. The independent `EUR` abbreviation still expands to `Euro`.
+This limit is independent of request text length and Python's global digit limit.
+Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their
+sentence punctuation without reserving internal marker text; literal input such
+as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.
 
 Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV

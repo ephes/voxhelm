@@ -60,3 +60,39 @@ def test_normalize_german_text_numbers(text: str, expected: str) -> None:
 )
 def test_year_to_words(year: int, expected: str) -> None:
     assert year_to_words(year) == expected
+
+
+@pytest.mark.parametrize("raw", ["9" * 5000, "9" * 5000 + ",25", "1," + "9" * 5000])
+@pytest.mark.parametrize("suffix", ["kg", "Min.", "EUR", "°C", "°"])
+def test_oversized_numeric_tokens_remain_literal(raw: str, suffix: str) -> None:
+    # The final EUR abbreviation expansion is independent of number pronunciation.
+    expected_suffix = "Euro" if suffix == "EUR" else suffix
+    assert normalize_german_text(f"Wert -{raw} {suffix}") == f"Wert -{raw} {expected_suffix}"
+
+
+def test_numeric_token_digit_budget_boundary() -> None:
+    assert normalize_german_text(f"{'0' * 63}1 kg") == "ein Kilogramm"
+    assert normalize_german_text(f"{'0' * 64}1 kg") == f"{'0' * 64}1 kg"
+    # Count both sides of the separator, including the specialized EUR rule.
+    assert normalize_german_text(f"{'0' * 61}1,05 EUR") == "ein Euro fünf"
+    assert normalize_german_text(f"{'0' * 62}1,05 EUR") == f"{'0' * 62}1,05 Euro"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Text __GODE_CARDINAL_DOT__ Ende", "Text __GODE_CARDINAL_DOT__ Ende"),
+        (
+            "__GODE_CARDINAL_DOT__\t__GODE_CARDINAL_DOT__\nEnde",
+            "__GODE_CARDINAL_DOT__\t__GODE_CARDINAL_DOT__\nEnde",
+        ),
+        (
+            "Kapitel 2. __GODE_CARDINAL_DOT__ Kapitel 3. lesen",
+            "Kapitel zwei. __GODE_CARDINAL_DOT__ Kapitel drei. lesen",
+        ),
+        ("Kapitel 2. lesen, Seite 4. Danach.", "Kapitel zwei. lesen, Seite vier. Danach."),
+        ("Lfd. Nr. 2. und Gleis Nr. 4.", "laufende Nummer zwei. und Gleis Nummer vier."),
+    ],
+)
+def test_cardinal_labels_preserve_literal_marker_text(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
