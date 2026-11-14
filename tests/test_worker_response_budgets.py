@@ -382,3 +382,14 @@ def test_json_parser_limits_are_safe_worker_errors(failure, through_client, monk
                 client(url).claim(capabilities={})
         else:
             worker_cli.parse_json_response(body)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_nonfinite_request_payload_fails_locally_before_sending(value, monkeypatch):
+    sent = []
+    monkeypatch.setattr(worker_cli.httpx, "AsyncClient", lambda *a, **k: sent.append(1))
+    with pytest.raises(worker_cli.WorkerError, match="non-finite"):
+        client("http://127.0.0.1:9").heartbeat_worker(
+            capabilities={"score": value}, running_job_ids=[]
+        )
+    assert sent == []

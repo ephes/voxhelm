@@ -353,6 +353,25 @@ def test_runtime_available_with_the_pinned_model(window_runtime) -> None:
     assert window_runtime_available() is True
 
 
+def test_symlinked_model_is_resolved_and_admitted(window_runtime, settings) -> None:
+    # Model caches often link a stable name to a content-addressed blob.
+    link = window_runtime.model.parent / "turbo-link.bin"
+    link.symlink_to(window_runtime.model)
+    settings.VOXHELM_WINDOW_MODEL = str(link)
+    windows._model_sha256.cache_clear()
+
+    assert window_runtime_available() is True
+    assert windows.resolve_window_runtime()[1] == window_runtime.model.resolve()
+
+
+def test_dangling_model_symlink_is_unavailable(window_runtime, settings) -> None:
+    link = window_runtime.model.parent / "dangling.bin"
+    link.symlink_to(window_runtime.model.parent / "missing.bin")
+    settings.VOXHELM_WINDOW_MODEL = str(link)
+
+    assert window_runtime_available() is False
+
+
 def test_replaced_model_file_is_hashed_again(window_runtime) -> None:
     assert window_runtime_available() is True
     window_runtime.model.write_bytes(b"other weights, same name")

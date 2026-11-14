@@ -127,12 +127,14 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
     try:
         delete_staged_media(staged=staged, missing_ok=False)
     except Exception:
-        logger.error("batch_staging_cleanup_failure action=retry_on_expiry")
+        logger.error("batch_staging_cleanup_failure staged=%s action=retry_on_expiry", staged.id)
         try:
             staged.expires_at = timezone.now()
             staged.save()
         except Exception:
-            logger.error("batch_staging_cleanup_record_failure action=operator_recovery")
+            logger.error(
+                "batch_staging_cleanup_record_failure staged=%s action=operator_recovery", staged.id
+            )
 
 
 def cleanup_expired_staged_media(

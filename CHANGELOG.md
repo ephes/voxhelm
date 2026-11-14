@@ -7,14 +7,16 @@
 
 - Bound batch/worker JSON bytes and nesting, refuse duplicate members and
   nonfinite numbers, and normalize decoder resource failures before writes.
+  The remote worker refuses a nonfinite request value locally before sending.
 - Return fixed private batch backend and staging compensation diagnostics while
-  preserving cleanup and retry records.
+  preserving cleanup and retry records; cleanup failure logs name the staged id.
 - Hash operator passwords before publication and commit each complete account
   update under a writer lock, with explicit retry on first-creation conflicts.
 - Publish retention continuation by generation compare-and-swap so stale
   maintenance runs cannot replace newer progress, including explicit cursors.
 - Hash only stable regular opened window models, invalidate cached hashes on
   change metadata and bind native window invocation to the checked descriptor.
+  A symlinked configured model is resolved once to its regular file.
 - Return owner-scoped 404 when a polled job disappears during reconciliation.
 
 - Write Piper audio incrementally with 30-minute and 128 MiB PCM ceilings;

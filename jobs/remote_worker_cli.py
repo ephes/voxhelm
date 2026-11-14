@@ -295,6 +295,11 @@ class WorkerClient:
         self, method: str, path: str, payload: dict[str, Any]
     ) -> tuple[int, Any]:
         try:
+            # The server's strict JSON envelope rejects NaN/Infinity; fail here clearly.
+            body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except ValueError as exc:
+            raise WorkerError(f"Worker request to {path} contains a non-finite number.") from exc
+        try:
             async with asyncio.timeout(self.config.http_timeout_seconds):
                 async with httpx.AsyncClient(
                     follow_redirects=False,
@@ -304,7 +309,7 @@ class WorkerClient:
                     async with client.stream(
                         method,
                         f"{self.config.base_url.rstrip('/')}{path}",
-                        content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                        content=body,
                         headers={
                             "Authorization": f"Bearer {self.config.token}",
                             "Content-Type": "application/json",

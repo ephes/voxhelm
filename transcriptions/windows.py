@@ -143,7 +143,13 @@ class WindowTranscription:
 def resolve_window_runtime() -> tuple[str, Path]:
     """The ``whisper-cli`` path and the verified turbo model, or ``BackendUnavailableError``."""
     executable = resolve_whispercpp_binary(settings.VOXHELM_WHISPERCPP_BIN)
-    model_path = resolve_whispercpp_model_path(settings.VOXHELM_WINDOW_MODEL)
+    configured = resolve_whispercpp_model_path(settings.VOXHELM_WINDOW_MODEL)
+    # Resolve a symlinked model (such as a cache entry linking to a blob) once;
+    # the generation checks then open the real file without following links.
+    try:
+        model_path = configured.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise BackendUnavailableError("Window model is not readable.") from exc
     digest = model_sha256(model_path)
     if digest != WINDOW_MODEL_SHA256:
         raise BackendUnavailableError(
