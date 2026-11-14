@@ -696,14 +696,21 @@ def _embed(
     return embedding
 
 
-def check_track_budget(job_audio_samples: Any, config: KnownSpeakerConfig) -> None:
+def speaker_track_hop(job_audio_samples: Any, config: KnownSpeakerConfig) -> float:
+    """Return the track step that keeps the track within ``MAX_TRACK_FRAMES``.
+
+    The configured hop is used while it fits. Longer audio widens the step just
+    enough that at most ``MAX_TRACK_FRAMES`` windows (one embedding each) cover
+    the file, so a long episode gets a coarser track instead of failing after
+    transcription. Only the sample count is read; no audio is sliced.
+    """
     size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
     hop = max(config.resegment_hop, MIN_MIXED_WINDOW_HOP)
-    if MAX_TRACK_FRAMES * hop + size <= len(job_audio_samples) / SAMPLE_RATE:
-        raise KnownSpeakerConfigurationError(
-            f"Known-speaker track exceeds the {MAX_TRACK_FRAMES}-frame/model-operation budget; "
-            "increase resegment_hop or disable resegmentation."
-        )
+    span = len(job_audio_samples) / SAMPLE_RATE - size
+    if MAX_TRACK_FRAMES <= 1 or span <= 0:
+        return hop
+    # Frames are at index * hop for index * hop <= span: floor(span / hop) + 1.
+    return max(hop, span / (MAX_TRACK_FRAMES - 1))
 
 
 def build_speaker_centroids(
@@ -762,13 +769,13 @@ def build_speaker_track(
     similarity thresholds; music, silence and overlapping speech are not.
     """
     check_known_speaker_cancellation(cancel_event)
-    check_track_budget(job_audio_samples, config)
     size = max(config.mixed_window_duration, MIN_MIXED_WINDOW_DURATION)
-    hop = max(config.resegment_hop, MIN_MIXED_WINDOW_HOP)
+    hop = speaker_track_hop(job_audio_samples, config)
     total = len(job_audio_samples) / SAMPLE_RATE
     frames: list[TrackFrame] = []
     index = 0
-    while index * hop + size <= total:
+    # The frame cap also guards against floating-point rounding in the hop.
+    while index < MAX_TRACK_FRAMES and index * hop + size <= total:
         start = index * hop
         window = slice_samples(job_audio_samples, SAMPLE_RATE, start, start + size)
         classification = classify_embedding(_embed(backend, window, cancel_event), centroids)
@@ -1304,6 +1311,7 @@ def summarize_known_speaker(
     embedding_version: str,
     raw_turns: list[SpeakerTurn],
     resegmented_segment_count: int = 0,
+    track_hop: float | None = None,
 ) -> dict[str, Any]:
     total = len(segments)
     confident = sum(1 for segment in segments if not segment.speaker_uncertain)
@@ -1333,6 +1341,7 @@ def summarize_known_speaker(
         "mixed_window_min_similarity": config.mixed_window_min_similarity,
         "turn_corroborated_min_similarity": config.turn_corroborated_min_similarity,
         "resegment_hop": config.resegment_hop,
+        "speaker_track_hop": track_hop,
         "segment_count": total,
         "confident_segment_count": confident,
         "uncertain_segment_count": total - confident,
@@ -1460,8 +1469,6 @@ def run_known_speaker_postprocess(
     """
     config = validate_known_speaker_config(config)
     check_known_speaker_cancellation(cancel_event)
-    if resegmentation_enabled(config) and any(segment.words for segment in result.segments):
-        check_track_budget(job_audio_samples, config)
     if not references:
         raise KnownSpeakerConfigurationError(
             "Known-speaker diarization requires at least one speaker reference."
@@ -1470,10 +1477,12 @@ def run_known_speaker_postprocess(
     track_frames: list[TrackFrame] = []
     turns: list[SpeakerTurn] = []
     resegmented_segment_count = 0
+    track_hop: float | None = None
     transcribed = result
     # Without word timings nothing can be re-cut, and the track would only be
     # a second opinion on Whisper's own segments, so it is skipped as well.
     if resegmentation_enabled(config) and any(segment.words for segment in result.segments):
+        track_hop = speaker_track_hop(job_audio_samples, config)
         track_frames = build_speaker_track(
             job_audio_samples=job_audio_samples,
             centroids=centroids,
@@ -1518,6 +1527,7 @@ def run_known_speaker_postprocess(
         embedding_version=backend.embedding_version,
         raw_turns=raw_turns,
         resegmented_segment_count=resegmented_segment_count,
+        track_hop=track_hop,
     )
     # Public transcript artifacts stay unlabeled; suggestions ride the sidecar.
     # They carry the re-cut segments, so sidecar and transcript stay aligned.

@@ -92,9 +92,32 @@ def test_discovery_isolates_unsafe_config(tmp_path, monkeypatch, kind):
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded_read)
+    real_open = os.open
+    descriptors = []
+
+    def opened(path, flags, *args):
+        descriptor = real_open(path, flags, *args)
+        descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", opened)
     installed = discover_installed_voices(voice_dir=tmp_path, configured_voices=[bad, good])
+    monkeypatch.setattr(os, "open", real_open)
     assert list(installed) == [good]
     assert installed[good].speakers == ("one",)
+    # Every descriptor discovery opened, including a rejected directory or
+    # FIFO, must be closed again.
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_missing_config_is_skipped_quietly(tmp_path, caplog):
+    name = "en_US-partial-medium"
+    (tmp_path / f"{name}.onnx").write_bytes(b"synthetic model, never loaded")
+    with caplog.at_level("WARNING"):
+        assert discover_installed_voices(voice_dir=tmp_path, configured_voices=[]) == {}
+    assert "Skipping Piper voice" not in caplog.text
 
 
 def test_growing_config_is_bounded_and_descriptor_closed(tmp_path, monkeypatch):

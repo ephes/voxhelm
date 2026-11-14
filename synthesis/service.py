@@ -510,6 +510,10 @@ def discover_installed_voices(
         config_path = voice_dir / f"{voice_name}.onnx.json"
         if not model_path.exists():
             continue
+        if not os.path.lexists(config_path):
+            # A model without its config is an incomplete install, not an
+            # unsafe config; skip it quietly as before.
+            continue
         try:
             installed[voice_name] = build_voice_metadata(
                 voice_name=voice_name,
@@ -529,10 +533,17 @@ def build_voice_metadata(*, voice_name: str, model_path: Path, config_path: Path
     # object, O_NOFOLLOW refuses symlinks, and the read cap also covers growth.
     flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
     descriptor = os.open(config_path, flags)
-    with os.fdopen(descriptor, "rb") as source:
-        metadata = os.fstat(source.fileno())
+    try:
+        # Admit the opened object before handing the descriptor to a file
+        # object: fdopen on a directory raises without closing the descriptor.
+        metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PIPER_CONFIG_BYTES:
             raise ValueError("Piper config must be a regular file within the byte limit.")
+        source = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with source:
         data = source.read(MAX_PIPER_CONFIG_BYTES + 1)
         if len(data) > MAX_PIPER_CONFIG_BYTES:
             raise ValueError("Piper config exceeds the byte limit.")

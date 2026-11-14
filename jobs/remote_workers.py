@@ -163,6 +163,7 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
     "mixed_window_min_similarity",
     "turn_corroborated_min_similarity",
     "resegment_hop",
+    "speaker_track_hop",
     "margin_median",
 }
 SUMMARY_STRING_MAX_LENGTH = 256

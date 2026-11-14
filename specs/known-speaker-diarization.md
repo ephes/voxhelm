@@ -153,6 +153,7 @@ segment still carries the confident speaker name (or `null` when uncertain).
     "mixed_window_min_similarity": 0.3,
     "turn_corroborated_min_similarity": 0.35,
     "resegment_hop": 0.25,
+    "speaker_track_hop": 0.25,
     "segment_count": 1249,
     "confident_segment_count": 1175,
     "uncertain_segment_count": 74,
@@ -225,6 +226,9 @@ A segment named by the speaker track carries
 of `speaker_candidates`, which still describes the whole-segment embedding.
 `resegmented_segment_count` is the number of segments that came out of a
 split. `segment_count` and the segment `index` refer to the re-cut segments.
+`speaker_track_hop` is the step the speaker track actually used: the
+configured `resegment_hop`, or a wider step for very long audio (see "Cancellation
+and track work budget"); it is `null` when no track was built.
 
 `raw_diarization_labels` lists every label of the anonymous diarization run
 (the `raw_diarization_speaker` values) with its seconds of speech and the
@@ -423,9 +427,12 @@ finishes its current call before cancellation can take effect.
 
 Track admission happens before any embedding in a postprocessing pass and before
 any sample slicing in direct track construction. At most 32,768 track frames (one
-embedding each) are retained. Over-budget audio/configuration fails with
-`KnownSpeakerConfigurationError`; increase `resegment_hop` or set it to zero to
-disable the track. The default 0.25-second hop admits ordinary two-hour episodes.
+embedding each) are built. The default 0.25-second hop covers about two hours and
+sixteen minutes within that budget; longer audio widens the track step just
+enough to stay within 32,768 frames (about 0.33 seconds for a three-hour
+episode) instead of failing the job after transcription. The step used is
+recorded as `speaker_track_hop` in the summary. Set `resegment_hop` to zero to
+disable the track.
 
 ### Interval processing work
 

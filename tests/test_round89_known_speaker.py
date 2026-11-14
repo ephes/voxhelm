@@ -159,49 +159,74 @@ def test_cancellation_stops_between_embedding_units(phase, stop_at):
     assert backend.calls == stop_at
 
 
-def test_track_budget_preflight_performs_no_embedding():
-    from transcriptions.known_speaker import build_speaker_track
+def test_long_track_widens_hop_within_budget(monkeypatch):
+    import transcriptions.known_speaker as module
 
-    class LongAudio:
-        def __len__(self):
-            return 7200 * 16000
-
-        def __getitem__(self, key):
-            pytest.fail("over-budget audio must not be sliced")
-
+    # A small operation budget stands in for a multi-hour episode.
+    monkeypatch.setattr(module, "MAX_TRACK_FRAMES", 5, raising=False)
     backend = Backend()
-    with pytest.raises(KnownSpeakerConfigurationError, match="budget"):
-        build_speaker_track(
-            job_audio_samples=LongAudio(),
-            centroids={"Alex": [1, 0]},
-            config=KnownSpeakerConfig(resegment_hop=0.1),
-            backend=backend,
-        )
-    assert backend.calls == 0
+    config = KnownSpeakerConfig(mixed_window_duration=0.5, resegment_hop=0.25)
+    audio = numpy.zeros(10 * 16000)
+    hop = module.speaker_track_hop(audio, config)
+    assert hop == pytest.approx((10 - 0.5) / 4)
+    frames = module.build_speaker_track(
+        job_audio_samples=audio,
+        centroids={"Alex": [1, 0]},
+        config=config,
+        backend=backend,
+    )
+    assert len(frames) == backend.calls == 5
+    assert frames[-1].center == pytest.approx(10 - 0.25)
 
 
 def test_track_budget_exact_boundary(monkeypatch):
     import transcriptions.known_speaker as module
 
-    # Small operation budget makes the exact admitted/refused boundary observable.
+    # Small operation budget makes the exact admitted/widened boundary observable.
     monkeypatch.setattr(module, "MAX_TRACK_FRAMES", 3, raising=False)
     backend = Backend()
     config = KnownSpeakerConfig(mixed_window_duration=0.5, resegment_hop=0.25)
+    audio = numpy.zeros(16000)
+    assert module.speaker_track_hop(audio, config) == 0.25
     frames = module.build_speaker_track(
-        job_audio_samples=numpy.zeros(16000),
+        job_audio_samples=audio,
         centroids={"Alex": [1, 0]},
         config=config,
         backend=backend,
     )
     assert len(frames) == backend.calls == 3
-    with pytest.raises(KnownSpeakerConfigurationError, match="budget"):
-        module.build_speaker_track(
-            job_audio_samples=numpy.zeros(20000),
-            centroids={"Alex": [1, 0]},
-            config=config,
-            backend=backend,
-        )
-    assert backend.calls == 3
+    longer = numpy.zeros(20000)
+    assert module.speaker_track_hop(longer, config) > 0.25
+    frames = module.build_speaker_track(
+        job_audio_samples=longer,
+        centroids={"Alex": [1, 0]},
+        config=config,
+        backend=backend,
+    )
+    assert len(frames) == 3
+    assert backend.calls == 6
+
+
+def test_postprocess_records_widened_track_hop(monkeypatch):
+    import transcriptions.known_speaker as module
+    from transcriptions.service import TranscriptionSegment, TranscriptionWord
+
+    monkeypatch.setattr(module, "MAX_TRACK_FRAMES", 4, raising=False)
+    words = (
+        TranscriptionWord(start=0.0, end=1.0, text="hello"),
+        TranscriptionWord(start=1.0, end=2.0, text="there"),
+    )
+    segment = TranscriptionSegment(id=0, start=0.0, end=8.0, text="hello there", words=words)
+    backend = Backend()
+    outcome = run_known_speaker_postprocess(
+        TranscriptionResult(text="hello there", language="en", segments=[segment]),
+        references=[ReferenceAudio("one", "Alex", [numpy.ones(16000)])],
+        job_audio_samples=numpy.zeros(8 * 16000),
+        raw_turns=[],
+        config=KnownSpeakerConfig(mixed_window_duration=0.5, resegment_hop=0.25),
+        backend=backend,
+    )
+    assert outcome.summary["speaker_track_hop"] == pytest.approx(7.5 / 3)
 
 
 def _count_algorithm_lines(function):
