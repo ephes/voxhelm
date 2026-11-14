@@ -24,8 +24,12 @@ from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
 from transcriptions import formats as transcript_formats
-from transcriptions.owned_process import OwnedProcessMessages, run_owned_process
+from transcriptions.json_input import decode_json_object
+from transcriptions.native_output import read_native_json
+from transcriptions.owned_process import OwnedProcessMessages, run_native_process, run_owned_process
 from transcriptions.sanitizer import sanitize_result
+
+NATIVE_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
@@ -261,11 +265,15 @@ class WhisperCppBackend:
                 raise RuntimeError("whisper.cpp transcription failed.")
 
             json_path = output_base.with_suffix(".json")
-            if not json_path.exists():
-                raise RuntimeError(
-                    "whisper.cpp transcription failed: transcript.json was not produced."
+            try:
+                payload = decode_json_object(
+                    read_native_json(json_path, limit=NATIVE_TRANSCRIPT_MAX_BYTES)
                 )
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            except (OSError, RuntimeError, ValueError, RecursionError) as exc:
+                raise RuntimeError(
+                    "whisper.cpp transcription produced invalid JSON output."
+                ) from exc
+            _raise_if_cancelled(params)
         return normalize_whispercpp_payload(payload, model_name=self.model_name)
 
 
@@ -614,68 +622,26 @@ def run_cancellable_process(
     env: Mapping[str, str] | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
-    """Run a child process, terminating it when ``cancel_event`` is set.
+    """Run native inference with bounded diagnostics and owned-group cleanup."""
 
-    Without a cancel event or timeout this behaves like
-    ``subprocess.run(capture_output=True)``. On cancellation the child gets
-    SIGTERM, then SIGKILL after ``terminate_grace_seconds``, and is always
-    reaped with its pipes drained before ``InferenceCancelled`` propagates. A
-    child still running after ``timeout_seconds`` is stopped the same way and
-    ``ChildProcessTimeout`` is raised.
-    """
-    deadline = None if timeout_seconds is None else monotonic() + timeout_seconds
-    # The context manager closes both pipes and waits on every exit path, so a
-    # failure anywhere below can leave neither an open descriptor nor a zombie.
-    with subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=None if env is None else dict(env),
-        pass_fds=pass_fds,
-    ) as process:
-        try:
-            while True:
-                if cancel_event is None and deadline is None:
-                    stdout, stderr = process.communicate()
-                    break
-                try:
-                    stdout, stderr = process.communicate(timeout=poll_seconds)
-                except subprocess.TimeoutExpired:
-                    if cancel_event is not None and cancel_event.is_set():
-                        _terminate_process(process, grace_seconds=terminate_grace_seconds)
-                        raise InferenceCancelled(
-                            "Local inference was cancelled while the child process was running."
-                        ) from None
-                    if deadline is not None and monotonic() >= deadline:
-                        _terminate_process(process, grace_seconds=terminate_grace_seconds)
-                        raise ChildProcessTimeout(
-                            f"Child process exceeded its {timeout_seconds:g} s time limit."
-                        ) from None
-                    continue
-                break
-        except BaseException:
-            # The child must never outlive this call, whatever went wrong.
-            process.kill()
-            raise
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise InferenceCancelled("Local inference was cancelled by the caller.")
 
-
-def _terminate_process(
-    process: subprocess.Popen[str],
-    *,
-    grace_seconds: float,
-) -> None:
-    process.terminate()
     try:
-        process.wait(timeout=grace_seconds)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-    # Drain and close the pipes so no file descriptor or zombie survives.
-    process.communicate()
+        return run_native_process(
+            args,
+            check_cancelled=check_cancelled,
+            timeout=timeout_seconds,
+            poll_seconds=poll_seconds,
+            terminate_grace_seconds=terminate_grace_seconds,
+            env=env,
+            pass_fds=pass_fds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ChildProcessTimeout(
+            f"Child process exceeded its {timeout_seconds:g} s time limit."
+        ) from exc
 
 
 def normalize_transcription_payload(

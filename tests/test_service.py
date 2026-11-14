@@ -899,7 +899,7 @@ def test_whispercpp_backend_raises_when_transcript_json_is_missing(
             TranscribeParams(request_model="whisper-1", prompt=None, language="de"),
         )
     except RuntimeError as exc:
-        assert str(exc) == ("whisper.cpp transcription failed: transcript.json was not produced.")
+        assert str(exc) == ("whisper.cpp transcription produced invalid JSON output.")
     else:  # pragma: no cover
         raise AssertionError("Expected missing transcript.json to raise RuntimeError.")
 
@@ -1078,7 +1078,7 @@ def test_run_cancellable_process_escalates_to_sigkill(monkeypatch, tmp_path: Pat
     _assert_pipes_closed(created[0])
 
 
-def test_run_cancellable_process_reaps_and_closes_pipes_when_communicate_fails(
+def test_run_cancellable_process_reaps_and_closes_pipes_when_read_fails(
     monkeypatch,
 ) -> None:
     created: list[subprocess.Popen[str]] = []
@@ -1087,22 +1087,23 @@ def test_run_cancellable_process_reaps_and_closes_pipes_when_communicate_fails(
     def factory(*args, **kwargs):
         process = real_popen(*args, **kwargs)
 
-        def failing_communicate(*_args, **_kwargs):
-            raise OSError("communicate exploded")
-
-        monkeypatch.setattr(process, "communicate", failing_communicate)
+        monkeypatch.setattr("transcriptions.owned_process.os.read", failing_read)
         created.append(process)
         return process
 
     monkeypatch.setattr("transcriptions.service.subprocess.Popen", factory)
 
-    with pytest.raises(OSError, match="communicate exploded"):
+    def failing_read(*args):
+        raise OSError("read exploded")
+
+    with pytest.raises(OSError, match="read exploded"):
         run_cancellable_process(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [sys.executable, "-c", "print(1, flush=True); import time; time.sleep(30)"],
             cancel_event=None,
+            terminate_grace_seconds=0.01,
         )
 
-    assert created[0].returncode == -signal.SIGKILL
+    assert created[0].returncode in {-signal.SIGTERM, -signal.SIGKILL}
     _assert_pipes_closed(created[0])
 
 

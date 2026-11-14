@@ -11,6 +11,7 @@ import os
 import selectors
 import signal
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic, sleep
 
@@ -114,3 +115,85 @@ def run_owned_process(
             diagnostic.decode("utf-8", errors="replace").strip() or "(no output)",
         )
         raise RuntimeError(messages.failure)
+
+
+def run_native_process(
+    args: list[str],
+    *,
+    check_cancelled: Callable[[], None],
+    timeout: float | None,
+    poll_seconds: float,
+    terminate_grace_seconds: float,
+    env: Mapping[str, str] | None,
+    pass_fds: tuple[int, ...],
+) -> subprocess.CompletedProcess[str]:
+    """Capture bounded diagnostic tails, preserving return codes and process ownership."""
+    deadline = None if timeout is None else monotonic() + timeout
+    check_cancelled()
+    process = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=None if env is None else dict(env),
+        pass_fds=pass_fds,
+    )
+    tails = {"stdout": bytearray(), "stderr": bytearray()}
+    received = 0
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while True:
+                check_cancelled()
+                if deadline is not None and monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout or 0)
+                wait = (
+                    poll_seconds if deadline is None else min(poll_seconds, deadline - monotonic())
+                )
+                if selector.get_map():
+                    for key, _ in selector.select(max(0, wait)):
+                        chunk = os.read(key.fd, 8192)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        received += len(chunk)
+                        tail = tails[key.data]
+                        tail.extend(chunk)
+                        del tail[:-OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES]
+                        if received > OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES:
+                            raise RuntimeError(
+                                "Native inference exceeded the diagnostic output limit."
+                            )
+                else:
+                    if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                        break
+                    sleep(max(0, wait))
+    except BaseException:
+        # Cooperate first, then retire the entire group, including pipe-owning descendants.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError, PermissionError:
+            pass
+        grace = monotonic() + terminate_grace_seconds
+        while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            if monotonic() >= grace:
+                break
+            sleep(0.01)
+        raise
+    finally:
+        _kill_process_group(process)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        process.wait()
+    check_cancelled()
+    return subprocess.CompletedProcess(
+        args,
+        process.returncode,
+        tails["stdout"].decode("utf-8", errors="replace"),
+        tails["stderr"].decode("utf-8", errors="replace"),
+    )

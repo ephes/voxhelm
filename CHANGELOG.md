@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound native inference stdout/stderr to 64 KiB with 2 KiB retained tails and
+  owned process-group cleanup; admit standalone WhisperCpp transcript files
+  through a regular no-follow descriptor and strict bounded object JSON.
+
 - Update the locked OpenTelemetry API/SDK to 1.45.2 (semantic conventions
   0.66b2), clearing the existing dependency-audit finding CVE-2026-126360.
 

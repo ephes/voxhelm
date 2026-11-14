@@ -24,6 +24,14 @@ drained and discarded so noisy but decodable media still succeeds, and on
 every exit path the whole group is killed, so the decode deadline also covers
 descendants holding its pipes.
 
+Native inference drains both diagnostic pipes under a combined 64 KiB ceiling,
+retaining at most a 2 KiB tail per pipe. Overflow fails the inference and retires
+its process group; cancellation and deadlines also retire owned descendants.
+Standalone WhisperCpp transcript output must be a regular file opened without
+following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
+unique members, finite numbers). Invalid output fails before normalization or
+artifact publication. No models are needed for the synthetic admission tests.
+
 ## Transcript Sanitization
 
 Whisper occasionally emits artifacts that the decode-level guards
