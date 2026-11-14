@@ -449,7 +449,12 @@ def _admit_style_member(source: BinaryIO, key: str) -> None:
     """Bound the selected expanded NPY member before NumPy allocates its array."""
     np = _require_numpy()
     with zipfile.ZipFile(source) as archive:
-        members = [entry for entry in archive.infolist() if entry.filename == f"{key}.npy"]
+        # NpzFile gives a raw filename precedence over its implicit .npy alias.
+        # Admit exactly that member, including configured keys with a .npy suffix.
+        entries = archive.infolist()
+        members = [entry for entry in entries if entry.filename == key]
+        if not members:
+            members = [entry for entry in entries if entry.filename == f"{key}.npy"]
         if len(members) != 1:
             raise BackendUnavailableError("Voicepack must contain one configured style member.")
         member = members[0]
@@ -457,7 +462,7 @@ def _admit_style_member(source: BinaryIO, key: str) -> None:
             raise BackendUnavailableError("Voicepack style exceeds the expanded byte limit.")
         with archive.open(member) as data:
             version = np.lib.format.read_magic(data)
-            if version not in {(1, 0), (2, 0)}:
+            if version not in {(1, 0), (2, 0), (3, 0)}:
                 raise BackendUnavailableError("Voicepack style uses an unsupported NPY version.")
             length_bytes = 2 if version == (1, 0) else 4
             encoded_length = data.read(length_bytes)
@@ -473,6 +478,7 @@ def _admit_style_member(source: BinaryIO, key: str) -> None:
                     data, max_header_size=_STYLE_HEADER_BYTES
                 )
             else:
+                # Numeric NPY v3 headers are ASCII and share the v2 length layout.
                 shape, _, dtype = np.lib.format.read_array_header_2_0(
                     data, max_header_size=_STYLE_HEADER_BYTES
                 )

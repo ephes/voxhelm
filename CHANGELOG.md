@@ -11,8 +11,8 @@
   cancellation if temporary-file cleanup fails, logging a fixed recovery warning.
 
 - Bound installed Kokoro style metadata and expanded array size before NumPy
-  loading; refuse changed ONNX, voicepack and Piper model/config generations
-  before cache publication, allowing a stable retry.
+  loading, matching exact ZIP key resolution; refuse changed ONNX, voicepack and
+  Piper model/config generations before cache publication, allowing a stable retry.
 
 - German synthesis: preserve numeric tokens longer than 64 digits literally
   across units, EUR and temperatures, avoiding integer conversion failures and

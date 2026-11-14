@@ -129,8 +129,10 @@ One new backend, one routing layer, minimal surgery elsewhere:
   chunk limit (no off-by-two, no out-of-range).
   Installed packs must contain finite real numeric float32-compatible styles
   shaped `(rows, 1, 256)` with 1–512 rows. Before array loading, admit the
-  selected NPY v1/v2 member with a 10,000-byte header limit, at most 2 MiB
-  expanded numeric data and an exact payload length. Invalid packs fail before
+  selected NPY v1–v3 member with a 10,000-byte header limit, at most 2 MiB
+  expanded numeric data and an exact payload length. The admitted member must
+  match NumPy’s exact-filename/implicit-suffix resolution; duplicate selected
+  members are refused. Invalid packs fail before
   caching. Model and pack identities are rechecked after loading; changes fail
   with backend-unavailable and are never cached. Piper similarly rechecks both
   model and config before publishing a loaded voice.
