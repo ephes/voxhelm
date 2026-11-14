@@ -153,6 +153,7 @@ segment still carries the confident speaker name (or `null` when uncertain).
     "mixed_window_min_similarity": 0.3,
     "turn_corroborated_min_similarity": 0.35,
     "resegment_hop": 0.25,
+    "speaker_track_hop": 0.25,
     "segment_count": 1249,
     "confident_segment_count": 1175,
     "uncertain_segment_count": 74,
@@ -225,6 +226,9 @@ A segment named by the speaker track carries
 of `speaker_candidates`, which still describes the whole-segment embedding.
 `resegmented_segment_count` is the number of segments that came out of a
 split. `segment_count` and the segment `index` refer to the re-cut segments.
+`speaker_track_hop` is the step the speaker track actually used: the
+configured `resegment_hop`, or a wider step for very long audio (see "Cancellation
+and track work budget"); it is `null` when no track was built.
 
 `raw_diarization_labels` lists every label of the anonymous diarization run
 (the `raw_diarization_speaker` values) with its seconds of speech and the
@@ -395,3 +399,48 @@ whisper.cpp run (see `2026-10-12_mixed_speaker_segments.md`).
   payload.
 - `jobs/models.py`: `JobArtifact.Kind.TRANSCRIPT_SPEAKERS`
   (migration `0006_alter_jobartifact_kind`).
+
+### Configuration and display-name admission
+
+API submission, stored/claimed reconstruction and direct postprocessing use the
+same numeric domain: finite JSON numbers (no booleans or numeric strings),
+nonnegative thresholds, and durations/hops at most 600 seconds. This caps padding
+allocation too. Mixed-window duration is zero (disabled) or at least 0.5 seconds;
+mixed-window hop is at least 0.1 seconds; resegment hop is zero (disabled) or at
+least 0.1 seconds. Zero still disables turn corroboration. Thresholds above the
+reachable cosine score/margin remain usable to disable acceptance.
+
+The existing sidecar keys are display names. Different speaker IDs must have
+unique names after Unicode NFKC normalization, whitespace collapse and casefold;
+submission rejects collisions. Stored/direct reference sets are checked before
+embedding too. Multiple clips for the same ID and exact display name still merge
+into one centroid; an ID carrying conflicting display names is refused.
+
+### Cancellation and track work budget
+
+Known-speaker postprocessing accepts the existing cancellation event and checks
+it before and after every reference, track, segment and mixed-window embedding,
+and between classification passes. The remote worker passes its lease-loss event;
+revocation raises the existing cancellation exception, then the worker reports
+lease loss without publishing a sidecar. In-process inference already running
+finishes its current call before cancellation can take effect.
+
+Track admission happens before any embedding in a postprocessing pass and before
+any sample slicing in direct track construction. At most 32,768 track frames (one
+embedding each) are built. The default 0.25-second hop covers about two hours and
+sixteen minutes within that budget; longer audio widens the track step just
+enough to stay within 32,768 frames (about 0.33 seconds for a three-hour
+episode) instead of failing the job after transcription. The step used is
+recorded as `speaker_track_hop` in the summary. Set `resegment_hop` to zero to
+disable the track.
+
+### Interval processing work
+
+Tiny-piece folding retains the first/last segment boundaries, original word
+objects and word order, minimum word/duration rules, and left-neighbour preference.
+It folds linked contiguous word ranges in amortized linear work rather than
+copying accumulated word lists or scanning all pieces after every fold.
+Overlapping turns use an endpoint sweep with a heap: latest start wins, with
+lexicographically greatest speaker name breaking equal-start ties. Adjacent turns
+of the same speaker merge. Resolution takes O(n log n) work; unmapped overlays
+look up the first possible overlap and visit only intersecting resolved intervals.

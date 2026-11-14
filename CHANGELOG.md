@@ -13,6 +13,19 @@
 - Restrict Amara credit removal to whole subtitle attributions with `von` and
   the standalone domain, preserving genuine topic sentences and unknown phrasing
   that merely end in Amara.org.
+- Keep pinned synthesis parameters for nonfinite, out-of-range or unsupported
+  language detections; admit Piper voice configs through bounded regular-file
+  descriptors, skipping unsafe configs without hiding healthy voices and without
+  leaking the descriptor; a model without its config is still skipped quietly.
+- Bound known-speaker interval work: fold tiny pieces without repeated word
+  copying, resolve overlapping turns with a heap, and index unmapped overlays.
+- Stop known-speaker embedding work cooperatively on cancellation/remote lease
+  loss; cap the speaker track at 32,768 frames/model calls by widening the track
+  step for very long audio (recorded as `speaker_track_hop` in the summary)
+  instead of failing the job after transcription.
+- Validate known-speaker configuration at API, stored/claimed and direct execution
+  boundaries; cap durations/padding and reject ambiguous speaker display names
+  before embeddings while preserving multiple clips for one identity.
 
 ## 0.1.13 (2026-11-12)
 

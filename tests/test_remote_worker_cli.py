@@ -267,7 +267,10 @@ def test_process_claim_uploads_known_speaker_sidecar(
         audio_path: Path,
         result: TranscriptionResult,
         source_media: DownloadedMedia | None = None,
+        cancel_event: Any = None,
     ) -> tuple[TranscriptionResult, dict[str, Any]]:
+        assert cancel_event is not None
+        assert not cancel_event.is_set()
         assert source_media is not None
         assert source_media.path == audio_path
         assert source_media.source_url == "https://media.example.com/episode.mp3"

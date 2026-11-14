@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import os
+import stat
 import tempfile
 import wave
 from collections import OrderedDict
@@ -328,6 +331,7 @@ def synthesize_text(text: str, params: SynthesizeParams) -> SynthesisResult:
 # applies only when ALL criteria hold; any failure keeps the pinned voice/language.
 ROUTING_MIN_CHARS = 20
 ROUTING_MIN_CONFIDENCE = 0.90
+MAX_PIPER_CONFIG_BYTES = 1024 * 1024
 
 # lingua is restricted to these two languages; the detector is a lazy singleton so
 # importing this module never requires the optional `routing` extra.
@@ -399,12 +403,18 @@ def apply_language_routing(text: str, params: SynthesizeParams) -> SynthesizePar
 
     try:
         detection = detect_routing_language(stripped)
+        if (
+            detection is None
+            or detection.language not in {"de", "en"}
+            or isinstance(detection.confidence, bool)
+            or not isinstance(detection.confidence, (int, float))
+            or not math.isfinite(detection.confidence)
+            or not ROUTING_MIN_CONFIDENCE <= detection.confidence <= 1
+        ):
+            return params
     except Exception:  # pragma: no cover - defensive; routing must never raise
         _LOGGER.warning("Language routing detection failed; keeping pinned voice.", exc_info=True)
         return params
-    if detection is None or detection.confidence < ROUTING_MIN_CONFIDENCE:  # (b)
-        return params
-
     mapped_voice = language_voices.get(normalize_language_key(detection.language))  # (c)
     if not mapped_voice:
         return params
@@ -498,7 +508,11 @@ def discover_installed_voices(
     for voice_name in voice_names:
         model_path = voice_dir / f"{voice_name}.onnx"
         config_path = voice_dir / f"{voice_name}.onnx.json"
-        if not model_path.exists() or not config_path.exists():
+        if not model_path.exists():
+            continue
+        if not os.path.lexists(config_path):
+            # A model without its config is an incomplete install, not an
+            # unsafe config; skip it quietly as before.
             continue
         try:
             installed[voice_name] = build_voice_metadata(
@@ -515,7 +529,25 @@ def discover_installed_voices(
 
 
 def build_voice_metadata(*, voice_name: str, model_path: Path, config_path: Path) -> InstalledVoice:
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    # O_NONBLOCK makes opening a FIFO harmless; fstat admits the actual opened
+    # object, O_NOFOLLOW refuses symlinks, and the read cap also covers growth.
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(config_path, flags)
+    try:
+        # Admit the opened object before handing the descriptor to a file
+        # object: fdopen on a directory raises without closing the descriptor.
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PIPER_CONFIG_BYTES:
+            raise ValueError("Piper config must be a regular file within the byte limit.")
+        source = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with source:
+        data = source.read(MAX_PIPER_CONFIG_BYTES + 1)
+        if len(data) > MAX_PIPER_CONFIG_BYTES:
+            raise ValueError("Piper config exceeds the byte limit.")
+    config = json.loads(data.decode("utf-8"))
     languages = parse_voice_languages(voice_name)
     speaker_id_map = config.get("speaker_id_map", {})
     speakers = tuple(sorted(str(name) for name in speaker_id_map))
