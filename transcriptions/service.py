@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import http.client
+import asyncio
 import json
 import logging
 import math
@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
@@ -30,6 +31,8 @@ from transcriptions.owned_process import OwnedProcessMessages, run_native_proces
 from transcriptions.sanitizer import sanitize_result
 
 NATIVE_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+WHISPERKIT_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+WHISPERKIT_ERROR_MAX_BYTES = 64 * 1024
 
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
@@ -830,40 +833,75 @@ def call_whisperkit_server(
     payload_suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
     content_length = len(payload_prefix) + audio_path.stat().st_size + len(payload_suffix)
 
-    connection_class = (
-        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    )
-    connection = connection_class(parsed.netloc, timeout=timeout_seconds)
-    try:
-        connection.putrequest("POST", request_path)
-        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
-        connection.putheader("Content-Length", str(content_length))
-        connection.endheaders()
-        connection.send(payload_prefix)
+    async def content():
+        yield bytes(payload_prefix)
         with audio_path.open("rb") as handle:
             while chunk := handle.read(64 * 1024):
-                connection.send(chunk)
-        connection.send(payload_suffix)
-        response = connection.getresponse()
-        body = response.read()
-    finally:
-        connection.close()
+                yield chunk
+        yield payload_suffix
 
-    if response.status >= 400:
-        detail = body.decode("utf-8", errors="replace").strip()
-        if detail:
+    async def exchange() -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with httpx.AsyncClient(
+                    timeout=timeout_seconds,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{parsed.scheme}://{parsed.netloc}{request_path}",
+                        content=content(),
+                        headers={
+                            "Content-Type": f"multipart/form-data; boundary={boundary}",
+                            "Content-Length": str(content_length),
+                            "Accept-Encoding": "identity",
+                        },
+                    ) as response:
+                        limit = (
+                            WHISPERKIT_ERROR_MAX_BYTES
+                            if response.status_code >= 400
+                            else WHISPERKIT_RESPONSE_MAX_BYTES
+                        )
+                        body = bytearray()
+                        async for chunk in response.aiter_raw():
+                            if len(chunk) > limit - len(body):
+                                raise RuntimeError(
+                                    "WhisperKit server exceeded the response byte limit."
+                                )
+                            body.extend(chunk)
+                        if response.status_code >= 400:
+                            status = response.status_code
+                            detail = body.decode("utf-8", errors="replace").strip()
+                            raise RuntimeError(
+                                f"WhisperKit transcription failed with HTTP {status}: {detail}"
+                            )
+                        try:
+                            return decode_json_object(bytes(body))
+                        except (ValueError, RecursionError) as exc:
+                            raise RuntimeError("WhisperKit server returned invalid JSON.") from exc
+        except (TimeoutError, httpx.TimeoutException) as exc:
             raise RuntimeError(
-                f"WhisperKit transcription failed with HTTP {response.status}: {detail}"
-            )
-        raise RuntimeError(f"WhisperKit transcription failed with HTTP {response.status}.")
+                "WhisperKit exchange exceeded the configured elapsed deadline."
+            ) from exc
+        except httpx.ConnectError as exc:
+            raise OSError("WhisperKit server is not reachable.") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError("WhisperKit response transport failed.") from exc
 
+    # Match the worker-control transport: own an isolated loop so sync callers can
+    # interrupt the entire upload/read and close streams before releasing the lane.
+    # A cancelled OS DNS lookup may finish later, without owning an HTTP stream/file.
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(exchange())
     try:
-        payload = json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("WhisperKit server returned invalid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("WhisperKit server returned an unexpected response payload.")
-    return payload
+        return loop.run_until_complete(task)
+    finally:
+        if not task.done():
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 def render_multipart_field(*, boundary: str, name: str, value: str) -> str:

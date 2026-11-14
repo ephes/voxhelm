@@ -1483,6 +1483,16 @@ benchmark follow-on kept it competitive, but the tuned long-form run still
 logged a Metal GPU recovery error, so the deployed default remains
 `whispercpp`.
 
+The sidecar HTTP exchange uses one elapsed budget,
+`VOXHELM_WHISPERKIT_TIMEOUT_SECONDS` (default 900 seconds), including connection,
+request upload, response headers and the complete response body. Slow progress
+does not renew it. Responses are streamed with a 64 MiB transcript limit and a
+separate 64 KiB HTTP-error limit; the transport closes on overflow or expiry.
+Successful responses must be strict UTF-8 object JSON with at most 128 nesting
+levels, unique members and finite numbers. Size, deadline, read and JSON failures
+fail the request without silently switching inference backends; only an unreachable
+sidecar retains the existing backend-unavailable fallback policy.
+
 Current limitation: the lane scheduler gates Voxhelm's HTTP, batch, and Wyoming
 entry points, but it does not reach inside the WhisperKit sidecar itself. Once
 Voxhelm has admitted a WhisperKit request, the sidecar's internal inference

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Stream WhisperKit responses under separate transcript/error byte limits and
+  strict object JSON admission, with one elapsed deadline spanning connect,
+  upload, headers and body; resource failures do not trigger backend fallback.
+
 - Bound native inference stdout/stderr to 64 KiB with 2 KiB retained tails and
   owned process-group cleanup; admit standalone WhisperCpp transcript files
   through a regular no-follow descriptor and strict bounded object JSON.

@@ -272,3 +272,15 @@ Primary sources that most influenced the conclusion:
   `https://github.com/argmaxinc/WhisperKit/tree/main/Sources/WhisperKitCLI`
 - WhisperKit model support/default recommendation table:
   `https://github.com/argmaxinc/WhisperKit/blob/main/Sources/WhisperKit/Core/Models.swift`
+
+
+## HTTP resource contract (2026-11-14)
+
+The experimental backend streams uploads and raw response bytes through an owned
+async transport. One monotonic asyncio timeout covers connect, upload, headers and
+body, independently of per-operation socket timeouts. No model or live worker is
+used by the loopback regression peers. Transcript bodies retain at most 64 MiB;
+error bodies at most 64 KiB. Overflow closes the response before decoding. Native
+JSON admission is also used here: UTF-8 object, depth <=128, no duplicate members
+or nonfinite numbers. Deadline, byte, read and decode failures are terminal for
+this request; unreachable connection failures retain backend-unavailable routing.
