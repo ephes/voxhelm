@@ -89,20 +89,20 @@ def _isolated_tempdir(monkeypatch, tmp_path: Path) -> Path:
 
 
 class _RaisingPiperVoice:
-    def synthesize_wav(self, text, wav_writer, synthesis_config) -> None:
-        # Configure the writer first so its close() on unwind does not mask our error.
-        wav_writer.setnchannels(1)
-        wav_writer.setsampwidth(2)
-        wav_writer.setframerate(22050)
+    def synthesize(self, text, syn_config=None):
         raise RuntimeError("piper exploded")
 
 
 class _SilentPiperVoice:
-    def synthesize_wav(self, text, wav_writer, synthesis_config) -> None:
-        wav_writer.setnchannels(1)
-        wav_writer.setsampwidth(2)
-        wav_writer.setframerate(22050)
-        wav_writer.writeframes(b"\x00\x00" * 2205)
+    def synthesize(self, text, syn_config=None):
+        from types import SimpleNamespace
+
+        yield SimpleNamespace(
+            sample_rate=22050,
+            sample_width=2,
+            sample_channels=1,
+            audio_int16_bytes=b"\x00\x00" * 2205,
+        )
 
 
 def _piper_backend(tmp_path: Path) -> PiperBackend:
@@ -147,7 +147,7 @@ def test_piper_synthesize_readback_failure_removes_temp_wav(monkeypatch, tmp_pat
 
     monkeypatch.setattr(wave, "open", _open)
 
-    with pytest.raises(wave.Error, match="unreadable wav"):
+    with pytest.raises(RuntimeError, match="Piper returned invalid WAV"):
         backend.synthesize("Hello.", _piper_params())
 
     assert list(temp_dir.iterdir()) == []

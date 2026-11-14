@@ -79,8 +79,7 @@ def test_cleanup_refusal_preserves_primary_failure(tmp_path, monkeypatch, caplog
         backend = _piper_backend(tmp_path)
 
         class Voice:
-            def synthesize_wav(self, text, writer, config):
-                writer.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+            def synthesize(self, text, syn_config=None):
                 raise failure
 
         monkeypatch.setattr(service, "load_piper_voice", lambda _: Voice())

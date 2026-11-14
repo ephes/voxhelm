@@ -158,6 +158,16 @@ conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
 inference errors, cancellation and cap overflow remove the partial WAV before
 any artifact is published.
 
+Piper consumes the supported audio-chunk API into an owned WAV. It accepts
+16-bit PCM with one or two channels and a fixed positive sample rate up to
+192 kHz. Chunks must be nonempty, frame-aligned and retain the first chunk's
+geometry. Before each write, cumulative frames and bytes must fit both 30 minutes
+at that rate and 128 MiB of PCM. Speed still sets Piper's length scale. A complete,
+nonempty PCM WAV is required before returning a result: RIFF size, geometry,
+written frame count and readable payload are checked with reads of at most
+64 KiB. Empty, truncated, inconsistent or oversized output fails synthesis and
+removes the owned partial WAV; duration comes from verified written frames.
+
 Synthesis voice keys resolve exactly first. Case-insensitive aliases must match
 only one configured voice across the registry and in each backend; ambiguous
 aliases return a bounded input error (HTTP 400). Use the exact spelling to select

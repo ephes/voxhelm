@@ -889,3 +889,18 @@ The most realistic path is therefore:
 
 - build a thin project-specific control plane
 - reuse existing engines and protocols underneath it
+
+## Piper synthesis output admission
+
+Piper uses its supported `synthesize` audio-chunk API. The owned writer admits
+nonempty, frame-aligned 16-bit PCM, one or two channels and a fixed positive sample
+rate no greater than 192 kHz. Before each write, total frames must fit 30 minutes
+at that rate and total PCM must fit 128 MiB. Speed maps to the existing length
+scale. A failure or cancellation removes partial output while preserving the
+initiating error if unlink fails (fixed recovery warning only).
+
+Before returning a synthesis result, validate the RIFF length, uncompressed PCM
+geometry, nonzero frame count matching the written frames, and complete readable
+payload with at most 64 KiB per read. Reject truncated, empty, inconsistent or
+excess data. Result duration is the verified frame count divided by sample rate;
+backend, voice and effective language metadata retain their normal meaning.
