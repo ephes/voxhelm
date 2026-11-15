@@ -12,8 +12,6 @@ name: CI
 # their dependencies are locked for Darwin/arm64 only.
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
