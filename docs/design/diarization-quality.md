@@ -1,6 +1,10 @@
 # Speaker names for short segments
 
-Status: design, 2026-11-15. Nothing in this document is implemented yet.
+Status: slices 1–5 implemented and merged to `main`, 2026-11-15. Real-data
+qualification done (see [Clerk qualification](#clerk-qualification-2026-11-15)):
+all pooled targets met, but the episode-80 guest safety target is missed, so
+the server was not deployed; remote workers need a PyPI release first.
+Slices 6–7 remain deferred.
 
 Trigger (maintainer, 2026-11-15): transcript quality is acceptable overall,
 but short interjections often carry no speaker or the wrong one. The wish is
@@ -707,3 +711,288 @@ In German, because they are addressed to the maintainer.
 3. Magst du nach dem Rollout etwa zehn Minuten lang eine Liste der
    geänderten Zeilen der Haki-Benita- und der Loes-Crama-Folge gegenhören?
    Ohne Hörtest stützt sich die Abnahme nur auf die python-podcast-Messung.
+
+## Sandbox implementation (2026-11-15)
+
+Slice 1 adds `uv run python -m evals.speaker_naming_eval score SIDECAR
+--truth TRUTH --guest NAME --out REPORT`. Omit `--guest` when every contributor
+has a reference; repeat it for multiple unreferenced contributors (the guest rule
+then stays off). `--baseline SIDECAR` lists changed names. Truth input is JSON
+`{"fps":10,"frames":["display name",null]}`: frame i samples i/fps, null excludes
+silence/overlap/unclear speech. Convert stored truth to these display names before
+scoring. Frames in overlapping transcript segments count once, first cue wins.
+Clear-line precision includes unnamed clear lines in its denominator.
+The committed synthetic fixture scores 15/30 right, 5/30 wrong, 10/30 unnamed
+frames and 1/4 unnamed lines with `--guest Guest`; it is not a pilot measurement.
+The pilot sidecars/truth are only documented on studio under
+`var/handoff/2026-10-19_python_podcast_parakeet_bulk/`. No host access is authorized
+for this worker, so episode 59's 96.3/1.5/2.2 and 101/1221 acceptance remain unverified.
+
+### Slice 2: repeatable bundles and baseline handoff
+
+No production audio, truth, models or pilot bundles are included in this clone.
+The historical files are on studio at the path above; there is no supported
+truth-download endpoint in the repository. No host access or live jobs were used.
+The clerk measured B and the new pass on real bundles; the numbers are in
+[Clerk qualification](#clerk-qualification-2026-11-15).
+
+Clerk preparation (on the measurement machine, outside this sandbox): put the
+six local audio files and reference audio in `/tmp/voxhelm-speaker-naming/`.
+Create `manifests/{pp59,pp77,pp78,pp80,dc209,dc210}.json`, with paths relative
+to each manifest. Each entry of `references` is one source range (start/end in
+seconds) or a complete clip (omit both); repeat the id/name for multiple ranges:
+
+```json
+{
+  "audio": "../audio/pp59.m4a",
+  "language": "de",
+  "model": "auto",
+  "references": [
+    {"id":"jochen", "name":"Jochen", "audio":"../audio/reference.flac", "start":0, "end":30}
+  ],
+  "unreferenced_speakers": [],
+  "num_speakers": 2
+}
+```
+
+`num_speakers`, `min_speakers` and `max_speakers` are optional and are passed
+to pyannote exactly like the job's `diarization` counts (same validation as the
+API: positive integers, `num_speakers` not combined with min/max, min <= max).
+Omit them when the job set none. Copy them from the job being reproduced: the
+frozen turns depend on them.
+
+Supply all real participant references, English for Django Chat, and its single
+unreferenced guest name. Convert the four historical 10 fps truth arrays into
+`truth/{pp59,pp77,pp78,pp80}.json` with the JSON schema above. The source arrays'
+serialization is not documented in this repository; do not infer names from IDs.
+The fixture in `tests/fixtures/speaker_naming/` demonstrates the score schema.
+
+Exact baseline command at the slice-2 commit (with the deployed model cache):
+
+```bash
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag baseline
+```
+
+`bundle MANIFEST --env-file ENV --out NEW_DIRECTORY` performs ASR through the
+production backend chain with sanitization and word timings and captures regular
+and exclusive anonymous turns once. It freezes float32 audio/reference windows,
+reference source ranges and the complete transcription in `bundle.json` + NPY
+files. Run on the same machine/model versions; numerical GPU determinism is
+verified, not assumed. `run BUNDLE --env-file ENV --config OPTIONS.json --out
+SIDECAR.json` replays only embeddings and postprocessing; the separate
+`.timing.json` holds runtime so sidecars can compare byte for byte.
+`suite` does two replays per episode and fails on unequal sidecars. It writes
+`results/TAG/EPISODE{,.score}.json`, including every changed line with text,
+frame and line metrics, and postprocess time. Variant tags compare with baseline;
+missing python-podcast truth fails instead of silently reporting counts only.
+Bundles and all real measurements stay outside the repository.
+
+Local mock qualification: a three-second one-speaker bundle roundtrips word
+boundaries, both annotations and source ranges; two replays have identical
+sidecars (1/1 confident Alice). This validates the harness, not the six real
+baselines or timing/quality targets. Slices 3 and 5 must still be measured by the
+clerk before review/merge qualification.
+
+### Slice 3: known episode profiles
+
+Known-speaker episode profiles and the short-cue pass are implemented. Profiles
+require five whole-segment acceptances of at least 3 s, take the 150 highest
+margins per speaker, and never mix reference and episode centroids. Candidate
+audio repeats to 1.5 s without silence; a known winner must pass the existing
+mixed veto against reference profiles. Named cues and segment boundaries remain
+unchanged. Summary counts describe accepted known names; relabelled count is
+zero in this slice. Skip reasons are `disabled`, `no_raw_turns` (added at merge
+review: without anonymous turns a guest cannot be detected), `unresolved_label`,
+`too_few_centroids`, or null when the pass ran. These additive summary keys are
+allowlisted for remote completion so local gates stay coherent.
+
+From this commit onward the baseline command **must** disable the new pass:
+
+```bash
+printf '%s\n' '{"short_segment_margin":0}' > /tmp/voxhelm-speaker-naming/baseline-options.json
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --config /tmp/voxhelm-speaker-naming/baseline-options.json --tag baseline
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag known-episode
+```
+
+Reuse exactly the same bundles. The second command produces per-line changes,
+per-reason precision, frame metrics and runtime for comparison with B. Real
+35 % unnamed-line reduction, +0.5 point right / <=+0.4 wrong, >=82 % new-name
+precision and <=15 % runtime increase remain unmeasured in this sandbox.
+Synthetic qualification: the uncertain 0.7 s B interjection on A's raw label is
+accepted as B; all ten already named long cues retain their names. Disabled
+execution performs no second-pass embeddings and adds zero summary counts.
+
+### Slice 4: request and worker contract
+
+The threshold uses the existing shared numeric option allowlist and config loader;
+no parallel parsing or fingerprint implementation was added. API/storage/claim
+and local/remote summary regressions cover 0, 0.15 and custom values, rejection
+of malformed/nonfinite/negative values, changed request fingerprints and null
+skip-reason preservation. README and the known-speaker contract document the
+pass and the disable semantics. The default 0.15 follows the owner's stated
+preference; no production runs or rollout were performed.
+
+### Slice 5: untied-label profiles and final qualification handoff
+
+Untied labels now compete through profiles from at least five uncertain,
+non-mixed single-label cues of at least 3 s (longest first, maximum 150).
+Substantial labels without profiles still skip the whole job. Known winners keep
+the reference-based mixed veto. Label winners stay uncertain for the consumer's
+guest rule; changed assignments preserve even a null original overlap label.
+Optional episode candidates use disjoint speaker/label identities. No first-pass
+reference evidence, raw-turn speech totals, cue starts or artifact boundaries are
+rewritten. Slice 6 (exclusive turn selection) and slice 7 (rollout) were not done.
+
+After producing B with the disabled configuration above, the clerk must run:
+
+```bash
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag with-guest
+```
+
+The suite now also writes `EPISODE.profiles.json`: for each untied label, the
+number of long guest-rule cues, how often its own profile is top, and that
+percentage (target >=95 % on dc209/dc210). These extra diagnostic embeddings run
+**after** the measured production postprocess and are excluded from its runtime.
+For an individual replay add `run ... --profile-checks` to produce the same file.
+`EPISODE.score.json` includes `guest_to_host_lines` with start/end/text for the
+listening check, `new_names_by_speaker`, and `short_guest_known_names.before/after`
+for the episode-80 safety criterion (at most two additional known names on clear
+short guest cues). It also retains all changed lines and their truth outcomes.
+No truth means frame/precision percentages are null, not zero or invented.
+
+Synthetic measurements: guest-profile sanity 5/5 (100 %); a guest interjection
+on a host label moves to the guest label with the original overlap retained;
+a host interjection on a guest label becomes a confident host. These are mock
+qualifications, not evidence for <=30 unnamed Django Chat lines, >=40 % relative
+unnamed reduction, +0.6 point right / <=+0.4 wrong, or production runtime. All real
+cells in B and all corresponding acceptance targets remained pending clerk data at
+implementation time; see [Clerk qualification](#clerk-qualification-2026-11-15).
+
+The six-episode suite checks two identical sidecars per replay. It never submits
+a job, changes a published transcript, deploys, or selects exclusive turns.
+Measurement inputs and output stay under `/tmp/voxhelm-speaker-naming`, outside
+Git; archive that directory before temporary storage is cleared.
+
+### Local gates and review status
+
+Every slice ran `just check` (Ruff lint/format, mypy, full pytest), with no models
+or services needed. Slices 1–4: respectively 2106, 2108, 2128, 2146 passed;
+each had 6 model-dependent skips. Slice 5: 2160 passed, 6 skipped. The locked all-extras pip-audit found no known vulnerabilities.
+Logs are outside the clone in
+`~/workspaces/ws-work-planning/coordination/codex/logs/cx-voxhelm-diarization-a/`.
+Per the final worker instruction, no Claude command or sandbox cross-family
+review was run. At implementation time the branch was parked for external review
+and real-data qualification; the clerk's review, measurements and merge follow in
+[Clerk qualification](#clerk-qualification-2026-11-15).
+
+## Clerk qualification (2026-11-15)
+
+Measured on `studio` against the real episodes; no job was submitted and no
+published transcript changed.
+
+### Setup
+
+- Inputs from the control plane (read-only): the job requests of the pilot jobs
+  (pp59 `e04859f0`, pp77 `46009d86`, pp78 `065c031f`, pp80 `8a74983c`) and of
+  the Django Chat staging jobs (dc209 `c0e84980`, dc210 `da97bdc8`) give the
+  audio URLs, the reference ranges and the `num_speakers` hints; the stored
+  speakers sidecars of these jobs served as cross-check. Truth: the pilot's
+  10 fps arrays (`truth-{59,77,78,80}.json` under
+  `var/handoff/2026-10-19_python_podcast_parakeet_bulk/pilot/`), whose entries
+  are display names or empty strings, converted 1:1 (empty = null).
+- Interpreter: the deployed remote worker's tool environment
+  (`~/.local/share/uv/tools/voxhelm`, voxhelm 0.1.13 deps, torch 2.12.0,
+  pyannote.audio 4.0.4) with the code under test on `PYTHONPATH`; worker env
+  file `/etc/voxhelm-remote-worker/worker.env`, `HF_HUB_OFFLINE=1`, and
+  `VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet` (a control-plane setting the
+  worker env lacks; without it the harness would transcribe with MLX Whisper
+  instead of Parakeet as production does).
+- Run from a directory without Python packages: `python -m` puts the working
+  directory before `PYTHONPATH`, so running the "old" variant from a branch
+  checkout silently imports the branch code.
+- One bundle per episode (ASR + both annotations, 1.5-4.5 min each), then
+  three replays of the same bundles: **old** = `origin/main` 3d32848 code,
+  **B** = branch with `{"short_segment_margin": 0}`, **new** = branch defaults
+  (0.15, untied-label profiles). Every replay ran twice; all sidecars were
+  identical (deterministic). B equals old segment by segment on all six
+  episodes; only the new summary keys differ.
+- The bundles reproduce production: B on pp59, pp77 and pp78 scores exactly
+  like the stored production sidecars (for example pp59 96.17 / 1.68 / 2.15 %,
+  101 of 1221 lines unnamed; the slice-1 reference values 96.3 / 1.5 / 2.2 were
+  the spike's rounding, the 101/1221 lines match). pp80 and the Django Chat
+  episodes differ by one to three lines from a fresh ASR run.
+- Data (outside Git): `~/workspaces/ws-s1-voxhelm-merge/speaker-naming/`
+  (`manifests/`, `truth/`, `bundles/`, `results/{old-main,margin0,with-guest}/`).
+
+### Results
+
+Frames: share of truth speech inside transcript lines (right / wrong /
+unnamed). Lines: published names after django-cast's guest rule. "New-pass
+names" are lines with accept reason `episode_voiceprint` that have a clear
+truth speaker.
+
+| episode | B frames % | new frames % | B unnamed lines | new unnamed lines | change | new-pass names right |
+| --- | --- | --- | --- | --- | --- | --- |
+| pp59 | 96.17 / 1.68 / 2.15 | 96.94 / 1.76 / 1.30 | 101/1221 | 40/1221 | −60.4 % | 44/44 (100 %) |
+| pp77 | 93.55 / 1.59 / 4.86 | 94.78 / 1.91 / 3.31 | 245/1764 | 119/1764 | −51.4 % | 73/92 (79.3 %) |
+| pp78 | 93.20 / 1.55 / 5.25 | 94.33 / 1.59 / 4.07 | 70/501 | 39/501 | −44.3 % | 20/20 (100 %) |
+| pp80 | 93.42 / 3.38 / 3.20 | 94.61 / 3.88 / 1.52 | 79/710 | 32/710 | −59.5 % | 23/36 (63.9 %) |
+| required set | 94.24 / 1.90 / — | 95.31 / 2.14 / — | 495 | 230 | **−53.5 %** | **160/192 (83.3 %)** |
+| dc209 | no truth | no truth | 61/609 | 23/609 | −62.3 % | 46 named |
+| dc210 | no truth | no truth | 69/878 | 20/878 | −71.0 % | 55 named |
+
+Other observations:
+
+- No line named in B lost its name. Renamed lines occur only where a host's
+  episode profile beats the guest's untied label: pp80 11 (of the 8 with a
+  clear truth speaker, 3 right and 5 wrong), dc209 10, dc210 18.
+- Guest-profile sanity (long guest-rule cues whose own label profile ranks
+  first): pp80 46/46, dc209 184/184, dc210 226/226 (100 %).
+- pp80 clear short cues whose truth speaker is the guest Sebastian and that
+  carry a known (host) name: 1 in B, 6 new.
+- Postprocess time B → new: +2.0, +1.1, −15.8, +0.8, −0.3, +2.3 % (pp59 …
+  dc210). The runs shared the machine with other jobs, so only differences
+  well beyond a few percent would be meaningful; none is.
+
+### Target check
+
+| target (slices 3/5, against B) | result | |
+| --- | --- | --- |
+| unnamed lines on the required set −35 % (slice 3) / −40 % (slice 5) | −53.5 % | met |
+| frame right +0.5 / +0.6 points | +1.07 | met |
+| frame wrong at most +0.4 points | +0.24 (pp80 alone +0.50) | met pooled |
+| new-reason names at least 82 % right | 83.3 % (pp77 79.3 %, pp80 63.9 %) | met pooled, narrowly |
+| Django Chat unnamed lines at most 30 | 23 and 20 | met |
+| guest-rule lines ≥ 3 s with the guest label on top, at least 95 % | 100 % on all three guest episodes | met |
+| pp80: at most 2 more clear short guest cues with a known name than B | +5 (1 → 6) | **missed** |
+| postprocess time at most +15 % | within noise | met |
+| `short_segment_margin=0` equals today | identical segments on all six | met |
+
+Verdict: the pooled targets hold, but the episode-80 guest safety target is
+missed. The misses all come from the same mechanism: hosts' episode profiles
+winning short cues on the guest's untied label (pp80: 5 of 8 clear relabels
+wrong). Per the instruction "deploy only if the targets are met", the control
+plane was **not** deployed. The change is merged to `main`; it reaches jobs
+only through a voxhelm release for the remote workers (all transcription jobs
+run `remote_pull`), which is the owner's call.
+
+The Django Chat listening list (all lines whose published name changes between
+old and new, same ASR and turns) is in
+`~/workspaces/ws-s1-voxhelm-merge/hoertest-django-chat.md`. Re-generating the
+two staging episodes was deferred: with the workers still on 0.1.13 a re-run
+would use the old naming code, so it could not show the change and would only
+replace the staging transcripts.
+
+Possible follow-ups (owner decision): keep the default 0.15 and accept the
+guest cases, or require a larger margin for a known speaker to win on an untied
+label (all five additional pp80 guest cues with a host name come from that
+relabel step), then re-measure with the same bundles (an `evals` `run` replay
+takes about 3 minutes per episode).

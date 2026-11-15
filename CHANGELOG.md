@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Include untied pyannote-label episode profiles for guests without reference
+  audio. Preserve original overlap labels on relabelled short cues and expose
+  ranked episode candidates; add offline guest/profile sanity diagnostics.
+
+- Expose `diarization.known_speaker.short_segment_margin` (default 0.15,
+  0 disables) through shared API/worker validation and summary metadata.
+
+- Classify remaining 0.3–2.5 s uncertain cues against episode profiles from
+  confident long segments; tile short audio and keep the mixed-speaker veto.
+  The pass is skipped (`episode_voiceprint_skipped: "no_raw_turns"`) when the
+  anonymous diarization produced no usable turns, since an unreferenced guest
+  could not be detected then.
+
+- Add repeatable offline speaker bundles and a six-episode baseline/variant runner.
+  Capture both annotations without changing production turn selection; bundles
+  pass the manifest's `num_speakers`/`min_speakers`/`max_speakers` to pyannote
+  like the production request.
+
+- Add offline speaker naming scores by frame, line duration and acceptance rule,
+  including the consumer guest rule and baseline line comparisons.
+
 - Quantize VTT/DOTE/Podlove cues once to integer milliseconds and ensure a
   minimum 1 ms duration, preserving verbose raw timing. Retain original drift
   words on empty/fully filtered retries and record an explicit rejection.

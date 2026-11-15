@@ -107,8 +107,15 @@ Known-speaker jobs re-cut transcript segments at speaker changes by default:
 whisper.cpp then runs with per-word timings on one processor (slower than the
 configured `VOXHELM_WHISPERCPP_PROCESSORS`), and the transcript artifacts and
 the speaker sidecar carry the re-cut segments. `resegment_hop: 0` in
-`diarization.known_speaker` turns this off. See
-`specs/known-speaker-diarization.md`.
+`diarization.known_speaker` turns this off. A second episode-voiceprint pass
+names remaining uncertain cues of 0.3–2.5 s from confidently labeled long cues
+in the same episode, repeating short audio without silence. The request option
+`diarization.known_speaker.short_segment_margin` defaults to `0.15` (finite,
+non-negative); `0` disables this second pass. Already confident names and cue
+boundaries stay unchanged. Guests without reference clips compete through
+profiles of their untied pyannote labels; consumers retain the existing guest
+naming rule. The sidecar preserves the original overlap label on relabelled cues.
+See `specs/known-speaker-diarization.md`.
 
 With `VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet`, those jobs (when their model
 is `auto`, `whisper-1` or `gpt-4o-mini-transcribe`) are transcribed by Parakeet

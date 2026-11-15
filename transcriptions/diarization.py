@@ -159,28 +159,39 @@ class PyannoteDiarizationBackend:
         audio_path: Path,
         params: DiarizationParams | None = None,
     ) -> list[SpeakerTurn]:
+        return self.diarize_annotations(audio_path, params, include_exclusive=False)["regular"]
+
+    def diarize_annotations(
+        self,
+        audio_path: Path,
+        params: DiarizationParams | None = None,
+        *,
+        include_exclusive: bool = True,
+    ) -> dict[str, list[SpeakerTurn]]:
+        """Capture both annotations in one inference; ordinary jobs still use regular turns."""
         pipeline = self._load_pipeline()
         diarization_params = params or DiarizationParams()
         diarization_result = pipeline(
             load_audio_for_pyannote(audio_path),
             **diarization_params.pyannote_kwargs(),
         )
-        annotation = extract_pyannote_annotation(diarization_result)
-        turns: list[SpeakerTurn] = []
-        try:
-            iterator = annotation.itertracks(yield_label=True)
-        except AttributeError as exc:
-            raise DiarizationError(
-                "pyannote.audio returned an unexpected diarization result."
-            ) from exc
-        for segment, _track, label in iterator:
-            turns.append(
-                SpeakerTurn(
-                    start=float(segment.start),
-                    end=float(segment.end),
-                    speaker=str(label),
-                )
-            )
+        regular = extract_pyannote_annotation(diarization_result)
+        exclusive = getattr(diarization_result, "exclusive_speaker_diarization", None)
+        annotations = {"regular": regular}
+        if include_exclusive and exclusive is not None:
+            annotations["exclusive"] = exclusive
+        turns: dict[str, list[SpeakerTurn]] = {}
+        for name, annotation in annotations.items():
+            try:
+                iterator = annotation.itertracks(yield_label=True)
+            except AttributeError as exc:
+                raise DiarizationError(
+                    "pyannote.audio returned an unexpected diarization result."
+                ) from exc
+            turns[name] = [
+                SpeakerTurn(start=float(segment.start), end=float(segment.end), speaker=str(label))
+                for segment, _track, label in iterator
+            ]
         return turns
 
     def _load_pipeline(self) -> Any:

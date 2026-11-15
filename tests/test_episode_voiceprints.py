@@ -1,0 +1,408 @@
+"""Episode voiceprints use synthetic audio identities, with no downloaded model."""
+
+from dataclasses import replace
+from threading import Event
+
+import numpy
+import pytest
+
+from lane_scheduler import InferenceCancelled
+from transcriptions.diarization import SpeakerTurn
+from transcriptions.known_speaker import (
+    EPISODE_VOICEPRINT_REASON,
+    KnownSpeakerConfig,
+    KnownSpeakerSegment,
+    MixedWindow,
+    ReferenceAudio,
+    SpeakerCandidate,
+    apply_episode_voiceprints,
+    build_speakers_artifact,
+    run_known_speaker_postprocess,
+    tile_to_min_duration,
+)
+from transcriptions.service import TranscriptionResult, TranscriptionSegment
+
+
+class EpisodeBackend:
+    embedding_version = "synthetic-episode"
+
+    def __init__(self):
+        self.windows = []
+
+    def embed(self, samples, sample_rate):
+        self.windows.append(samples.copy())
+        return {1: [1.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0], 3: [0.0, 0.0, 1.0], 4: [1.0, 1.0, 0.0]}[
+            int(samples[0])
+        ]
+
+
+def cue(index, start, duration, speaker=None, label=None):
+    return KnownSpeakerSegment(
+        index=index,
+        start=start,
+        end=start + duration,
+        speaker=speaker,
+        speaker_source="known_speaker_voiceprint",
+        speaker_confidence=0.8,
+        speaker_margin=0.3,
+        speaker_candidates=[SpeakerCandidate("A", 0.8)],
+        speaker_uncertain=speaker is None,
+        raw_diarization_speaker=label,
+    )
+
+
+def episode(*, guest=False, duration=0.7, short_identity=2, short_label="Speaker 1"):
+    segments: list[KnownSpeakerSegment] = []
+    turns: list[SpeakerTurn] = []
+    samples: list[int] = []
+    for identity, speaker in ((1, "A"), (2, "B"), *(([(3, None)]) if guest else [])):
+        for _ in range(5):
+            start = len(samples) / 16000
+            label = f"Speaker {identity}"
+            length = 6 if identity == 3 else 3
+            segments.append(cue(len(segments), start, length, speaker, label))
+            turns.append(SpeakerTurn(start, start + length, label))
+            samples.extend([identity] * int(length * 16000))
+    start = len(samples) / 16000
+    segments.append(cue(len(segments), start, duration, label=short_label))
+    samples.extend([short_identity] * int(duration * 16000))
+    return segments, turns, numpy.array(samples, dtype="float32")
+
+
+def apply(segments, turns, audio, backend=None, **options):
+    return apply_episode_voiceprints(
+        segments,
+        job_audio_samples=audio,
+        reference_centroids={"A": [1.0, 0.0, 0.0], "B": [0.0, 1.0, 0.0]},
+        raw_turns=turns,
+        config=KnownSpeakerConfig(**options),
+        backend=backend or EpisodeBackend(),
+    )
+
+
+def test_tiling_repeats_only_own_audio_and_handles_empty():
+    audio = numpy.array([1, 2, 3], dtype="float32")
+    assert tile_to_min_duration(audio, 4).tolist() == [1, 2, 3, 1, 2, 3]
+    assert len(tile_to_min_duration(audio[:0])) == 0
+    assert tile_to_min_duration(audio, 1) is audio
+
+
+def test_known_pass_uses_own_voice_not_label_and_preserves_reference_evidence():
+    original, turns, audio = episode()
+    backend = EpisodeBackend()
+    updated, skipped = apply(original, turns, audio, backend)
+    assert skipped is None
+    assert updated[:-1] == original[:-1]
+    assert updated[-1].speaker == "B"
+    assert updated[-1].speaker_accept_reason == EPISODE_VOICEPRINT_REASON
+    assert not updated[-1].speaker_uncertain
+    assert updated[-1].speaker_candidates == original[-1].speaker_candidates
+    assert updated[-1].speaker_margin == original[-1].speaker_margin
+    assert len(backend.windows[-1]) == 24000
+    assert numpy.all(backend.windows[-1] == 2)
+
+
+@pytest.mark.parametrize(
+    "duration,decided", [(0.29, False), (0.3, True), (2.5, True), (2.51, False)]
+)
+def test_candidate_boundaries(duration, decided):
+    original, turns, audio = episode(duration=duration)
+    updated, _ = apply(original, turns, audio, mixed_window_duration=0)
+    assert (updated[-1].speaker == "B") is decided
+
+
+def test_pass_never_overrides_named_or_vetoed_segments_and_requires_margin():
+    original, turns, audio = episode(short_identity=4)
+    updated, _ = apply(original, turns, audio)
+    assert updated == original  # tied episode voices
+    for protected in (
+        replace(original[-1], speaker="A", speaker_uncertain=False),
+        replace(original[-1], speaker_uncertain_reason="mixed_speakers"),
+    ):
+        updated, _ = apply([*original[:-1], protected], turns, audio)
+        assert updated[-1] == protected
+
+
+def test_requires_five_whole_segment_acceptances_per_known_speaker():
+    original, turns, audio = episode()
+    # Track/corroboration acceptances cannot train an episode profile.
+    original[0] = replace(original[0], speaker_accept_reason="speaker_track")
+    updated, skipped = apply(original, turns, audio)
+    assert skipped == "too_few_centroids"
+    assert updated == original
+
+
+@pytest.mark.parametrize("turns", [[], [SpeakerTurn(1.0, 1.0, "Speaker 1")]])
+def test_missing_anonymous_turns_skip_pass(turns):
+    original, _turns, audio = episode(guest=True)
+    backend = EpisodeBackend()
+    updated, skipped = apply(original, turns, audio, backend=backend)
+    assert skipped == "no_raw_turns"
+    assert updated == original
+    assert backend.windows == []
+
+
+def test_substantial_untied_label_without_profile_skips_pass():
+    original, turns, audio = episode(guest=True)
+    # One vetoed guest training cue leaves fewer than five usable samples.
+    original[10] = replace(original[10], speaker_uncertain_reason="mixed_speakers")
+    updated, skipped = apply(original, turns, audio)
+    assert skipped == "unresolved_label"
+    assert updated == original
+
+
+def test_disabled_pass_does_not_embed_or_change_segments():
+    original, turns, audio = episode()
+    backend = EpisodeBackend()
+    updated, skipped = apply(original, turns, audio, backend, short_segment_margin=0)
+    assert updated is original
+    assert skipped == "disabled"
+    assert not backend.windows
+
+
+def test_mixed_veto_rechecks_episode_winner(monkeypatch):
+    original, turns, audio = episode(duration=2)
+
+    def veto(**kwargs):
+        assert kwargs["segment_speaker"] == "B"
+        assert set(kwargs["centroids"]) == {"A", "B"}
+        return [MixedWindow(30, 31.5, "A", 0.9, 0.8)]
+
+    monkeypatch.setattr("transcriptions.known_speaker.find_mixed_windows", veto)
+    updated, _ = apply(original, turns, audio)
+    assert updated[-1].speaker is None
+    assert updated[-1].speaker_uncertain_reason == "mixed_speakers"
+    assert updated[-1].speaker_mixed_windows
+
+
+def test_cancels_between_episode_embeddings():
+    original, turns, audio = episode()
+    event = Event()
+
+    class CancellingBackend(EpisodeBackend):
+        def embed(self, samples, sample_rate):
+            event.set()
+            return super().embed(samples, sample_rate)
+
+    backend = CancellingBackend()
+    with pytest.raises(InferenceCancelled):
+        apply_episode_voiceprints(
+            original,
+            job_audio_samples=audio,
+            reference_centroids={"A": [1.0, 0.0, 0.0], "B": [0.0, 1.0, 0.0]},
+            raw_turns=turns,
+            config=KnownSpeakerConfig(),
+            backend=backend,
+            cancel_event=event,
+        )
+    assert len(backend.windows) == 1
+
+
+def test_integrated_pass_counts_and_zero_preserves_existing_summary():
+    original, turns, audio = episode()
+    transcript = TranscriptionResult(
+        text="",
+        language="en",
+        segments=[
+            TranscriptionSegment(id=s.index, start=s.start, end=s.end, text="Hi") for s in original
+        ],
+    )
+
+    def run(margin):
+        return run_known_speaker_postprocess(
+            transcript,
+            references=[
+                ReferenceAudio("a", "A", [numpy.array([1])]),
+                ReferenceAudio("b", "B", [numpy.array([2])]),
+            ],
+            job_audio_samples=audio,
+            raw_turns=turns,
+            backend=EpisodeBackend(),
+            config=KnownSpeakerConfig(short_segment_margin=margin, resegment_hop=0),
+        )
+
+    baseline, enabled = run(0), run(0.15)
+    assert baseline.segments[-1].speaker is None
+    assert enabled.segments[-1].speaker == "B"
+    assert enabled.result == baseline.result
+    assert enabled.summary["episode_voiceprint_segment_count"] == 1
+    assert enabled.summary["episode_voiceprint_skipped"] is None
+    assert baseline.summary["episode_voiceprint_segment_count"] == 0
+    assert baseline.summary["episode_voiceprint_relabelled_count"] == 0
+    old_keys = set(baseline.summary) - {
+        "short_segment_margin",
+        "episode_voiceprint_segment_count",
+        "episode_voiceprint_relabelled_count",
+        "episode_voiceprint_skipped",
+        "confident_segment_count",
+        "uncertain_segment_count",
+        "confident_speaker_distribution",
+    }
+    assert {k: enabled.summary[k] for k in old_keys} == {k: baseline.summary[k] for k in old_keys}
+    assert build_speakers_artifact(baseline)["version"] == 1
+
+
+def test_guest_voice_relabels_host_label_and_serializes_overlap():
+    from evals.speaker_naming_eval import published_names
+    from transcriptions.known_speaker import KnownSpeakerOutcome
+
+    original, turns, audio = episode(guest=True, short_identity=3)
+    updated, skipped = apply(original, turns, audio)
+    assert skipped is None
+    guest = updated[-1]
+    assert guest.speaker is None and guest.speaker_uncertain
+    assert guest.raw_diarization_speaker == "Speaker 3"
+    assert guest.raw_diarization_overlap_speaker == "Speaker 1"
+    assert guest.episode_relabelled
+    assert guest.speaker_episode_candidates[0] == {"label": "Speaker 3", "similarity": 1.0}
+    artifact = build_speakers_artifact(
+        KnownSpeakerOutcome(
+            TranscriptionResult(text="", language="en", segments=[]),
+            updated,
+            {
+                "raw_diarization_labels": {
+                    "Speaker 1": {"speaker": "A"},
+                    "Speaker 2": {"speaker": "B"},
+                    "Speaker 3": {"speaker": None},
+                }
+            },
+        )
+    )
+    payload = artifact["segments"][-1]
+    assert payload["raw_diarization_overlap_speaker"] == "Speaker 1"
+    assert "episode_relabelled" not in payload
+    assert published_names(artifact, ["Guest"])[-1] == "Guest"
+    assert updated[:-1] == original[:-1]
+
+
+@pytest.mark.parametrize("label,changed", [("Speaker 3", False), (None, True)])
+def test_guest_decision_preserves_absent_overlap_and_does_not_invent_changes(label, changed):
+    from transcriptions.known_speaker import serialize_known_speaker_segments
+
+    original, turns, audio = episode(guest=True, short_identity=3, short_label=label)
+    updated, _ = apply(original, turns, audio)
+    assert updated[-1].episode_relabelled is changed
+    payload = serialize_known_speaker_segments(updated)[-1]
+    assert ("raw_diarization_overlap_speaker" in payload) is changed
+    if changed:
+        assert payload["raw_diarization_overlap_speaker"] is None
+
+
+def test_host_voice_wins_on_guest_label_without_relabelling_raw_turn():
+    original, turns, audio = episode(guest=True, short_identity=2, short_label="Speaker 3")
+    updated, _ = apply(original, turns, audio)
+    assert updated[-1].speaker == "B"
+    assert not updated[-1].speaker_uncertain
+    assert updated[-1].raw_diarization_speaker == "Speaker 3"
+    assert not updated[-1].episode_relabelled
+    assert updated[-1].speaker_episode_candidates[0] == {"speaker": "B", "similarity": 1.0}
+
+
+def test_guest_profile_rejects_multilabel_long_training_segments():
+    original, turns, audio = episode(guest=True)
+    turns.append(SpeakerTurn(30, 31, "Speaker 1"))
+    updated, skipped = apply(original, turns, audio)
+    assert skipped == "unresolved_label"
+    assert updated == original
+
+
+def test_small_unresolved_label_does_not_disable_pass():
+    original, turns, audio = episode()
+    turns.append(SpeakerTurn(0, 0.2, "noise"))
+    updated, skipped = apply(original, turns, audio)
+    assert skipped is None
+    assert updated[-1].speaker == "B"
+
+
+def test_episode_profile_selection_is_bounded_and_uses_margin_for_known_length_for_guest(
+    monkeypatch,
+):
+    from transcriptions.known_speaker import build_episode_centroids
+
+    monkeypatch.setattr("transcriptions.known_speaker.EPISODE_MAX_SEGMENTS", 5)
+    original, turns, audio = episode(guest=True)
+    # A low-margin contaminated known cue must lose to the five clean A cues.
+    # A shorter contaminated guest cue must lose to the five 6-second guest cues.
+    for speaker, label in (("A", "Speaker 1"), (None, "Speaker 3")):
+        start = len(audio) / 16000
+        original.append(replace(cue(len(original), start, 3, speaker, label), speaker_margin=0.01))
+        turns.append(SpeakerTurn(start, start + 3, label))
+        audio = numpy.concatenate([audio, numpy.ones(48000, dtype="float32") * 2])
+    backend = EpisodeBackend()
+    profiles = build_episode_centroids(
+        original,
+        job_audio_samples=audio,
+        reference_centroids={"A": [1.0, 0.0, 0.0], "B": [0.0, 1.0, 0.0]},
+        raw_turns=turns,
+        backend=backend,
+    )
+    assert profiles["speaker:A"] == [1.0, 0.0, 0.0]
+    assert profiles["label:Speaker 3"] == [0.0, 0.0, 1.0]
+    assert len(backend.windows) == 15
+
+
+def test_profile_names_cannot_collide_with_raw_labels():
+    original, turns, audio = episode(guest=True, short_identity=3)
+    original = [replace(s, speaker="Speaker 3") if s.speaker == "A" else s for s in original]
+    updated, skipped = apply_episode_voiceprints(
+        original,
+        job_audio_samples=audio,
+        reference_centroids={"Speaker 3": [1.0, 0.0, 0.0], "B": [0.0, 1.0, 0.0]},
+        raw_turns=turns,
+        config=KnownSpeakerConfig(),
+        backend=EpisodeBackend(),
+    )
+    assert skipped is None
+    assert updated[-1].speaker is None
+    assert updated[-1].speaker_episode_candidates[0]["label"] == "Speaker 3"
+
+
+def test_integrated_guest_summary_counts_and_raw_vote_stay_auditable():
+    original, turns, audio = episode(guest=True, short_identity=3)
+    turns.append(SpeakerTurn(original[-1].start, original[-1].end, "Speaker 1"))
+    # Independent references deliberately do not match the guest's orthogonal voice.
+    result = TranscriptionResult(
+        text="",
+        language="en",
+        segments=[
+            TranscriptionSegment(id=s.index, start=s.start, end=s.end, text="Hello")
+            for s in original
+        ],
+    )
+    outcome = run_known_speaker_postprocess(
+        result,
+        references=[
+            ReferenceAudio("a", "A", [numpy.array([1])]),
+            ReferenceAudio("b", "B", [numpy.array([2])]),
+        ],
+        job_audio_samples=audio,
+        raw_turns=turns,
+        config=KnownSpeakerConfig(resegment_hop=0),
+        backend=EpisodeBackend(),
+    )
+    assert outcome.summary["episode_voiceprint_skipped"] is None
+    assert outcome.summary["episode_voiceprint_relabelled_count"] == 1
+    assert outcome.summary["episode_voiceprint_segment_count"] == 0
+    assert outcome.summary["raw_diarization_labels"]["Speaker 3"] == {
+        "speaker": None,
+        "seconds": 30.0,
+    }
+    assert (
+        build_speakers_artifact(outcome)["segments"][-1]["raw_diarization_overlap_speaker"]
+        == "Speaker 1"
+    )
+
+
+def test_profile_diagnostic_measures_long_guest_label_precision():
+    from evals.speaker_naming_eval import profile_diagnostics
+
+    original, turns, audio = episode(guest=True)
+    report = profile_diagnostics(original, audio, turns, EpisodeBackend(), ["A", "B"])
+    assert report == {"Speaker 3": {"lines": 5, "top_label": 5, "top_label_pct": 100.0}}
+
+
+def test_custom_high_margin_leaves_short_cues_unchanged():
+    original, turns, audio = episode()
+    updated, skipped = apply(original, turns, audio, short_segment_margin=2)
+    assert skipped is None
+    assert updated == original

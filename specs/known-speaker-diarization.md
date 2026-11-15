@@ -10,7 +10,7 @@ directly against contributor reference voiceprints, which the research measured
 at ~95% over all segments and ~99%+ over segments long enough for a stable
 embedding.
 
-A planned extension for short segments (not implemented) is designed in
+The episode voiceprint extension for short segments is described in
 `../docs/design/diarization-quality.md`.
 
 ## Request
@@ -91,6 +91,10 @@ Rules:
   re-cut segments at speaker changes (see "Re-cut at speaker changes"). `0`
   turns the re-cut off; otherwise it must be at least 0.1. The re-cut is also
   off while `mixed_window_duration` is 0.
+- `short_segment_margin=0.15` controls the second episode-voiceprint pass.
+  It must be a finite non-negative number (booleans/strings are rejected).
+  `0` disables this pass entirely; it does **not** mean acceptance without a
+  margin. Larger values require more separation between the two best profiles.
 - `num_speakers`/`min_speakers`/`max_speakers` may still be sent; they drive the
   anonymous pyannote run. Its labels are recorded per segment and feed turn
   corroboration, the speaker-track guard, the re-cut at unmapped labels and
@@ -218,8 +222,8 @@ the whole segment, so its main speaker remains visible for review.
 `uncertain_segment_count` includes the `mixed_segment_count` segments.
 
 A segment accepted by turn corroboration carries
-`"speaker_accept_reason": "turn_corroborated"`; the field is absent on every
-other segment. Its `speaker_confidence` is below `min_top_similarity` by
+`"speaker_accept_reason": "turn_corroborated"`; whole-segment acceptances
+have no accept reason. Its `speaker_confidence` is below `min_top_similarity` by
 construction. `confident_segment_count` and `confident_speaker_distribution`
 include the `turn_corroborated_segment_count` segments.
 
@@ -234,7 +238,7 @@ configured `resegment_hop`, or a wider step for very long audio (see "Cancellati
 and track work budget"); it is `null` when no track was built.
 
 `raw_diarization_labels` lists every label of the anonymous diarization run
-(the `raw_diarization_speaker` values) with its seconds of speech and the
+with its seconds of speech from the raw turns and the
 known speaker it is tied to by the vote described under "Turn corroboration",
 or `null` when it is tied to nobody. It is `{}` without diarization turns.
 Voxhelm only names speakers it has a reference for; a consumer that knows the
@@ -447,3 +451,96 @@ Overlapping turns use an endpoint sweep with a heap: latest start wins, with
 lexicographically greatest speaker name breaking equal-start ties. Adjacent turns
 of the same speaker merge. Resolution takes O(n log n) work; unmapped overlays
 look up the first possible overlap and visit only intersecting resolved intervals.
+
+## Episode voiceprints for short cues
+
+After all first-pass classification and any re-cut at unmapped labels, uncertain,
+non-mixed cues of 0.3–2.5 s receive a second opinion from the episode itself.
+At least five whole-segment accepted cues of 3 s or more are required per known
+speaker. Only cues with no accept reason and no mixed windows train a profile;
+the 150 highest-margin cues are averaged. No reference centroid is mixed into
+these episode centroids. A speaker with fewer than five eligible cues is omitted.
+Short cue audio is repeated to 1.5 s without silence or adjacent speech. A decision
+requires the configured margin between the best and second profile. The existing
+mixed veto is run against reference centroids before accepting a known winner.
+Existing confident names and all transcript boundaries remain unchanged.
+
+A known winner carries `speaker_accept_reason="episode_voiceprint"` and
+`speaker_uncertain=false`. `speaker_candidates`, `speaker_confidence` and
+`speaker_margin` still describe the first-pass reference embedding and may disagree
+with the accepted name. Version 1 stays unchanged; all additions are optional.
+
+The summary adds `short_segment_margin`, `episode_voiceprint_segment_count`
+(new known-name acceptances), `episode_voiceprint_relabelled_count` (actual raw
+label changes), and `episode_voiceprint_skipped`. A null skip means the pass ran;
+`disabled` means option 0, `no_raw_turns` means the anonymous diarization produced
+no usable turns (so an unreferenced guest could not be detected),
+`unresolved_label` means a substantial untied label has no episode profile, and
+`too_few_centroids` means fewer than two profiles.
+Counts are zero on skipped jobs. The raw label vote and raw speech seconds
+continue to use first-pass whole-segment acceptances and anonymous turns.
+
+API submission, stored job execution and claimed worker execution share the same
+numeric validation/default. Explicit thresholds are stored and included in the
+existing request fingerprint, so changing the threshold creates a distinct job
+for the same task_ref. Omitted and explicit 0.15 have the same execution behavior;
+their stored request shapes/fingerprints need not be equal (historical fingerprints
+are not rewritten). Local and remote summaries retain all four new fields,
+including null for a pass that ran. Disable with:
+
+```json
+{"short_segment_margin": 0}
+```
+
+For complete runnable request objects, use the request example above with this
+option added. Qualification commands and unmeasured real-data criteria live in
+`../docs/design/diarization-quality.md`; no rollout is implied by this extension.
+
+### Untied-label episode profiles and raw-label assignment
+
+For every label the first-pass vote ties to nobody, the pass averages up to 150
+uncertain, non-mixed single-label cues of at least 3 s, longest first. Five cues
+are required. "Single label" uses the existing corroboration overlap tolerance
+(other-label speech must total less than 0.3 s). Profiles include labels even
+when the caller supplies no guest name or reference. At least two profiles must
+exist overall, and every untied label with at least 30 s of raw speech needs a
+profile; otherwise the whole pass is skipped. Smaller unresolved labels do not
+block it. Known speakers with too few eligible long cues still have no profile.
+
+Known-speaker and untied-label profiles compete on every eligible short cue,
+regardless of its raw label. A host can therefore win on a guest's label, and a
+guest's label can win on a host's label. On a label winner, `speaker` remains null
+and `speaker_uncertain` remains true. No guest identity is invented by Voxhelm;
+the consumer applies its usual exactly-one-unreferenced-participant / exactly-one-
+untied-label rule, excluding mixed cues. Multiple untied labels stay distinct.
+
+**Contract change:** `raw_diarization_speaker` is now the assigned label, normally
+the longest-overlap label but possibly the episode voiceprint's winner. Only when
+it changes, `raw_diarization_overlap_speaker` records the original overlap label
+(including null when no turn overlapped). The raw summary seconds and label/name
+votes remain based on the unchanged anonymous turns and original whole-segment
+acceptances. No exclusive-turn selection is introduced by this change.
+
+A margin-qualified decision adds `speaker_episode_candidates`, a ranked list of
+objects containing either `speaker` or `label`, plus `similarity`. Reference
+candidates/confidence/margin retain their original meanings. The episode list is
+also available when the mixed veto blocks a known winner; that cue stays uncertain
+with `speaker_uncertain_reason="mixed_speakers"`. No-decision cues have no episode
+list. A label decision that retains the original label carries episode candidates
+but no overlap field and does not increment `episode_voiceprint_relabelled_count`.
+
+Example of a guest-label decision (the usual reference evidence is omitted here):
+
+```json
+{
+  "speaker": null,
+  "speaker_uncertain": true,
+  "raw_diarization_speaker": "Speaker 3",
+  "raw_diarization_overlap_speaker": "Speaker 1",
+  "speaker_episode_candidates": [
+    {"label":"Speaker 3", "similarity":0.88},
+    {"speaker":"Will", "similarity":0.52},
+    {"speaker":"Carlton", "similarity":0.41}
+  ]
+}
+```
