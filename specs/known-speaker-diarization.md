@@ -10,6 +10,9 @@ directly against contributor reference voiceprints, which the research measured
 at ~95% over all segments and ~99%+ over segments long enough for a stable
 embedding.
 
+A planned extension for short segments (not implemented) is designed in
+`../docs/design/diarization-quality.md`.
+
 ## Request
 
 `POST /v1/jobs` with `job_type=transcribe`. The existing anonymous diarization
