@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add repeatable offline speaker bundles and a six-episode baseline/variant runner.
+  Capture both annotations without changing production turn selection.
+
 - Add offline speaker naming scores by frame, line duration and acceptance rule,
   including the consumer guest rule and baseline line comparisons.
 

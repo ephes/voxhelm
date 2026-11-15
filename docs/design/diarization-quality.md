@@ -723,3 +723,71 @@ frames and 1/4 unnamed lines with `--guest Guest`; it is not a pilot measurement
 The pilot sidecars/truth are only documented on studio under
 `var/handoff/2026-10-19_python_podcast_parakeet_bulk/`. No host access is authorized
 for this worker, so episode 59's 96.3/1.5/2.2 and 101/1221 acceptance remain unverified.
+
+### Slice 2: repeatable bundles and baseline handoff
+
+No production audio, truth, models or pilot bundles are included in this clone.
+The historical files are on studio at the path above; there is no supported
+truth-download endpoint in the repository. No host access or live jobs were used.
+The following table deliberately records missing measurements, not the spike as B:
+
+| episode | B right/wrong/unnamed frames | B unnamed lines | new pass |
+| --- | --- | --- | --- |
+| pp59 | pending clerk | pending clerk | pending clerk |
+| pp77 | pending clerk | pending clerk | pending clerk |
+| pp78 | pending clerk | pending clerk | pending clerk |
+| pp80 | pending clerk | pending clerk | pending clerk |
+| dc209 | no truth | pending clerk | pending clerk |
+| dc210 | no truth | pending clerk | pending clerk |
+
+Clerk preparation (on the measurement machine, outside this sandbox): put the
+six local audio files and reference audio in `/tmp/voxhelm-speaker-naming/`.
+Create `manifests/{pp59,pp77,pp78,pp80,dc209,dc210}.json`, with paths relative
+to each manifest. Each entry of `references` is one source range (start/end in
+seconds) or a complete clip (omit both); repeat the id/name for multiple ranges:
+
+```json
+{
+  "audio": "../audio/pp59.m4a",
+  "language": "de",
+  "model": "auto",
+  "references": [
+    {"id":"jochen", "name":"Jochen", "audio":"../audio/reference.flac", "start":0, "end":30}
+  ],
+  "unreferenced_speakers": []
+}
+```
+
+Supply all real participant references, English for Django Chat, and its single
+unreferenced guest name. Convert the four historical 10 fps truth arrays into
+`truth/{pp59,pp77,pp78,pp80}.json` with the JSON schema above. The source arrays'
+serialization is not documented in this repository; do not infer names from IDs.
+The fixture in `tests/fixtures/speaker_naming/` demonstrates the score schema.
+
+Exact baseline command at the slice-2 commit (with the deployed model cache):
+
+```bash
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag baseline
+```
+
+`bundle MANIFEST --env-file ENV --out NEW_DIRECTORY` performs ASR through the
+production backend chain with sanitization and word timings and captures regular
+and exclusive anonymous turns once. It freezes float32 audio/reference windows,
+reference source ranges and the complete transcription in `bundle.json` + NPY
+files. Run on the same machine/model versions; numerical GPU determinism is
+verified, not assumed. `run BUNDLE --env-file ENV --config OPTIONS.json --out
+SIDECAR.json` replays only embeddings and postprocessing; the separate
+`.timing.json` holds runtime so sidecars can compare byte for byte.
+`suite` does two replays per episode and fails on unequal sidecars. It writes
+`results/TAG/EPISODE{,.score}.json`, including every changed line with text,
+frame and line metrics, and postprocess time. Variant tags compare with baseline;
+missing python-podcast truth fails instead of silently reporting counts only.
+Bundles and all real measurements stay outside the repository.
+
+Local mock qualification: a three-second one-speaker bundle roundtrips word
+boundaries, both annotations and source ranges; two replays have identical
+sidecars (1/1 confident Alice). This validates the harness, not the six real
+baselines or timing/quality targets. Slices 3 and 5 must still be measured by the
+clerk before review/merge qualification.
