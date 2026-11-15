@@ -112,8 +112,10 @@ names remaining uncertain cues of 0.3–2.5 s from confidently labeled long cues
 in the same episode, repeating short audio without silence. The request option
 `diarization.known_speaker.short_segment_margin` defaults to `0.15` (finite,
 non-negative); `0` disables this second pass. Already confident names and cue
-boundaries stay unchanged. See
-`specs/known-speaker-diarization.md`.
+boundaries stay unchanged. Guests without reference clips compete through
+profiles of their untied pyannote labels; consumers retain the existing guest
+naming rule. The sidecar preserves the original overlap label on relabelled cues.
+See `specs/known-speaker-diarization.md`.
 
 With `VOXHELM_KNOWN_SPEAKER_STT_BACKEND=parakeet`, those jobs (when their model
 is `auto`, `whisper-1` or `gpt-4o-mini-transcribe`) are transcribed by Parakeet

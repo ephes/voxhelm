@@ -1,6 +1,7 @@
 # Speaker names for short segments
 
-Status: design, 2026-11-15. Implementation and sandbox qualification are recorded below.
+Status: slices 1–5 implemented on a parked branch, 2026-11-15.
+Real-data qualification and external review are pending; slices 6–7 remain deferred.
 
 Trigger (maintainer, 2026-11-15): transcript quality is acceptable overall,
 but short interjections often carry no speaker or the wrong one. The wish is
@@ -833,3 +834,57 @@ of malformed/nonfinite/negative values, changed request fingerprints and null
 skip-reason preservation. README and the known-speaker contract document the
 pass and the disable semantics. The default 0.15 follows the owner's stated
 preference; no production runs or rollout were performed.
+
+### Slice 5: untied-label profiles and final qualification handoff
+
+Untied labels now compete through profiles from at least five uncertain,
+non-mixed single-label cues of at least 3 s (longest first, maximum 150).
+Substantial labels without profiles still skip the whole job. Known winners keep
+the reference-based mixed veto. Label winners stay uncertain for the consumer's
+guest rule; changed assignments preserve even a null original overlap label.
+Optional episode candidates use disjoint speaker/label identities. No first-pass
+reference evidence, raw-turn speech totals, cue starts or artifact boundaries are
+rewritten. Slice 6 (exclusive turn selection) and slice 7 (rollout) were not done.
+
+After producing B with the disabled configuration above, the clerk must run:
+
+```bash
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag with-guest
+```
+
+The suite now also writes `EPISODE.profiles.json`: for each untied label, the
+number of long guest-rule cues, how often its own profile is top, and that
+percentage (target >=95 % on dc209/dc210). These extra diagnostic embeddings run
+**after** the measured production postprocess and are excluded from its runtime.
+For an individual replay add `run ... --profile-checks` to produce the same file.
+`EPISODE.score.json` includes `guest_to_host_lines` with start/end/text for the
+listening check, `new_names_by_speaker`, and `short_guest_known_names.before/after`
+for the episode-80 safety criterion (at most two additional known names on clear
+short guest cues). It also retains all changed lines and their truth outcomes.
+No truth means frame/precision percentages are null, not zero or invented.
+
+Synthetic measurements: guest-profile sanity 5/5 (100 %); a guest interjection
+on a host label moves to the guest label with the original overlap retained;
+a host interjection on a guest label becomes a confident host. These are mock
+qualifications, not evidence for <=30 unnamed Django Chat lines, >=40 % relative
+unnamed reduction, +0.6 point right / <=+0.4 wrong, or production runtime. All real
+cells in B and all corresponding acceptance targets remain pending clerk data.
+
+The six-episode suite checks two identical sidecars per replay. It never submits
+a job, changes a published transcript, deploys, or selects exclusive turns.
+Measurement inputs and output stay under `/tmp/voxhelm-speaker-naming`, outside
+Git; archive that directory before temporary storage is cleared.
+
+### Local gates and review status
+
+Every slice ran `just check` (Ruff lint/format, mypy, full pytest), with no models
+or services needed. Slices 1–4: respectively 2106, 2108, 2128, 2146 passed;
+each had 6 model-dependent skips. Slice 5: 2160 passed, 6 skipped. The locked all-extras pip-audit found no known vulnerabilities.
+Logs are outside the clone in
+`~/workspaces/ws-work-planning/coordination/codex/logs/cx-voxhelm-diarization-a/`.
+Per the final worker instruction, no Claude command or sandbox cross-family
+review was run. The branch is parked for external review and real-data
+qualification; no merge, default-branch push, deployment or Actions run was
+requested or used. No work-app writes were performed.

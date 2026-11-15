@@ -238,7 +238,7 @@ configured `resegment_hop`, or a wider step for very long audio (see "Cancellati
 and track work budget"); it is `null` when no track was built.
 
 `raw_diarization_labels` lists every label of the anonymous diarization run
-(the `raw_diarization_speaker` values) with its seconds of speech and the
+with its seconds of speech from the raw turns and the
 known speaker it is tied to by the vote described under "Turn corroboration",
 or `null` when it is tied to nobody. It is `{}` without diarization turns.
 Voxhelm only names speakers it has a reference for; a consumer that knows the
@@ -493,3 +493,52 @@ including null for a pass that ran. Disable with:
 For complete runnable request objects, use the request example above with this
 option added. Qualification commands and unmeasured real-data criteria live in
 `../docs/design/diarization-quality.md`; no rollout is implied by this extension.
+
+### Untied-label episode profiles and raw-label assignment
+
+For every label the first-pass vote ties to nobody, the pass averages up to 150
+uncertain, non-mixed single-label cues of at least 3 s, longest first. Five cues
+are required. "Single label" uses the existing corroboration overlap tolerance
+(other-label speech must total less than 0.3 s). Profiles include labels even
+when the caller supplies no guest name or reference. At least two profiles must
+exist overall, and every untied label with at least 30 s of raw speech needs a
+profile; otherwise the whole pass is skipped. Smaller unresolved labels do not
+block it. Known speakers with too few eligible long cues still have no profile.
+
+Known-speaker and untied-label profiles compete on every eligible short cue,
+regardless of its raw label. A host can therefore win on a guest's label, and a
+guest's label can win on a host's label. On a label winner, `speaker` remains null
+and `speaker_uncertain` remains true. No guest identity is invented by Voxhelm;
+the consumer applies its usual exactly-one-unreferenced-participant / exactly-one-
+untied-label rule, excluding mixed cues. Multiple untied labels stay distinct.
+
+**Contract change:** `raw_diarization_speaker` is now the assigned label, normally
+the longest-overlap label but possibly the episode voiceprint's winner. Only when
+it changes, `raw_diarization_overlap_speaker` records the original overlap label
+(including null when no turn overlapped). The raw summary seconds and label/name
+votes remain based on the unchanged anonymous turns and original whole-segment
+acceptances. No exclusive-turn selection is introduced by this change.
+
+A margin-qualified decision adds `speaker_episode_candidates`, a ranked list of
+objects containing either `speaker` or `label`, plus `similarity`. Reference
+candidates/confidence/margin retain their original meanings. The episode list is
+also available when the mixed veto blocks a known winner; that cue stays uncertain
+with `speaker_uncertain_reason="mixed_speakers"`. No-decision cues have no episode
+list. A label decision that retains the original label carries episode candidates
+but no overlap field and does not increment `episode_voiceprint_relabelled_count`.
+
+Example of a guest-label decision (the usual reference evidence is omitted here):
+
+```json
+{
+  "speaker": null,
+  "speaker_uncertain": true,
+  "raw_diarization_speaker": "Speaker 3",
+  "raw_diarization_overlap_speaker": "Speaker 1",
+  "speaker_episode_candidates": [
+    {"label":"Speaker 3", "similarity":0.88},
+    {"speaker":"Will", "similarity":0.52},
+    {"speaker":"Carlton", "similarity":0.41}
+  ]
+}
+```

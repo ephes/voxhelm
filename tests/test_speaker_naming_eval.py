@@ -155,3 +155,62 @@ def test_capture_annotations_keeps_regular_choice(monkeypatch, tmp_path):
     assert annotations["regular"][0].end == 3
     assert annotations["exclusive"][0].end == 2
     assert backend.diarize(tmp_path / "audio.wav") == annotations["regular"]
+
+
+def test_suite_covers_required_episodes_and_checks_replay(tmp_path, monkeypatch):
+    from evals.speaker_naming_eval import run_suite, write_json
+
+    episodes = ("pp59", "pp77", "pp78", "pp80", "dc209", "dc210")
+    sidecar = read_json(FIXTURE / "sidecar.json")
+    (tmp_path / "manifests").mkdir()
+    (tmp_path / "truth").mkdir()
+    calls = []
+    for episode_id in episodes:
+        write_json(
+            tmp_path / "manifests" / f"{episode_id}.json", {"unreferenced_speakers": ["Guest"]}
+        )
+        directory = tmp_path / "bundles" / episode_id
+        directory.mkdir(parents=True)
+        write_json(directory / "bundle.json", {})
+        if episode_id.startswith("pp"):
+            write_json(tmp_path / "truth" / f"{episode_id}.json", read_json(FIXTURE / "truth.json"))
+
+    def run(bundle, config, **kwargs):
+        calls.append(bundle.name)
+        return sidecar, 1.25
+
+    monkeypatch.setattr("evals.speaker_naming_eval.run_bundle", run)
+    run_suite(tmp_path, {}, "baseline")
+    assert calls == [name for name in episodes for _ in range(2)]
+    assert len(list((tmp_path / "results/baseline").glob("*.score.json"))) == 6
+    run_suite(tmp_path, {}, "variant")
+    assert read_json(tmp_path / "results/variant/pp59.score.json")["changes"] == []
+    counter = 0
+
+    def nondeterministic(*args, **kwargs):
+        nonlocal counter
+        counter += 1
+        return {**sidecar, "counter": counter}, 1
+
+    monkeypatch.setattr("evals.speaker_naming_eval.run_bundle", nondeterministic)
+    with pytest.raises(ValueError, match="Nondeterministic replay: pp59"):
+        run_suite(tmp_path, {}, "unstable")
+
+
+def test_guest_host_changes_and_short_guest_known_names_are_reported():
+    sidecar = read_json(FIXTURE / "sidecar.json")
+    sidecar["summary"]["known_speakers"] = ["Alice", "Bob"]
+    variant = deepcopy(sidecar)
+    variant["segments"][1].update(speaker="Alice", speaker_uncertain=False)
+    report = score(variant, read_json(FIXTURE / "truth.json"), guests=["Guest"], baseline=sidecar)
+    assert report["short_guest_known_names"] == {"before": 0, "after": 1}
+    assert report["guest_to_host_lines"][0]["after"] == "Alice"
+    assert report["guest_to_host_lines"][0]["after_right"] is False
+
+
+def test_score_rejects_missing_baseline_lines():
+    baseline = read_json(FIXTURE / "sidecar.json")
+    variant = deepcopy(baseline)
+    variant["segments"].pop()
+    with pytest.raises(ValueError, match="Baseline segment boundaries differ"):
+        score(variant, baseline=baseline)

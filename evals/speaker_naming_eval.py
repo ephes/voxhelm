@@ -76,6 +76,8 @@ def score(
     reasons: dict[str, Counter[str]] = {}
     lines: Counter[str] = Counter()
     changes: list[dict[str, Any]] = []
+    short_guest_known_names = {"before": 0, "after": 0}
+    known = sidecar["summary"].get("known_speakers", [])
     before_names = published_names(baseline, list(guests)) if baseline else []
     before = (
         {
@@ -85,6 +87,14 @@ def score(
         if baseline
         else {}
     )
+    if baseline:
+        boundaries = [(s["start"], s["end"]) for s in sidecar["segments"]]
+        if (
+            len(before) != len(baseline["segments"])
+            or len(boundaries) != len(before)
+            or set(boundaries) != set(before)
+        ):
+            raise ValueError("Baseline segment boundaries differ; cannot compare lines")
     for segment, name in zip(sidecar["segments"], names, strict=True):
         start, end = float(segment["start"]), float(segment["end"])
         if not math.isfinite(start) or not math.isfinite(end) or end < start:
@@ -100,6 +110,10 @@ def score(
             top, count = golds.most_common(1)[0]
             if sum(golds.values()) >= 3 and count / sum(golds.values()) >= 0.8:
                 gold = top
+        if gold in guests and 0.3 <= end - start <= 2.5:
+            short_guest_known_names["after"] += name in known
+            if baseline:
+                short_guest_known_names["before"] += before.get((start, end)) in known
         status = outcome(name, gold) if gold else "unclear"
         bucket = buckets[duration_bucket(end - start)]
         reason = (
@@ -147,6 +161,14 @@ def score(
         "lines": line_metrics(lines),
         "duration_buckets": {key: line_metrics(value) for key, value in buckets.items()},
         "accept_reasons": {key: line_metrics(value) for key, value in reasons.items()},
+        "published_speaker_distribution": dict(Counter(name for name in names if name)),
+        "new_names_by_speaker": dict(
+            Counter(c["after"] for c in changes if c["before"] is None and c["after"] is not None)
+        ),
+        "short_guest_known_names": short_guest_known_names,
+        "guest_to_host_lines": [
+            c for c in changes if c["before"] in guests and c["after"] in known
+        ],
         "changes": changes,
         "changes_precision": {
             "clear_lines": len(clear_changes),
@@ -244,7 +266,12 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
     )
 
 
-def run_bundle(bundle_path: Path, config_data: dict[str, Any]) -> tuple[dict[str, Any], float]:
+def run_bundle(
+    bundle_path: Path,
+    config_data: dict[str, Any],
+    *,
+    diagnostics_path: Path | None = None,
+) -> tuple[dict[str, Any], float]:
     """Only embeddings/postprocessing run here; wall time stays outside the sidecar."""
     import numpy
 
@@ -282,20 +309,90 @@ def run_bundle(bundle_path: Path, config_data: dict[str, Any]) -> tuple[dict[str
         )
         for reference in bundle["references"]
     ]
+    backend = get_known_speaker_backend(config.embedding_model)
+    audio = numpy.load(bundle_path / bundle["audio"], allow_pickle=False)
+    raw_turns = [SpeakerTurn(**turn) for turn in bundle["turns"]["regular"]]
     started = monotonic()
     outcome = run_known_speaker_postprocess(
         TranscriptionResult(**result_data),
         references=references,
-        job_audio_samples=numpy.load(bundle_path / bundle["audio"], allow_pickle=False),
-        raw_turns=[SpeakerTurn(**turn) for turn in bundle["turns"]["regular"]],
+        job_audio_samples=audio,
+        raw_turns=raw_turns,
         config=config,
-        backend=get_known_speaker_backend(config.embedding_model),
+        backend=backend,
     )
     elapsed = monotonic() - started
     sidecar = build_speakers_artifact(outcome)
     for segment, transcript in zip(sidecar["segments"], outcome.result.segments, strict=True):
         segment["text"] = transcript.text
+    if diagnostics_path is not None:
+        write_json(
+            diagnostics_path,
+            profile_diagnostics(
+                outcome.segments,
+                audio,
+                raw_turns,
+                backend,
+                list(dict.fromkeys(reference.name for reference in references)),
+            ),
+        )
     return sidecar, elapsed
+
+
+def profile_diagnostics(
+    segments: Any, audio: Any, raw_turns: Any, backend: Any, known_speakers: list[str]
+) -> dict[str, Any]:
+    """Listening-check sanity metric for long guest-rule cues; outside job runtime."""
+    from transcriptions.diarization import SpeakerTurnIndex, normalize_speaker_turns
+    from transcriptions.known_speaker import (
+        SAMPLE_RATE,
+        build_episode_centroids,
+        classify_embedding,
+        raw_turn_overlaps,
+        single_raw_label,
+        slice_samples,
+        summarize_raw_labels,
+    )
+
+    labels = summarize_raw_labels(segments, raw_turns)
+    profiles = build_episode_centroids(
+        segments,
+        job_audio_samples=audio,
+        reference_centroids={name: [] for name in known_speakers},
+        raw_turns=raw_turns,
+        backend=backend,
+    )
+    checks = {
+        label: {"lines": 0, "top_label": 0}
+        for label, entry in labels.items()
+        if entry["speaker"] is None
+    }
+    turns = SpeakerTurnIndex(normalize_speaker_turns(raw_turns) if raw_turns else [])
+    for segment in segments:
+        label = segment.raw_diarization_speaker
+        if (
+            label not in checks
+            or not segment.speaker_uncertain
+            or segment.speaker_uncertain_reason == "mixed_speakers"
+            or segment.end - segment.start < 3
+            or single_raw_label(raw_turn_overlaps(segment.start, segment.end, turns)) != label
+        ):
+            continue
+        samples = slice_samples(audio, SAMPLE_RATE, segment.start, segment.end)
+        if not profiles or not len(samples):
+            continue
+        winner = classify_embedding(backend.embed(samples, SAMPLE_RATE), profiles).top_speaker
+        checks[label]["lines"] += 1
+        checks[label]["top_label"] += winner == f"label:{label}"
+    return {
+        label: {
+            **counts,
+            "top_label_pct": 100 * counts["top_label"] / counts["lines"]
+            if counts["lines"]
+            else None,
+        }
+        for label, counts in checks.items()
+    }
 
 
 def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
@@ -308,7 +405,9 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
         bundle = root / "bundles" / episode
         if not (bundle / "bundle.json").exists():
             create_bundle(manifest_path, bundle)
-        first, elapsed = run_bundle(bundle, config_data)
+        first, elapsed = run_bundle(
+            bundle, config_data, diagnostics_path=output / f"{episode}.profiles.json"
+        )
         second, _ = run_bundle(bundle, config_data)
         if first != second:
             raise ValueError(f"Nondeterministic replay: {episode}")
@@ -348,6 +447,7 @@ def main() -> None:
     running.add_argument("--config", type=Path, help="KnownSpeakerConfig JSON overrides")
     running.add_argument("--env-file", type=Path, required=True)
     running.add_argument("--out", type=Path, required=True)
+    running.add_argument("--profile-checks", action="store_true")
     suite = commands.add_parser("suite")
     suite.add_argument("root", type=Path)
     suite.add_argument("--env-file", type=Path, required=True)
@@ -365,7 +465,11 @@ def main() -> None:
             create_bundle(args.manifest, args.out)
         else:
             sidecar, elapsed = run_bundle(
-                args.bundle, read_json(args.config) if args.config else {}
+                args.bundle,
+                read_json(args.config) if args.config else {},
+                diagnostics_path=args.out.with_suffix(".profiles.json")
+                if args.profile_checks
+                else None,
             )
             write_json(args.out, sidecar)
             write_json(args.out.with_suffix(".timing.json"), {"postprocess_seconds": elapsed})

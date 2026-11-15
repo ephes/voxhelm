@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Include untied pyannote-label episode profiles for guests without reference
+  audio. Preserve original overlap labels on relabelled short cues and expose
+  ranked episode candidates; add offline guest/profile sanity diagnostics.
+
 - Expose `diarization.known_speaker.short_segment_margin` (default 0.15,
   0 disables) through shared API/worker validation and summary metadata.
 

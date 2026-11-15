@@ -184,7 +184,9 @@ class KnownSpeakerConfig:
     is the lower similarity floor for segments the anonymous diarization
     corroborates; ``0`` turns that off. ``resegment_hop`` is the step of the
     speaker track used to re-cut segments at speaker changes; ``0`` turns the
-    re-cut off, and it is also off while the veto is off.
+    re-cut off, and it is also off while the veto is off. ``short_segment_margin``
+    is the required separation between episode profiles on a second pass over
+    uncertain short cues; its default is 0.15 and ``0`` disables that pass.
     """
 
     embedding_model: str = DEFAULT_KNOWN_SPEAKER_EMBEDDING_MODEL
@@ -317,6 +319,10 @@ class KnownSpeakerSegment:
     speaker_uncertain_reason: str | None = None
     speaker_mixed_windows: list[MixedWindow] = field(default_factory=list)
     speaker_accept_reason: str | None = None
+    speaker_episode_candidates: list[dict[str, Any]] = field(default_factory=list)
+    raw_diarization_overlap_speaker: str | None = None
+    # Distinguishes a relabelled cue with no original turn from an unchanged cue.
+    episode_relabelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -1323,6 +1329,71 @@ def tile_to_min_duration(samples: Any, sample_rate: int = SAMPLE_RATE) -> Any:
     return numpy.tile(samples, math.ceil(minimum / len(samples)))[:minimum]
 
 
+def build_episode_centroids(
+    segments: Sequence[KnownSpeakerSegment],
+    *,
+    job_audio_samples: Any,
+    reference_centroids: Mapping[str, Sequence[float]],
+    raw_turns: list[SpeakerTurn],
+    backend: KnownSpeakerEmbeddingBackendProtocol,
+    cancel_event: Event | None = None,
+) -> dict[str, list[float]]:
+    """Bounded episode profiles, keyed by speaker:/label: to keep identities distinct."""
+    labels = summarize_raw_labels(segments, raw_turns)
+    turn_index = SpeakerTurnIndex(normalize_speaker_turns(raw_turns) if raw_turns else [])
+    selected_by_identity: dict[str, list[KnownSpeakerSegment]] = {}
+    for speaker in sorted(reference_centroids):
+        selected_by_identity[f"speaker:{speaker}"] = sorted(
+            (
+                segment
+                for segment in segments
+                if not segment.speaker_uncertain
+                and segment.speaker == speaker
+                and not segment.speaker_accept_reason
+                and not segment.speaker_mixed_windows
+                and segment.end - segment.start >= EPISODE_MIN_SECONDS
+            ),
+            key=lambda segment: (-segment.speaker_margin, segment.index),
+        )[:EPISODE_MAX_SEGMENTS]
+    for label, entry in sorted(labels.items()):
+        if entry["speaker"] is not None:
+            continue
+        selected_by_identity[f"label:{label}"] = sorted(
+            (
+                segment
+                for segment in segments
+                if segment.speaker_uncertain
+                and segment.speaker_uncertain_reason != MIXED_SPEAKERS_REASON
+                and not segment.speaker_mixed_windows
+                and segment.end - segment.start >= EPISODE_MIN_SECONDS
+                and single_raw_label(raw_turn_overlaps(segment.start, segment.end, turn_index))
+                == label
+            ),
+            key=lambda segment: (-(segment.end - segment.start), segment.index),
+        )[:EPISODE_MAX_SEGMENTS]
+    profiles = {}
+    for identity, selected in selected_by_identity.items():
+        check_known_speaker_cancellation(cancel_event)
+        if len(selected) < EPISODE_MIN_SEGMENTS:
+            continue
+        vectors = []
+        for segment in selected:
+            window = slice_samples(job_audio_samples, SAMPLE_RATE, segment.start, segment.end)
+            if len(window):
+                vectors.append(_embed(backend, window, cancel_event))
+        if len(vectors) >= EPISODE_MIN_SEGMENTS:
+            profiles[identity] = build_centroid(vectors)
+    return profiles
+
+
+def episode_candidates(classification: SegmentClassification) -> list[dict[str, Any]]:
+    candidates = []
+    for candidate in classification.candidates:
+        kind, name = candidate.speaker.split(":", 1)
+        candidates.append({kind: name, "similarity": round(candidate.similarity, 6)})
+    return candidates
+
+
 def apply_episode_voiceprints(
     segments: list[KnownSpeakerSegment],
     *,
@@ -1337,34 +1408,21 @@ def apply_episode_voiceprints(
     if config.short_segment_margin == 0:
         return segments, "disabled"
     labels = summarize_raw_labels(segments, raw_turns)
+    episode_centroids = build_episode_centroids(
+        segments,
+        job_audio_samples=job_audio_samples,
+        reference_centroids=reference_centroids,
+        raw_turns=raw_turns,
+        backend=backend,
+        cancel_event=cancel_event,
+    )
     if any(
-        entry["speaker"] is None and entry["seconds"] >= EPISODE_UNTIED_MIN_SECONDS
-        for entry in labels.values()
+        entry["speaker"] is None
+        and entry["seconds"] >= EPISODE_UNTIED_MIN_SECONDS
+        and f"label:{label}" not in episode_centroids
+        for label, entry in labels.items()
     ):
         return segments, "unresolved_label"
-    episode_centroids: dict[str, list[float]] = {}
-    for speaker in sorted(reference_centroids):
-        selected = sorted(
-            (
-                segment
-                for segment in segments
-                if not segment.speaker_uncertain
-                and segment.speaker == speaker
-                and not segment.speaker_accept_reason
-                and not segment.speaker_mixed_windows
-                and segment.end - segment.start >= EPISODE_MIN_SECONDS
-            ),
-            key=lambda segment: (-segment.speaker_margin, segment.index),
-        )[:EPISODE_MAX_SEGMENTS]
-        if len(selected) < EPISODE_MIN_SEGMENTS:
-            continue
-        vectors = []
-        for segment in selected:
-            window = slice_samples(job_audio_samples, SAMPLE_RATE, segment.start, segment.end)
-            if len(window):
-                vectors.append(_embed(backend, window, cancel_event))
-        if len(vectors) >= EPISODE_MIN_SEGMENTS:
-            episode_centroids[speaker] = build_centroid(vectors)
     if len(episode_centroids) < 2:
         return segments, "too_few_centroids"
     updated = []
@@ -1390,10 +1448,26 @@ def apply_episode_voiceprints(
         if classification.margin < config.short_segment_margin:
             updated.append(segment)
             continue
+        candidates = episode_candidates(classification)
+        kind, winner = classification.top_speaker.split(":", 1)
+        if kind == "label":
+            relabelled = winner != segment.raw_diarization_speaker
+            updated.append(
+                replace(
+                    segment,
+                    raw_diarization_speaker=winner,
+                    raw_diarization_overlap_speaker=segment.raw_diarization_speaker
+                    if relabelled
+                    else None,
+                    episode_relabelled=relabelled,
+                    speaker_episode_candidates=candidates,
+                )
+            )
+            continue
         mixed = find_mixed_windows(
             segment_start=segment.start,
             segment_end=segment.end,
-            segment_speaker=classification.top_speaker,
+            segment_speaker=winner,
             job_audio_samples=job_audio_samples,
             centroids=reference_centroids,
             config=config,
@@ -1406,15 +1480,17 @@ def apply_episode_voiceprints(
                     segment,
                     speaker_uncertain_reason=MIXED_SPEAKERS_REASON,
                     speaker_mixed_windows=mixed,
+                    speaker_episode_candidates=candidates,
                 )
             )
         else:
             updated.append(
                 replace(
                     segment,
-                    speaker=classification.top_speaker,
+                    speaker=winner,
                     speaker_uncertain=False,
                     speaker_accept_reason=EPISODE_VOICEPRINT_REASON,
+                    speaker_episode_candidates=candidates,
                 )
             )
     return updated, None
@@ -1464,7 +1540,9 @@ def summarize_known_speaker(
         "episode_voiceprint_segment_count": sum(
             segment.speaker_accept_reason == EPISODE_VOICEPRINT_REASON for segment in segments
         ),
-        "episode_voiceprint_relabelled_count": 0,
+        "episode_voiceprint_relabelled_count": sum(
+            segment.episode_relabelled for segment in segments
+        ),
         "episode_voiceprint_skipped": episode_voiceprint_skipped,
         "segment_count": total,
         "confident_segment_count": confident,
@@ -1556,9 +1634,13 @@ def _serialize_known_speaker_segment(segment: KnownSpeakerSegment) -> dict[str, 
             for window in segment.speaker_mixed_windows
         ]
     # Also additive: only present on segments accepted by turn corroboration or
-    # by the speaker track.
+    # by the speaker track or episode voiceprints.
     if segment.speaker_accept_reason:
         payload["speaker_accept_reason"] = segment.speaker_accept_reason
+    if segment.speaker_episode_candidates:
+        payload["speaker_episode_candidates"] = segment.speaker_episode_candidates
+    if segment.episode_relabelled:
+        payload["raw_diarization_overlap_speaker"] = segment.raw_diarization_overlap_speaker
     return payload
 
 
