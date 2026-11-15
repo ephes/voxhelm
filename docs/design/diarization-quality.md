@@ -1,6 +1,6 @@
 # Speaker names for short segments
 
-Status: design, 2026-11-15. Nothing in this document is implemented yet.
+Status: design, 2026-11-15. Implementation and sandbox qualification are recorded below.
 
 Trigger (maintainer, 2026-11-15): transcript quality is acceptable overall,
 but short interjections often carry no speaker or the wrong one. The wish is
@@ -707,3 +707,19 @@ In German, because they are addressed to the maintainer.
 3. Magst du nach dem Rollout etwa zehn Minuten lang eine Liste der
    geänderten Zeilen der Haki-Benita- und der Loes-Crama-Folge gegenhören?
    Ohne Hörtest stützt sich die Abnahme nur auf die python-podcast-Messung.
+
+## Sandbox implementation (2026-11-15)
+
+Slice 1 adds `uv run python -m evals.speaker_naming_eval score SIDECAR
+--truth TRUTH --guest NAME --out REPORT`. Omit `--guest` when every contributor
+has a reference; repeat it for multiple unreferenced contributors (the guest rule
+then stays off). `--baseline SIDECAR` lists changed names. Truth input is JSON
+`{"fps":10,"frames":["display name",null]}`: frame i samples i/fps, null excludes
+silence/overlap/unclear speech. Convert stored truth to these display names before
+scoring. Frames in overlapping transcript segments count once, first cue wins.
+Clear-line precision includes unnamed clear lines in its denominator.
+The committed synthetic fixture scores 15/30 right, 5/30 wrong, 10/30 unnamed
+frames and 1/4 unnamed lines with `--guest Guest`; it is not a pilot measurement.
+The pilot sidecars/truth are only documented on studio under
+`var/handoff/2026-10-19_python_podcast_parakeet_bulk/`. No host access is authorized
+for this worker, so episode 59's 96.3/1.5/2.2 and 101/1221 acceptance remain unverified.

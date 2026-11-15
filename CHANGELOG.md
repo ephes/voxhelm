@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add offline speaker naming scores by frame, line duration and acceptance rule,
+  including the consumer guest rule and baseline line comparisons.
+
 - Quantize VTT/DOTE/Podlove cues once to integer milliseconds and ensure a
   minimum 1 ms duration, preserving verbose raw timing. Retain original drift
   words on empty/fully filtered retries and record an explicit rejection.
