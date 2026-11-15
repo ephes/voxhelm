@@ -823,3 +823,13 @@ precision and <=15 % runtime increase remain unmeasured in this sandbox.
 Synthetic qualification: the uncertain 0.7 s B interjection on A's raw label is
 accepted as B; all ten already named long cues retain their names. Disabled
 execution performs no second-pass embeddings and adds zero summary counts.
+
+### Slice 4: request and worker contract
+
+The threshold uses the existing shared numeric option allowlist and config loader;
+no parallel parsing or fingerprint implementation was added. API/storage/claim
+and local/remote summary regressions cover 0, 0.15 and custom values, rejection
+of malformed/nonfinite/negative values, changed request fingerprints and null
+skip-reason preservation. README and the known-speaker contract document the
+pass and the disable semantics. The default 0.15 follows the owner's stated
+preference; no production runs or rollout were performed.

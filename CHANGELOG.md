@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Expose `diarization.known_speaker.short_segment_margin` (default 0.15,
+  0 disables) through shared API/worker validation and summary metadata.
+
 - Classify remaining 0.3–2.5 s uncertain cues against episode profiles from
   confident long segments; tile short audio and keep the mixed-speaker veto.
 
