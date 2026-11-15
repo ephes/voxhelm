@@ -34,7 +34,9 @@ def test_omitted_and_explicit_default_execute_identically():
     )
 
 
-@pytest.mark.parametrize("skip", [None, "disabled", "unresolved_label", "too_few_centroids"])
+@pytest.mark.parametrize(
+    "skip", [None, "disabled", "no_raw_turns", "unresolved_label", "too_few_centroids"]
+)
 def test_new_summary_fields_survive_remote_completion_allowlist(skip):
     summary = {
         "short_segment_margin": 0.15,

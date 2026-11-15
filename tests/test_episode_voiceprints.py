@@ -132,6 +132,16 @@ def test_requires_five_whole_segment_acceptances_per_known_speaker():
     assert updated == original
 
 
+@pytest.mark.parametrize("turns", [[], [SpeakerTurn(1.0, 1.0, "Speaker 1")]])
+def test_missing_anonymous_turns_skip_pass(turns):
+    original, _turns, audio = episode(guest=True)
+    backend = EpisodeBackend()
+    updated, skipped = apply(original, turns, audio, backend=backend)
+    assert skipped == "no_raw_turns"
+    assert updated == original
+    assert backend.windows == []
+
+
 def test_substantial_untied_label_without_profile_skips_pass():
     original, turns, audio = episode(guest=True)
     # One vetoed guest training cue leaves fewer than five usable samples.

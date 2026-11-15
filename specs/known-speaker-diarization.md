@@ -473,8 +473,10 @@ with the accepted name. Version 1 stays unchanged; all additions are optional.
 The summary adds `short_segment_margin`, `episode_voiceprint_segment_count`
 (new known-name acceptances), `episode_voiceprint_relabelled_count` (actual raw
 label changes), and `episode_voiceprint_skipped`. A null skip means the pass ran;
-`disabled` means option 0, `unresolved_label` means a substantial untied label
-has no episode profile, and `too_few_centroids` means fewer than two profiles.
+`disabled` means option 0, `no_raw_turns` means the anonymous diarization produced
+no usable turns (so an unreferenced guest could not be detected),
+`unresolved_label` means a substantial untied label has no episode profile, and
+`too_few_centroids` means fewer than two profiles.
 Counts are zero on skipped jobs. The raw label vote and raw speech seconds
 continue to use first-pass whole-segment acceptances and anonymous turns.
 

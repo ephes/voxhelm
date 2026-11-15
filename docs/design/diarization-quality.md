@@ -801,7 +801,8 @@ margins per speaker, and never mix reference and episode centroids. Candidate
 audio repeats to 1.5 s without silence; a known winner must pass the existing
 mixed veto against reference profiles. Named cues and segment boundaries remain
 unchanged. Summary counts describe accepted known names; relabelled count is
-zero in this slice. Skip reasons are `disabled`, `unresolved_label`,
+zero in this slice. Skip reasons are `disabled`, `no_raw_turns` (added at merge
+review: without anonymous turns a guest cannot be detected), `unresolved_label`,
 `too_few_centroids`, or null when the pass ran. These additive summary keys are
 allowlisted for remote completion so local gates stay coherent.
 

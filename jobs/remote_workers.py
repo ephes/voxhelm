@@ -1613,7 +1613,7 @@ def sanitize_known_speaker_summary(value: dict[str, Any], *, job: Job) -> dict[s
 
     if "episode_voiceprint_skipped" in value:
         skipped = value["episode_voiceprint_skipped"]
-        if skipped in (None, "disabled", "unresolved_label", "too_few_centroids"):
+        if skipped in (None, "disabled", "no_raw_turns", "unresolved_label", "too_few_centroids"):
             summary["episode_voiceprint_skipped"] = skipped
         else:
             summary.pop("episode_voiceprint_skipped", None)

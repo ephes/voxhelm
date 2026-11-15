@@ -1407,6 +1407,10 @@ def apply_episode_voiceprints(
     """Second opinion only on uncertain short cues, using this episode's voices."""
     if config.short_segment_margin == 0:
         return segments, "disabled"
+    # Without anonymous turns an unreferenced guest cannot be detected, so no
+    # guest profile could compete with the hosts for the guest's interjections.
+    if not raw_turns or not normalize_speaker_turns(raw_turns):
+        return segments, "no_raw_turns"
     labels = summarize_raw_labels(segments, raw_turns)
     episode_centroids = build_episode_centroids(
         segments,

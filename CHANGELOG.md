@@ -11,9 +11,14 @@
 
 - Classify remaining 0.3–2.5 s uncertain cues against episode profiles from
   confident long segments; tile short audio and keep the mixed-speaker veto.
+  The pass is skipped (`episode_voiceprint_skipped: "no_raw_turns"`) when the
+  anonymous diarization produced no usable turns, since an unreferenced guest
+  could not be detected then.
 
 - Add repeatable offline speaker bundles and a six-episode baseline/variant runner.
-  Capture both annotations without changing production turn selection.
+  Capture both annotations without changing production turn selection; bundles
+  pass the manifest's `num_speakers`/`min_speakers`/`max_speakers` to pyannote
+  like the production request.
 
 - Add offline speaker naming scores by frame, line duration and acceptance rule,
   including the consumer guest rule and baseline line comparisons.

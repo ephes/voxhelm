@@ -57,7 +57,11 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
     import numpy
 
     from evals.speaker_naming_eval import create_bundle, run_bundle, write_json
-    from transcriptions.diarization import PyannoteDiarizationBackend, SpeakerTurn
+    from transcriptions.diarization import (
+        DiarizationParams,
+        PyannoteDiarizationBackend,
+        SpeakerTurn,
+    )
     from transcriptions.known_speaker import KnownSpeakerConfig
     from transcriptions.service import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 
@@ -83,14 +87,16 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
 
     monkeypatch.setattr("transcriptions.service.transcribe_audio", transcribe)
     monkeypatch.setattr("transcriptions.known_speaker.decode_mono_16k", decode)
-    monkeypatch.setattr(
-        PyannoteDiarizationBackend,
-        "diarize_annotations",
-        lambda *args: {
+    diarize_params = []
+
+    def diarize_annotations(_backend, _path, params=None):
+        diarize_params.append(params)
+        return {
             "regular": [SpeakerTurn(0, 3, "raw")],
             "exclusive": [SpeakerTurn(0, 2.9, "raw")],
-        },
-    )
+        }
+
+    monkeypatch.setattr(PyannoteDiarizationBackend, "diarize_annotations", diarize_annotations)
 
     class Backend:
         embedding_version = "fixture"
@@ -107,11 +113,13 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
         {
             "audio": "episode.wav",
             "language": "en",
+            "num_speakers": 2,
             "references": [{"id": "alice", "name": "Alice", "start": 0, "end": 3}],
         },
     )
     bundle = tmp_path / "bundle"
     create_bundle(manifest, bundle)
+    assert diarize_params == [DiarizationParams(num_speakers=2)]
     frozen = read_json(bundle / "bundle.json")
     assert frozen["result"] == asdict(result) | {
         "segments": [asdict(result.segments[0]) | {"words": [asdict(result.segments[0].words[0])]}]
@@ -125,6 +133,33 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
     assert first == second
     assert first["segments"][0]["speaker"] == "Alice"
     assert first["segments"][0]["text"] == "Hello"
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"num_speakers": 0},
+        {"num_speakers": True},
+        {"min_speakers": "2"},
+        {"num_speakers": 2, "max_speakers": 3},
+        {"min_speakers": 4, "max_speakers": 3},
+    ],
+)
+def test_manifest_speaker_counts_are_validated(manifest):
+    from evals.speaker_naming_eval import manifest_diarization_params
+
+    with pytest.raises(ValueError):
+        manifest_diarization_params(manifest)
+
+
+def test_manifest_speaker_counts_default_to_unconstrained():
+    from evals.speaker_naming_eval import manifest_diarization_params
+    from transcriptions.diarization import DiarizationParams
+
+    assert manifest_diarization_params({}) == DiarizationParams()
+    assert manifest_diarization_params({"min_speakers": 2, "max_speakers": 4}) == (
+        DiarizationParams(min_speakers=2, max_speakers=4)
+    )
 
 
 def test_capture_annotations_keeps_regular_choice(monkeypatch, tmp_path):

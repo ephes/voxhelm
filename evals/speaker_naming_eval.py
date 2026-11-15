@@ -192,6 +192,29 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def manifest_diarization_params(manifest: dict[str, Any]) -> Any:
+    """Speaker counts as the production request passes them to pyannote."""
+    from transcriptions.diarization import DiarizationParams
+
+    counts = {key: manifest.get(key) for key in ("num_speakers", "min_speakers", "max_speakers")}
+    for key, value in counts.items():
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+        ):
+            raise ValueError(f"Manifest {key} must be a positive integer")
+    if counts["num_speakers"] is not None and (
+        counts["min_speakers"] is not None or counts["max_speakers"] is not None
+    ):
+        raise ValueError("Manifest num_speakers cannot be combined with min/max_speakers")
+    if (
+        counts["min_speakers"] is not None
+        and counts["max_speakers"] is not None
+        and counts["min_speakers"] > counts["max_speakers"]
+    ):
+        raise ValueError("Manifest min_speakers cannot exceed max_speakers")
+    return DiarizationParams(**counts)
+
+
 def create_bundle(manifest_path: Path, destination: Path) -> None:
     """Freeze production ASR, both anonymous annotations and decoded reference windows.
 
@@ -226,7 +249,7 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
         model_name=settings.VOXHELM_PYANNOTE_MODEL,
         auth_token=settings.VOXHELM_HUGGINGFACE_TOKEN,
         device_name=settings.VOXHELM_PYANNOTE_DEVICE,
-    ).diarize_annotations(audio)
+    ).diarize_annotations(audio, manifest_diarization_params(manifest))
     numpy.save(destination / "audio.npy", decode_mono_16k(audio), allow_pickle=False)
     references = []
     for index, reference in enumerate(manifest["references"]):
