@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Classify remaining 0.3–2.5 s uncertain cues against episode profiles from
+  confident long segments; tile short audio and keep the mixed-speaker veto.
+
 - Add repeatable offline speaker bundles and a six-episode baseline/variant runner.
   Capture both annotations without changing production turn selection.
 

@@ -791,3 +791,35 @@ boundaries, both annotations and source ranges; two replays have identical
 sidecars (1/1 confident Alice). This validates the harness, not the six real
 baselines or timing/quality targets. Slices 3 and 5 must still be measured by the
 clerk before review/merge qualification.
+
+### Slice 3: known episode profiles
+
+Known-speaker episode profiles and the short-cue pass are implemented. Profiles
+require five whole-segment acceptances of at least 3 s, take the 150 highest
+margins per speaker, and never mix reference and episode centroids. Candidate
+audio repeats to 1.5 s without silence; a known winner must pass the existing
+mixed veto against reference profiles. Named cues and segment boundaries remain
+unchanged. Summary counts describe accepted known names; relabelled count is
+zero in this slice. Skip reasons are `disabled`, `unresolved_label`,
+`too_few_centroids`, or null when the pass ran. These additive summary keys are
+allowlisted for remote completion so local gates stay coherent.
+
+From this commit onward the baseline command **must** disable the new pass:
+
+```bash
+printf '%s\n' '{"short_segment_margin":0}' > /tmp/voxhelm-speaker-naming/baseline-options.json
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --config /tmp/voxhelm-speaker-naming/baseline-options.json --tag baseline
+HF_HUB_OFFLINE=1 uv run --extra diarization python -m evals.speaker_naming_eval suite \
+  /tmp/voxhelm-speaker-naming --env-file "$HOME/Library/Application Support/voxhelm-remote-worker/worker.env" \
+  --tag known-episode
+```
+
+Reuse exactly the same bundles. The second command produces per-line changes,
+per-reason precision, frame metrics and runtime for comparison with B. Real
+35 % unnamed-line reduction, +0.5 point right / <=+0.4 wrong, >=82 % new-name
+precision and <=15 % runtime increase remain unmeasured in this sandbox.
+Synthetic qualification: the uncertain 0.7 s B interjection on A's raw label is
+accepted as B; all ten already named long cues retain their names. Disabled
+execution performs no second-pass embeddings and adds zero summary counts.

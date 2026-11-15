@@ -143,6 +143,7 @@ KNOWN_SPEAKER_SUMMARY_STRING_KEYS: set[str] = {
     "strategy",
     "embedding_model",
     "embedding_version",
+    "episode_voiceprint_skipped",
 }
 KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS: set[str] = {
     "segment_count",
@@ -152,6 +153,8 @@ KNOWN_SPEAKER_SUMMARY_INTEGER_KEYS: set[str] = {
     "turn_corroborated_segment_count",
     "resegmented_segment_count",
     "speaker_track_segment_count",
+    "episode_voiceprint_segment_count",
+    "episode_voiceprint_relabelled_count",
 }
 KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
     "min_segment_duration",
@@ -164,6 +167,7 @@ KNOWN_SPEAKER_SUMMARY_NUMBER_KEYS: set[str] = {
     "turn_corroborated_min_similarity",
     "resegment_hop",
     "speaker_track_hop",
+    "short_segment_margin",
     "margin_median",
 }
 SUMMARY_STRING_MAX_LENGTH = 256
@@ -1606,6 +1610,13 @@ def sanitize_known_speaker_summary(value: dict[str, Any], *, job: Job) -> dict[s
         sanitized_number = safe_worker_metadata_number(raw)
         if sanitized_number is not None:
             summary[key] = sanitized_number
+
+    if "episode_voiceprint_skipped" in value:
+        skipped = value["episode_voiceprint_skipped"]
+        if skipped in (None, "disabled", "unresolved_label", "too_few_centroids"):
+            summary["episode_voiceprint_skipped"] = skipped
+        else:
+            summary.pop("episode_voiceprint_skipped", None)
 
     raw_known_speakers = value.get("known_speakers")
     allowed_speaker_names = configured_known_speaker_names(job)
