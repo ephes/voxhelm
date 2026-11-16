@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Independently attempt every owned native-process cleanup stage, preserving
+  primary read/timeout/cancellation failures and refusing success after cleanup
+  errors; report secondary failures with fixed stage diagnostics.
+
 - Close owned download readers once when response/header construction fails;
   preserve read/cancellation errors if closure also fails, with bounded private
   cleanup diagnostics and no close/read race.

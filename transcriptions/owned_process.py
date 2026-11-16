@@ -11,6 +11,7 @@ import os
 import selectors
 import signal
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import monotonic, sleep
@@ -44,6 +45,27 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError, PermissionError:
         pass
+
+
+def _cleanup_process(process: subprocess.Popen[bytes], *, preserve_error: bool) -> None:
+    """Attempt every owned resource even when an earlier cleanup stage fails."""
+    failed = False
+    stages: list[tuple[str, Callable[[], object]]] = [
+        ("kill", lambda: _kill_process_group(process)),
+    ]
+    for name in ("stdout", "stderr"):
+        pipe = getattr(process, name)
+        if pipe is not None:
+            stages.append((name, pipe.close))
+    stages.append(("reap", process.wait))
+    for name, action in stages:
+        try:
+            action()
+        except BaseException:
+            failed = True
+            _LOGGER.warning("Process cleanup failed at %s; operator recovery may be needed.", name)
+    if failed and not preserve_error:
+        raise RuntimeError("Process cleanup failed; operator recovery may be needed.")
 
 
 def run_owned_process(
@@ -110,10 +132,7 @@ def run_owned_process(
                 raise RuntimeError(messages.deadline) from subprocess.TimeoutExpired(args, timeout)
             sleep(0.01)
     finally:
-        _kill_process_group(process)
-        if process.stderr is not None:
-            process.stderr.close()
-        process.wait()
+        _cleanup_process(process, preserve_error=sys.exception() is not None)
     if process.returncode != 0:
         _LOGGER.warning(
             "%s Exit status %s: %s",
@@ -198,24 +217,22 @@ def run_native_process(
                         break
                     sleep(max(0, wait))
     except BaseException:
-        # Cooperate first, then retire the entire group, including pipe-owning descendants.
+        # A secondary signal/probe error must not replace cancellation/read failure.
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError, PermissionError:
-            pass
-        grace = monotonic() + terminate_grace_seconds
-        while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
-            if monotonic() >= grace:
-                break
-            sleep(0.01)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError, PermissionError:
+                pass
+            grace = monotonic() + terminate_grace_seconds
+            while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                if monotonic() >= grace:
+                    break
+                sleep(0.01)
+        except BaseException:
+            _LOGGER.warning("Process cleanup failed at terminate; operator recovery may be needed.")
         raise
     finally:
-        _kill_process_group(process)
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-        process.wait()
+        _cleanup_process(process, preserve_error=sys.exception() is not None)
     check_cancelled()
     return subprocess.CompletedProcess(
         args,
