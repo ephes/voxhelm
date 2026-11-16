@@ -15,6 +15,25 @@
   `media_duration_seconds` and `covered_seconds` in `result_metadata`, which the
   control plane now accepts from workers.
 
+- Limit native-child reaping to a two-second cleanup budget and classify denied
+  termination explicitly, including groups whose leader already exited. Retain
+  writable scratch/partial exports when retirement is uncertain; never accept
+  their output as successful. Preserve the harmless macOS zombie-only case by
+  confirming group disappearance after reaping.
+
+- Independently attempt every owned native-process cleanup stage, preserving
+  primary read/timeout/cancellation failures and refusing success after cleanup
+  errors; report secondary failures with fixed stage diagnostics.
+
+- Close owned download readers once when response/header construction fails;
+  preserve read/cancellation errors if closure also fails, with bounded private
+  cleanup diagnostics and no close/read race.
+
+- Decide cleanup outcomes from each run's own failure instead of
+  `sys.exception()`, so a native run or reader close started while a caller is
+  handling an unrelated exception still fails closed on cleanup errors and does
+  not tag the caller's exception with the ownership note.
+
 - Include untied pyannote-label episode profiles for guests without reference
   audio. Preserve original overlap labels on relabelled short cues and expose
   ranked episode candidates; add offline guest/profile sanity diagnostics.

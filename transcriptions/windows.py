@@ -32,7 +32,6 @@ import logging
 import math
 import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
@@ -44,6 +43,7 @@ from django.conf import settings
 
 from lane_scheduler import InferenceCancelled
 from transcriptions.native_output import read_native_json
+from transcriptions.owned_process import process_output_directory
 from transcriptions.service import (
     BackendUnavailableError,
     resolve_whispercpp_binary,
@@ -188,7 +188,7 @@ def transcribe_window(
     clip_start = max(0.0, float(t) - window.pad_seconds)
     with (
         open_window_model(model_path) as model_handle,
-        tempfile.TemporaryDirectory(prefix="voxhelm-window-") as temp_dir,
+        process_output_directory(prefix="voxhelm-window-") as temp_dir,
     ):
         generation = model_generation(os.fstat(model_handle.fileno()))
         if model_sha256(model_path) != WINDOW_MODEL_SHA256:
