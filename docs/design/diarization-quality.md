@@ -1013,7 +1013,8 @@ not numbers. Manifests admit 128 references/guest names and references of at
 most 600 seconds. Malformed controls fail before embedding/model startup.
 
 Frozen members must be relative regular `.npy` files contained in the chosen
-bundle, with no `.`/`..`, backslashes, absolute paths or symlink components.
+bundle, with no `.`/`..`, backslashes, absolute paths or symlink components;
+hard-linked members are refused too.
 All opened NumPy 1.0/2.0 headers and exact file lengths are checked before sample
 allocation: nonempty native float32 mono vectors, at most two hours at 16 kHz
 for audio, five seconds per reference window, 1000 windows and 512 MiB aggregate
@@ -1058,6 +1059,14 @@ outside the bundle identity so variants reuse the same frozen inputs.
 Version-1 bundles remain readable by standalone `run`; suite reuse requires
 version 2 and an explicit rebuild in a new directory. Old reports are historical
 measurements, not proof of the new input/scoring contract.
+
+Version-2 bundle manifests also seal each admitted member's raw float32 samples
+with `sample_sha256`; substituted finite arrays fail before embedding. Completion
+manifests transitively bind those hashes through the frozen bundle JSON hash.
+Variants must match the baseline's exact bundle JSON and truth hashes before
+replay, as well as its embedding model. Backend/decode/sanitizer settings are
+recorded as a digest so credential-bearing endpoints are not copied into evidence.
+Include the actual decoder and backend executables among generation files.
 
 ### Complete suite result generations and tags
 

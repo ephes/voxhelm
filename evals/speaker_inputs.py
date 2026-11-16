@@ -5,6 +5,7 @@ Errors identify schema locations, never input values or transcript contents.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import stat
@@ -150,16 +151,33 @@ def validate_bundle(value: Any) -> list[tuple[str, int]]:
     validate_manifest(value.get("manifest"))
     result = value.get("result")
     require(isinstance(result, dict), "bundle.result")
+    require(
+        set(result) <= {"text", "language", "segments", "backend_name", "model_name", "coverage"},
+        "bundle.result.fields",
+    )
+    for key in ("backend_name", "model_name"):
+        require(isinstance(result.get(key, ""), str), "bundle.result." + key)
+    coverage = result.get("coverage")
+    if coverage is not None:
+        keys = {"media_duration_seconds", "covered_seconds", "largest_gap_start", "largest_gap_end"}
+        require(isinstance(coverage, dict) and set(coverage) == keys, "bundle.result.coverage")
+        for key in keys:
+            number(coverage[key], "bundle.result.coverage." + key)
     require(isinstance(result.get("text"), str), "bundle.result.text")
     text(result.get("language"), "bundle.result.language", nullable=True)
     words = 0
     for segment in items(result.get("segments"), "bundle.result.segments"):
         interval(segment, "bundle.result.segments[]")
+        require(
+            set(segment) <= {"id", "start", "end", "text", "speaker", "words"},
+            "bundle.result.segments[].fields",
+        )
         require(type(segment.get("id")) is int, "bundle.result.segments[].id")
         require(isinstance(segment.get("text"), str), "bundle.result.segments[].text")
         text(segment.get("speaker"), "bundle.result.segments[].speaker", nullable=True)
         for word in items(segment.get("words", []), "bundle.words"):
             interval(word, "bundle.words[]")
+            require(set(word) == {"start", "end", "text"}, "bundle.words[].fields")
             require(isinstance(word.get("text"), str), "bundle.words[].text")
             words += 1
             require(words <= MAX_ITEMS, "bundle.words")
@@ -168,6 +186,7 @@ def validate_bundle(value: Any) -> list[tuple[str, int]]:
     for kind in ("regular", "exclusive"):
         for turn in items(turns.get(kind), "bundle.turns." + kind):
             interval(turn, "bundle.turns[]")
+            require(set(turn) == {"start", "end", "speaker"}, "bundle.turns[].fields")
             text(turn.get("speaker"), "bundle.turns[].speaker")
     members = [(value.get("audio"), MAX_SECONDS * 16000)]
     for ref in items(value.get("references"), "bundle.references", 128):
@@ -198,11 +217,21 @@ def open_member(stack: ExitStack, root_fd: int, name: str) -> Any:
         stack.callback(os.close, directory)
     fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     handle = stack.enter_context(os.fdopen(fd, "rb"))
-    require(stat.S_ISREG(os.fstat(fd).st_mode), "bundle.member")
+    metadata = os.fstat(fd)
+    require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1, "bundle.member")
     return handle
 
 
-def load_arrays(root: Path, members: list[tuple[str, int]]) -> list[Any]:
+def sample_digests(members: list[tuple[str, int]], arrays: list[Any]) -> dict[str, str]:
+    return {
+        name: hashlib.sha256(array).hexdigest()
+        for (name, _), array in zip(members, arrays, strict=True)
+    }
+
+
+def load_arrays(
+    root: Path, members: list[tuple[str, int]], *, expected: dict[str, str] | None = None
+) -> list[Any]:
     """Inspect every header/aggregate before any allocation, then load the same FDs."""
     import numpy as np
 
@@ -253,6 +282,8 @@ def load_arrays(root: Path, members: list[tuple[str, int]]) -> list[Any]:
                         "bundle.array.samples",
                     )
                 arrays.append(array)
+            if expected is not None:
+                require(expected == sample_digests(members, arrays), "bundle.sample.identity")
             return arrays
     except (OSError, EOFError, TypeError, ValueError) as exc:
         raise ValueError("Invalid evaluation input at bundle.array") from exc

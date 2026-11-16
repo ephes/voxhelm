@@ -33,6 +33,7 @@ from evals.speaker_inputs import (
     load_arrays,
     read_json,
     require,
+    sample_digests,
     validate_bundle,
     validate_manifest,
     validate_sidecar,
@@ -181,7 +182,12 @@ def score(
 
     active: Counter[str | None] = Counter()
     for i, gold_frame in enumerate(frames):
-        active.update(events.get(i, {}))
+        updates = events.get(i)
+        if updates is not None:
+            active.update(updates)
+            for label in updates:
+                if active[label] == 0:
+                    del active[label]
         labels = {label for label, count in active.items() if count > 0}
         if gold_frame is not None:
             covered_count += bool(labels)
@@ -258,7 +264,11 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
         try:
             _capture_bundle(manifest_path, stage)
             frozen = read_json(stage / "bundle.json")
-            load_arrays(stage, validate_bundle(frozen))
+            members = validate_bundle(frozen)
+            arrays = load_arrays(stage, members)
+            frozen["sample_sha256"] = sample_digests(members, arrays)
+            write_json(stage / "bundle.json", frozen)
+            read_json(stage / "bundle.json")  # Admit the final sealed manifest byte size too.
             if os.path.lexists(destination):
                 raise ValueError("Bundle destination already exists; choose a new directory")
             stage.rename(destination)
@@ -352,6 +362,7 @@ def run_bundle(
     diagnostics_path: Path | None = None,
 ) -> tuple[dict[str, Any], float]:
     """Only embeddings/postprocessing run here; wall time stays outside the sidecar."""
+    from transcriptions.coverage import TranscriptCoverage
     from transcriptions.diarization import SpeakerTurn
     from transcriptions.known_speaker import (
         ReferenceAudio,
@@ -364,7 +375,10 @@ def run_bundle(
 
     bundle = read_json(bundle_path / "bundle.json")
     members = validate_bundle(bundle)
-    arrays = iter(load_arrays(bundle_path, members))
+    expected = bundle.get("sample_sha256")
+    if bundle["version"] == 2:
+        require(isinstance(expected, dict), "bundle.sample.identity")
+    arrays = iter(load_arrays(bundle_path, members, expected=expected))
     audio = next(arrays)
     config = known_speaker_config_from_mapping(config_data)
     result_data = dict(bundle["result"])
@@ -385,11 +399,14 @@ def run_bundle(
         )
         for reference in bundle["references"]
     ]
-    backend = get_known_speaker_backend(config.embedding_model)
+    if result_data.get("coverage") is not None:
+        result_data["coverage"] = TranscriptCoverage(**result_data["coverage"])
+    result = TranscriptionResult(**result_data)
     raw_turns = [SpeakerTurn(**turn) for turn in bundle["turns"]["regular"]]
+    backend = get_known_speaker_backend(config.embedding_model)
     started = monotonic()
     outcome = run_known_speaker_postprocess(
-        TranscriptionResult(**result_data),
+        result,
         references=references,
         job_audio_samples=audio,
         raw_turns=raw_turns,
@@ -548,6 +565,15 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
             if baseline is not None:
                 validate_sidecar(baseline, [], 10)
             bundle = root / "bundles" / episode
+            if tag != "baseline":
+                require(
+                    os.path.lexists(bundle)
+                    and baseline_complete["episodes"][episode]["bundle_json_sha256"]
+                    == file_digest(bundle / "bundle.json")
+                    and baseline_complete["episodes"][episode]["truth_sha256"]
+                    == json_digest(truth),
+                    "suite.baseline.input.identity",
+                )
             if os.path.lexists(bundle):
                 verify_bundle_identity(manifest_path, bundle)
             inputs.append((episode, manifest_path, manifest, truth, baseline, bundle))
@@ -555,6 +581,7 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
         try:
             identities = {}
             for episode, manifest_path, manifest, truth, baseline, bundle in inputs:
+                require(read_json(manifest_path) == manifest, "suite.manifest.identity")
                 if not os.path.lexists(bundle):
                     create_bundle(manifest_path, bundle)
                 identity = verify_bundle_identity(manifest_path, bundle)
@@ -601,6 +628,8 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
             finally:
                 pointer.unlink(missing_ok=True)
         except BaseException as exc:
+            if stage.exists():
+                (stage / "complete.json").unlink(missing_ok=True)
             exc.add_note(f"Owned suite recovery stage retained: {stage}")
             raise
 
@@ -667,4 +696,4 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, OSError) as exc:
-        raise SystemExit(str(exc)) from None
+        raise SystemExit("\n".join([str(exc), *getattr(exc, "__notes__", [])])) from None

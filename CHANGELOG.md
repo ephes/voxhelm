@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Seal frozen numeric samples and require exact baseline bundle/truth identities
+  for variants; admit constructor fields and decode/sanitizer generation settings.
+
 - Correct pp62 evaluation to report aligned correct/wrong/unnamed/uncovered speech
   seconds, accepted public names and interval-union coverage. Retain the historical
   whole-segment score under a legacy name; remove misleading DER/primary keys.

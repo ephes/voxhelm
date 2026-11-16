@@ -122,3 +122,34 @@ def test_huge_header_and_aggregate_refuse_before_load(tmp_path, monkeypatch):
         )
     with pytest.raises(ValueError):
         ev.run_bundle(path, {})
+
+
+@pytest.mark.parametrize("role", ["result", "turn"])
+def test_bundle_constructor_shapes_refuse_before_backend(tmp_path, monkeypatch, role):
+    path = tmp_path / "bundle"
+    value = tiny_bundle(path)
+    if role == "result":
+        value["result"]["unexpected"] = "invalid"
+    else:
+        value["turns"]["regular"] = [{"start": 0, "end": 1, "speaker": "a", "extra": 1}]
+    ev.write_json(path / "bundle.json", value)
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend",
+        lambda *a: pytest.fail("bad shape reached backend"),
+    )
+    with pytest.raises(ValueError):
+        ev.run_bundle(path, {})
+
+
+def test_bundle_hardlink_member_refuses_before_backend(tmp_path, monkeypatch):
+    path = tmp_path / "bundle"
+    tiny_bundle(path)
+    outside = tmp_path / "outside.npy"
+    (path / "audio.npy").rename(outside)
+    os.link(outside, path / "audio.npy")
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend",
+        lambda *a: pytest.fail("outside hardlink reached backend"),
+    )
+    with pytest.raises(ValueError):
+        ev.run_bundle(path, {})

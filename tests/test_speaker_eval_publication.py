@@ -195,3 +195,48 @@ def test_invalid_suite_tag_refuses_before_any_work(tmp_path, monkeypatch, tag):
     with pytest.raises(ValueError, match="tag"):
         ev.run_suite(tmp_path, {}, tag)
     assert not (tmp_path / "results").exists()
+
+
+def test_frozen_sample_replacement_refuses_before_embedding(capture, monkeypatch):
+    manifest, destination = capture
+    ev.create_bundle(manifest, destination)
+    np.save(destination / "audio.npy", np.zeros(16000, dtype=np.float32))
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend",
+        lambda *a: pytest.fail("changed frozen samples reached embedding"),
+    )
+    with pytest.raises(ValueError, match="bundle"):
+        ev.run_bundle(destination, {})
+
+
+@pytest.mark.parametrize("change", ["truth", "bundle"])
+def test_variant_reuses_exact_baseline_inputs_before_replay(suite_root, monkeypatch, change):
+    root, _ = suite_root
+    ev.run_suite(root, {}, "baseline")
+    if change == "truth":
+        ev.write_json(root / "truth/pp59.json", {"fps": 1, "frames": ["Bob"]})
+    else:
+        path = root / "bundles/pp59/bundle.json"
+        value = ev.read_json(path)
+        value["result"]["text"] = "changed frozen ASR"
+        ev.write_json(path, value)
+    monkeypatch.setattr(ev, "run_bundle", lambda *a, **k: pytest.fail("stale baseline replayed"))
+    with pytest.raises(ValueError, match="baseline"):
+        ev.run_suite(root, {}, "variant")
+
+
+def test_sealed_manifest_must_fit_control_limit_before_publication(capture, monkeypatch):
+    import json
+
+    from evals import speaker_inputs
+
+    manifest, destination = capture
+    ev.create_bundle(manifest, destination)
+    unsealed = ev.read_json(destination / "bundle.json")
+    del unsealed["sample_sha256"]
+    size = len((json.dumps(unsealed, indent=2, ensure_ascii=False) + "\n").encode())
+    monkeypatch.setattr(speaker_inputs, "JSON_MAX_BYTES", size)
+    other = destination.with_name("other-bundle")
+    with pytest.raises(ValueError, match="control"):
+        ev.create_bundle(manifest, other)
+    assert not other.exists()

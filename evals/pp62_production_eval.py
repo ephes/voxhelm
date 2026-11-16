@@ -80,6 +80,9 @@ def aligned_intervals(
                 bool(labels),
             )
         active.update(events[boundary])
+        for label in events[boundary]:
+            if active[label] == 0:
+                del active[label]
         previous = boundary
 
 

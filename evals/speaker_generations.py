@@ -25,6 +25,24 @@ GENERATION_SETTINGS = (
     "VOXHELM_WHISPERKIT_MODEL",
     "VOXHELM_PYANNOTE_MODEL",
     "VOXHELM_PYANNOTE_DEVICE",
+    "VOXHELM_FFMPEG_BIN",
+    "VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS",
+    "VOXHELM_MLX_CONDITION_ON_PREVIOUS_TEXT",
+    "VOXHELM_WHISPERCPP_BIN",
+    "VOXHELM_WHISPERCPP_PROCESSORS",
+    "VOXHELM_WHISPERCPP_MAX_CONTEXT",
+    "VOXHELM_WHISPERCPP_SUPPRESS_NST",
+    "VOXHELM_WHISPERCPP_MAX_GAP_SECONDS",
+    "VOXHELM_WHISPERKIT_ENABLED",
+    "VOXHELM_WHISPERKIT_BASE_URL",
+    "VOXHELM_WHISPERKIT_TIMEOUT_SECONDS",
+    "VOXHELM_PARAKEET_BIN",
+    "VOXHELM_PARAKEET_CHUNK_SECONDS",
+    "VOXHELM_PARAKEET_OVERLAP_SECONDS",
+    "VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS",
+    "VOXHELM_PARAKEET_TIMEOUT_SECONDS",
+    "VOXHELM_SANITIZE_TRANSCRIPT",
+    "VOXHELM_SANITIZE_REPEAT_THRESHOLD",
 )
 
 
@@ -90,7 +108,9 @@ def source_identity(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, 
         "manifest_sha256": json_digest(manifest),
         "sources": sources,
         "models": models,
-        "settings": {name: str(getattr(settings, name, "")) for name in GENERATION_SETTINGS},
+        "settings_sha256": json_digest(
+            {name: str(getattr(settings, name, "")) for name in GENERATION_SETTINGS}
+        ),
         "packages": packages,
         "code": {path.name: file_digest(path) for path in sorted(code.glob("*.py"))},
     }
@@ -112,7 +132,9 @@ def verify_bundle_identity(manifest_path: Path, bundle: Path) -> dict[str, Any]:
 def publisher(parent: Path, name: str):
     """One nonblocking publisher per name; OS releases ownership on process death."""
     parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(parent / f".{name}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = os.open(
+        parent / f".{name}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+    )
     try:
         require(stat.S_ISREG(os.fstat(fd).st_mode), "publisher.lock")
         try:
