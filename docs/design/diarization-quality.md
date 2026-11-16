@@ -1086,3 +1086,33 @@ generation is retained and the previous tag remains authoritative. Existing
 legacy real tag directories must be archived/moved explicitly before a rerun;
 the harness will not overwrite or mix them. Recreate legacy baselines with the
 new format before running variants. No production model campaign is implied.
+
+### pp62 production metric contract (version 2)
+
+`python -m evals.pp62_production_eval --gold GOLD --sidecar SIDECAR --out REPORT`
+now reports `speech_seconds.top1` and `.public`: exact correct, wrong, unnamed,
+uncovered and covered seconds, gold seconds, accuracy over all gold speech,
+union coverage and accuracy conditional on coverage. Gold tracks overlapping
+one another contribute separate speaker-seconds. Predictions use half-open
+intervals clipped to each gold interval; duplicate/same-label overlaps count
+once, conflicting labels (including candidate abstention) count as covered but
+unnamed. Touching endpoints do not overlap. Top1 uses the first candidate only;
+public uses the accepted `speaker` only when `speaker_uncertain` is exactly
+false and the accepted speaker is non-null. Null/uncertain public labels abstain
+and do not contribute public coverage or public segment counts.
+
+One correct predicted second over ten gold seconds yields one correct and nine
+uncovered seconds (10% accuracy/coverage). Two right and three wrong seconds over
+ten yield 20% accuracy and 50% coverage. All percentages with an empty denominator
+are null. Both compatibility coverage fields now use actual covered seconds;
+`public_confident_time_weighted_accuracy_pct` is correct / covered public seconds.
+
+`legacy_duration_weighted_segment_label` preserves the old full-gold-duration
+winner calculation under an accurate name (largest summed-overlap label, lexical
+tie break); duplicate vote weight remains part of that historical calculation.
+Its public view now uses accepted names. `PRIMARY_time_weighted_top1_accuracy_pct`
+and `time_weighted_DER_pct` are removed: the old calculation was neither aligned
+speech-second accuracy nor DER. No metric here measures silence false alarms,
+full overlap-aware DER or collars. Historical reports and qualification tables
+above retain their historical meaning and must be remeasured for comparison;
+do not relabel their numbers as version-2 evidence.

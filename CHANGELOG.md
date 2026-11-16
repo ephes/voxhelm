@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Correct pp62 evaluation to report aligned correct/wrong/unnamed/uncovered speech
+  seconds, accepted public names and interval-union coverage. Retain the historical
+  whole-segment score under a legacy name; remove misleading DER/primary keys.
+
 - Publish complete deterministic suite generations with exact member/input hashes
   and one same-tag publisher; retain previous results and failed recovery stages.
   Validate portable tags before work and keep variants on the baseline embedding model.

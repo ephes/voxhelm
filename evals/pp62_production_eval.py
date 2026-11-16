@@ -1,46 +1,24 @@
-"""Score the *deployed production* known-speaker result for pp_62
-("Bytes und Strings") against the multitrack-derived gold transcript.
+"""Offline pp62 production evaluation with explicit version-2 speech-second metrics.
 
-Inputs are both local files:
-
-* ``--gold``    REAPER multitrack gold transcript (``transcripts/pp_62.json``),
-                each segment carrying an authoritative per-track ``speaker``.
-* ``--sidecar`` the production ``Transcript.speakers`` sidecar downloaded from
-                the live site (the Voxhelm ``speakers`` artifact: per-segment
-                top candidate, full candidate list, confidence, margin and an
-                uncertainty flag).
-
-References used by the production run are source ranges into *pp_64* (a
-different episode), so the pp_62 gold audio is fully held out — no evaluation
-leakage.
-
-Metric definitions (documented for the goal):
-
-* Gold = authoritative multitrack speaker per gold segment.
-* A production segment is mapped to a gold speaker by maximum time overlap.
-* **Time-weighted top-1 accuracy (primary)** is gold-centric: for every gold
-  segment, the production *top-1 candidate* covering the largest share of that
-  segment is compared to the gold speaker, weighted by gold-segment duration.
-  This equals ``1 - DER`` (single-speaker approximation; no overlap/collar).
-  Numerator = gold speech-seconds whose production top-1 label matches gold;
-  denominator = total gold speech-seconds (every gold segment). Non-speech /
-  music (no gold segment) is excluded by construction. Gold speech with no
-  overlapping production segment cannot match, so it is counted as a miss
-  (lowers accuracy); the unmatched fraction is reported separately as
-  ``time_weighted_coverage_pct`` rather than removed from the denominator.
-* **Segment-count top-1 accuracy** is production-centric: each production
-  segment mapped to its max-overlap gold speaker, unweighted.
-* **Auto-applied (public) accuracy / coverage** counts only confident
-  (non-uncertain) production segments — the ones that become public labels.
+Gold intervals define the speech denominator (overlapping gold tracks contribute
+speaker-seconds independently). Predictions are clipped and unioned per gold
+interval. Conflicting simultaneous labels abstain; endpoints are half-open.
+Public metrics use only explicitly confident accepted names. Candidate-top1 is a
+separate view. No collar, silence false-alarm or full diarization DER is claimed.
+The historical whole-gold-segment winner score is retained under an explicit
+legacy name; old DER-labelled reports are not comparable to speech seconds.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from evals.speaker_inputs import interval, items, require, text
 
 
 def load_json(path: Path) -> Any:
@@ -71,31 +49,221 @@ def gold_speaker_for(
     return best_spk
 
 
+def prediction_label(segment: dict, *, confident_only: bool) -> str | None:
+    if confident_only:
+        return segment.get("speaker") if segment.get("speaker_uncertain") is False else None
+    candidates = segment.get("speaker_candidates") or []
+    return candidates[0]["speaker"] if candidates else None
+
+
+def aligned_intervals(
+    gs: float, ge: float, segs: list[dict], *, confident_only: bool
+) -> Iterator[tuple[float, str | None, bool]]:
+    """Yield duration, unanimous label and union coverage, independent of order."""
+    events: dict[float, Counter[str | None]] = {gs: Counter(), ge: Counter()}
+    for segment in segs:
+        label = prediction_label(segment, confident_only=confident_only)
+        if confident_only and label is None:
+            continue
+        start, end = max(gs, float(segment["start"])), min(ge, float(segment["end"]))
+        if start < end:
+            events.setdefault(start, Counter())[label] += 1
+            events.setdefault(end, Counter())[label] -= 1
+    active: Counter[str | None] = Counter()
+    previous = gs
+    for boundary in sorted(events):
+        if boundary > previous:
+            labels = {label for label, count in active.items() if count > 0}
+            yield (
+                boundary - previous,
+                next(iter(labels)) if len(labels) == 1 else None,
+                bool(labels),
+            )
+        active.update(events[boundary])
+        previous = boundary
+
+
 def production_label_for(
     gs: float, ge: float, segs: list[dict], *, confident_only: bool
 ) -> tuple[str | None, float]:
-    """Production top-1 label covering the most of a gold segment.
+    """Legacy largest summed label vote, with independent interval-union coverage.
 
-    Returns (label, covered_overlap_seconds). ``confident_only`` restricts to
-    non-uncertain (public) segments.
+    Duplicate predictions retain legacy vote weight only; ties use lexical label
+    order. New speech-second accuracy uses unanimous aligned intervals instead.
     """
     by_label: dict[str, float] = defaultdict(float)
-    covered = 0.0
-    for s in segs:
-        if confident_only and s.get("speaker_uncertain"):
+    for segment in segs:
+        label = prediction_label(segment, confident_only=confident_only)
+        if label is not None:
+            by_label[label] += overlap(gs, ge, float(segment["start"]), float(segment["end"]))
+    by_label = {label: seconds for label, seconds in by_label.items() if seconds > 0}
+    winner = min(by_label, key=lambda label: (-by_label[label], label)) if by_label else None
+    covered = sum(
+        duration
+        for duration, _, covered in aligned_intervals(gs, ge, segs, confident_only=confident_only)
+        if covered
+    )
+    return winner, covered
+
+
+def speech_seconds_for(
+    gs: float, ge: float, gold: str, segs: list[dict], *, confident_only: bool
+) -> dict[str, float]:
+    counts = dict.fromkeys(
+        (
+            "correct_seconds",
+            "wrong_seconds",
+            "unnamed_seconds",
+            "uncovered_seconds",
+            "covered_seconds",
+        ),
+        0.0,
+    )
+    for duration, label, covered in aligned_intervals(gs, ge, segs, confident_only=confident_only):
+        key = (
+            "uncovered_seconds"
+            if not covered
+            else "unnamed_seconds"
+            if label is None
+            else "correct_seconds"
+            if label == gold
+            else "wrong_seconds"
+        )
+        counts[key] += duration
+        if covered:
+            counts["covered_seconds"] += duration
+    return counts
+
+
+def pct(n: float, d: float) -> float | None:
+    return round(100.0 * n / d, 2) if d else None
+
+
+def evaluate(gold_raw: list[dict], side: dict[str, Any]) -> dict[str, Any]:
+    """Pure report arithmetic, shared by CLI and synthetic regression fixtures."""
+    for segment in items(gold_raw, "gold"):
+        interval(segment, "gold[]")
+        text(segment.get("speaker"), "gold[].speaker")
+    segs = items(side.get("segments", []), "production.segments")
+    for segment in segs:
+        interval(segment, "production.segments[]")
+        text(segment.get("speaker"), "production.speaker", nullable=True)
+        require(type(segment.get("speaker_uncertain")) is bool, "production.uncertain")
+        for candidate in items(
+            segment.get("speaker_candidates") or [], "production.candidates", 128
+        ):
+            require(isinstance(candidate, dict), "production.candidates[]")
+            text(candidate.get("speaker"), "production.candidates[].speaker")
+    gold = sorted(build_gold_index(gold_raw))
+    summary = side.get("summary", {})
+    counted = matched = counted_conf = matched_conf = 0
+    for segment in segs:
+        speaker = gold_speaker_for(float(segment["start"]), float(segment["end"]), gold)
+        if speaker is None:
             continue
-        ov = overlap(gs, ge, float(s["start"]), float(s["end"]))
-        if ov <= 0:
+        counted += 1
+        matched += prediction_label(segment, confident_only=False) == speaker
+        public = prediction_label(segment, confident_only=True)
+        if public is not None:
+            counted_conf += 1
+            matched_conf += public == speaker
+    total = legacy_top_correct = legacy_public_correct = legacy_public_total = 0.0
+    per_speaker: dict[str, Counter[str]] = defaultdict(Counter)
+    seconds: dict[str, Counter[str]] = {"top1": Counter(), "public": Counter()}
+    for gs, ge, speaker in gold:
+        duration = ge - gs
+        if duration <= 0:
             continue
-        cands = s.get("speaker_candidates") or []
-        top = cands[0]["speaker"] if cands else (s.get("speaker") or None)
-        if top is None:
-            continue
-        by_label[top] += ov
-        covered += ov
-    if not by_label:
-        return None, covered
-    return max(by_label.items(), key=lambda kv: kv[1])[0], covered
+        total += duration
+        label, _ = production_label_for(gs, ge, segs, confident_only=False)
+        legacy_top_correct += duration if label == speaker else 0
+        public, covered = production_label_for(gs, ge, segs, confident_only=True)
+        if covered:
+            legacy_public_total += duration
+            legacy_public_correct += duration if public == speaker else 0
+        for view, confident in (("top1", False), ("public", True)):
+            interval_counts = speech_seconds_for(gs, ge, speaker, segs, confident_only=confident)
+            seconds[view].update(interval_counts)
+            if not confident:
+                per_speaker[speaker].update(interval_counts)
+    views = {}
+    for view, counts in seconds.items():
+        views[view] = {
+            **{
+                key: counts[key]
+                for key in (
+                    "correct_seconds",
+                    "wrong_seconds",
+                    "unnamed_seconds",
+                    "uncovered_seconds",
+                    "covered_seconds",
+                )
+            },
+            "gold_seconds": total,
+            "accuracy_pct": pct(counts["correct_seconds"], total),
+            "coverage_pct": pct(counts["covered_seconds"], total),
+            "covered_accuracy_pct": pct(counts["correct_seconds"], counts["covered_seconds"]),
+        }
+    return {
+        "metric_version": 2,
+        "gold_segments": len(gold),
+        "production_segments": len(segs),
+        "production_summary": {
+            key: summary.get(key)
+            for key in (
+                "strategy",
+                "embedding_model",
+                "known_speakers",
+                "segment_count",
+                "confident_segment_count",
+                "uncertain_segment_count",
+                "confident_speaker_distribution",
+                "auto_accept_margin",
+                "min_segment_duration",
+                "min_top_similarity",
+            )
+        },
+        "speech_seconds": views,
+        "legacy_duration_weighted_segment_label": {
+            "top1_accuracy_pct": pct(legacy_top_correct, total),
+            "public_accuracy_pct": pct(legacy_public_correct, legacy_public_total),
+            "definition": "Whole gold duration credited to largest summed-overlap label; not DER",
+        },
+        "time_weighted_coverage_pct": views["top1"]["coverage_pct"],
+        "public_confident_time_weighted_coverage_pct": views["public"]["coverage_pct"],
+        "public_confident_time_weighted_accuracy_pct": views["public"]["covered_accuracy_pct"],
+        "segment_count_top1_accuracy_pct": pct(matched, counted),
+        "segment_count_evaluated": counted,
+        "public_confident_segment_accuracy_pct": pct(matched_conf, counted_conf),
+        "public_confident_segments_evaluated": counted_conf,
+        "per_speaker_time_weighted_accuracy_pct": {
+            speaker: pct(
+                counts["correct_seconds"],
+                sum(
+                    counts[key]
+                    for key in (
+                        "correct_seconds",
+                        "wrong_seconds",
+                        "unnamed_seconds",
+                        "uncovered_seconds",
+                    )
+                ),
+            )
+            for speaker, counts in sorted(per_speaker.items())
+        },
+        "per_speaker_gold_seconds": {
+            speaker: sum(
+                counts[key]
+                for key in (
+                    "correct_seconds",
+                    "wrong_seconds",
+                    "unnamed_seconds",
+                    "uncovered_seconds",
+                )
+            )
+            for speaker, counts in sorted(per_speaker.items())
+        },
+    }
 
 
 def main() -> None:
@@ -106,88 +274,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("/tmp/pp62_production_eval.json"))
     args = ap.parse_args()
 
-    gold_raw = load_json(args.gold)
-    gold = build_gold_index(gold_raw)
-    side = load_json(args.sidecar)
-    segs = side.get("segments", [])
-    summary = side.get("summary", {})
-
-    # ---- Segment-count top-1 (production-centric) ----
-    counted = matched = 0
-    counted_conf = matched_conf = 0
-    for s in segs:
-        gspk = gold_speaker_for(float(s["start"]), float(s["end"]), gold)
-        if gspk is None:
-            continue
-        cands = s.get("speaker_candidates") or []
-        top = cands[0]["speaker"] if cands else None
-        counted += 1
-        if top == gspk:
-            matched += 1
-        if not s.get("speaker_uncertain"):
-            counted_conf += 1
-            if (s.get("speaker") or None) == gspk:
-                matched_conf += 1
-
-    # ---- Time-weighted top-1 (gold-centric, primary = 1-DER) ----
-    tw_total = tw_correct = tw_covered = 0.0
-    per_spk_total: dict[str, float] = defaultdict(float)
-    per_spk_correct: dict[str, float] = defaultdict(float)
-    # confident/public time-weighted
-    cw_total = cw_correct = cw_covered = 0.0
-    for gs, ge, spk in gold:
-        dur = ge - gs
-        if dur <= 0:
-            continue
-        tw_total += dur
-        per_spk_total[spk] += dur
-        label, covered = production_label_for(gs, ge, segs, confident_only=False)
-        tw_covered += min(covered, dur)
-        if label == spk:
-            tw_correct += dur
-            per_spk_correct[spk] += dur
-        # public (confident) view
-        clabel, ccovered = production_label_for(gs, ge, segs, confident_only=True)
-        if ccovered > 0:
-            cw_total += dur
-            cw_covered += min(ccovered, dur)
-            if clabel == spk:
-                cw_correct += dur
-
-    def pct(n: float, d: float) -> float:
-        return round(100.0 * n / d, 2) if d else 0.0
-
-    report = {
-        "gold_segments": len(gold),
-        "production_segments": len(segs),
-        "production_summary": {
-            "strategy": summary.get("strategy"),
-            "embedding_model": summary.get("embedding_model"),
-            "known_speakers": summary.get("known_speakers"),
-            "segment_count": summary.get("segment_count"),
-            "confident_segment_count": summary.get("confident_segment_count"),
-            "uncertain_segment_count": summary.get("uncertain_segment_count"),
-            "confident_speaker_distribution": summary.get("confident_speaker_distribution"),
-            "auto_accept_margin": summary.get("auto_accept_margin"),
-            "min_segment_duration": summary.get("min_segment_duration"),
-            "min_top_similarity": summary.get("min_top_similarity"),
-        },
-        "PRIMARY_time_weighted_top1_accuracy_pct": pct(tw_correct, tw_total),
-        "time_weighted_DER_pct": pct(tw_total - tw_correct, tw_total),
-        "time_weighted_coverage_pct": pct(tw_covered, tw_total),
-        "segment_count_top1_accuracy_pct": pct(matched, counted),
-        "segment_count_evaluated": counted,
-        "public_confident_time_weighted_accuracy_pct": pct(cw_correct, cw_total),
-        "public_confident_time_weighted_coverage_pct": pct(cw_total, tw_total),
-        "public_confident_segment_accuracy_pct": pct(matched_conf, counted_conf),
-        "public_confident_segments_evaluated": counted_conf,
-        "per_speaker_time_weighted_accuracy_pct": {
-            spk: pct(per_spk_correct[spk], per_spk_total[spk]) for spk in sorted(per_spk_total)
-        },
-        "per_speaker_gold_seconds": {
-            spk: round(per_spk_total[spk], 1) for spk in sorted(per_spk_total)
-        },
-    }
+    report = evaluate(load_json(args.gold), load_json(args.sidecar))
     Path(args.out).write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
     print(f"\nwrote {args.out}")
