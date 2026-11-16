@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from collections.abc import AsyncGenerator
 from threading import Event
 
 import pytest
@@ -128,7 +129,12 @@ def test_cancelled_read_defers_failing_close_and_preserves_worker_error(caplog, 
 
     async def consume():
         iterator = aiter(stream)
-        task = asyncio.create_task(anext(iterator))
+        assert isinstance(iterator, AsyncGenerator)
+
+        async def next_chunk():
+            return await anext(iterator)
+
+        task = asyncio.create_task(next_chunk())
         try:
             assert await asyncio.to_thread(started.wait, 5)
             task.cancel()

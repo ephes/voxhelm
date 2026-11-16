@@ -38,7 +38,6 @@ import hashlib
 import json
 import math
 import shutil
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +47,7 @@ from typing import Any
 from django.conf import settings
 
 from transcriptions import windows as window_module
+from transcriptions.owned_process import process_output_directory
 from transcriptions.service import (
     BackendUnavailableError,
     run_cancellable_process,
@@ -292,7 +292,7 @@ def run_chapter_windows(
     check_marks_within(marks_ms, duration_ms)
     resolve_window_runtime()
     windows: list[dict[str, Any]] = []
-    with tempfile.TemporaryDirectory(prefix="voxhelm-chapter-windows-") as temp_dir:
+    with process_output_directory(prefix="voxhelm-chapter-windows-") as temp_dir:
         temp_root = Path(temp_dir)
         for mark in marks_ms:
             raise_if_cancelled(cancel_event)

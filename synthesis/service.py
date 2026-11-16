@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import stat
+import sys
 import tempfile
 import wave
 from collections import OrderedDict
@@ -17,7 +18,11 @@ from typing import Any, NamedTuple, Protocol
 from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
-from transcriptions.owned_process import OwnedProcessMessages, run_owned_process
+from transcriptions.owned_process import (
+    OwnedProcessMessages,
+    process_ownership_uncertain,
+    run_owned_process,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -553,8 +558,9 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
             ),
         )
     except BaseException:
-        # Failures and interruptions must not leak the reserved output.
-        cleanup_failed_synthesis(target_path)
+        # An unreaped converter may still be writing this reserved output.
+        if not process_ownership_uncertain(sys.exception()):
+            cleanup_failed_synthesis(target_path)
         raise
 
     return ExportedAudio(

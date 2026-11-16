@@ -20,9 +20,9 @@ The current slice also adds the first Voxhelm-owned operator UI:
 inference so AAC/M4A and other container/codec quirks do not leak into the backend.
 The normalizer runs ffmpeg at error log level in its own process group: a 2 KiB
 stderr prefix is logged on failure (never part of the error), all further output is
-drained and discarded so noisy but decodable media still succeeds, and on
-every exit path the whole group is killed, so the decode deadline also covers
-descendants holding its pipes.
+drained and discarded so noisy but decodable media still succeeds. Every exit
+attempts group retirement under the bounded cleanup policy below, so descendants
+holding pipes cannot extend the decode wait indefinitely.
 
 Native inference drains both output pipes and retains at most 64 KiB across both:
 stderr keeps its first 52 KiB and last 8 KiB (parsed evidence such as whisper-cli's
@@ -37,7 +37,18 @@ process group and its descendants. Cleanup attempts the group signal, each owned
 pipe closure and child reaping independently. A cleanup failure cannot replace
 an existing read, timeout or cancellation error; fixed stage warnings report
 secondary failures without exception text. Cleanup failure after an otherwise
-successful run fails the operation.
+successful run fails the operation. Child reaping has a separate two-second
+cleanup deadline after signaling (inference cancellation may first use its
+configured SIGTERM grace). A denied kill is considered harmless only after
+reaping and a signal-0 probe confirms the process group is gone; otherwise
+retirement is uncertain and the operation fails, even if the leader exited.
+Uncertain retirement adds a fixed exception note and retains writable scratch
+and partial exports, without accepting their output or retrying in that scratch.
+Operators must stop/verify the remaining process group before removing retained
+`voxhelm-whispercpp-*`, `voxhelm-parakeet-*`, `voxhelm-window-*`,
+`voxhelm-chapter-windows-*` scratch or partial speech exports from the system temp
+directory. Restart the affected worker after recovery; never delete these while
+a native child may still be writing.
 Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
 unique members, finite numbers). Invalid output fails before normalization or
@@ -1610,11 +1621,12 @@ MP3/OGG speech export runs ffmpeg in its own process group with a positive
 integer deadline configured by `VOXHELM_AUDIO_EXPORT_TIMEOUT_SECONDS` (default
 `300` seconds). The deadline covers the whole run, including descendants that
 keep its output pipes open. stdout is discarded and stderr is drained with a
-64 KiB ceiling; overflow fails the export. On every exit path the whole process
-group is killed and the converter reaped, so no descendant outlives the export.
-Timeout, startup, diagnostic-overflow and nonzero-exit failures remove the owned
-output and raise a synthesis error with a fixed message (HTTP 500 `server_error`
-on the sync API, failed batch job); at most 2 KiB of converter output is logged,
+64 KiB ceiling; overflow fails the export. Every exit attempts process-group
+retirement and bounded reaping. Uncertain retirement fails the export and retains
+its partial output for operator recovery under the native cleanup policy above.
+Timeout, startup, diagnostic-overflow and nonzero-exit failures with confirmed
+retirement remove the owned output and raise a synthesis error with a fixed
+message (HTTP 500 `server_error` on the sync API, failed batch job); at most 2 KiB of converter output is logged,
 never returned. Callers still own and clean up the source WAV. WAV passthrough
 does not invoke ffmpeg or use this deadline.
 

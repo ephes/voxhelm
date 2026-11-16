@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
@@ -28,7 +27,12 @@ from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local
 from transcriptions import formats as transcript_formats
 from transcriptions.json_input import decode_json_object
 from transcriptions.native_output import read_native_json
-from transcriptions.owned_process import OwnedProcessMessages, run_native_process, run_owned_process
+from transcriptions.owned_process import (
+    OwnedProcessMessages,
+    process_output_directory,
+    run_native_process,
+    run_owned_process,
+)
 from transcriptions.sanitizer import sanitize_result
 
 NATIVE_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
@@ -217,7 +221,7 @@ class WhisperCppBackend:
         executable = resolve_whispercpp_binary(self.binary_path)
         model_path = resolve_whispercpp_model_path(self.model_name)
 
-        with tempfile.TemporaryDirectory(prefix="voxhelm-whispercpp-") as temp_dir:
+        with process_output_directory(prefix="voxhelm-whispercpp-") as temp_dir:
             temp_root = Path(temp_dir)
             normalized_audio_path = temp_root / "input.wav"
             normalize_audio_to_wav_16k_mono(
@@ -370,7 +374,7 @@ class ParakeetBackend:
             binary_path=self.binary_path, model_dir=self.model_dir
         )
 
-        with tempfile.TemporaryDirectory(prefix="voxhelm-parakeet-") as temp_dir:
+        with process_output_directory(prefix="voxhelm-parakeet-") as temp_dir:
             temp_root = Path(temp_dir)
             normalized_audio_path = temp_root / "input.wav"
             normalize_audio_to_wav_16k_mono(

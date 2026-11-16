@@ -12,7 +12,9 @@ import selectors
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from time import monotonic, sleep
 
@@ -27,6 +29,35 @@ _STDOUT_TAIL_BYTES = 2 * 1024
 # After the direct child exits, pipes still held by descendants are drained this long.
 _EXITED_DRAIN_SECONDS = 2.0
 OWNED_PROCESS_DIAGNOSTIC_LOG_BYTES = 2048
+_REAP_TIMEOUT_SECONDS = 2.0
+PROCESS_OWNERSHIP_UNCERTAIN = "Native process ownership is uncertain; retain writable outputs."
+
+
+def process_ownership_uncertain(error: BaseException | None) -> bool:
+    """Recognize uncertain retirement even through a caller's exception wrapper."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if PROCESS_OWNERSHIP_UNCERTAIN in getattr(error, "__notes__", ()):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+@contextmanager
+def process_output_directory(*, prefix: str) -> Iterator[str]:
+    """Retain native writable scratch when retirement could not be confirmed."""
+    temporary = tempfile.TemporaryDirectory(prefix=prefix, delete=False)
+    with temporary as directory:
+        try:
+            yield directory
+        finally:
+            if process_ownership_uncertain(sys.exception()):
+                _LOGGER.warning("Native writable scratch retained; operator recovery is required.")
+            else:
+                # delete=False disables automatic cleanup, including on GC; explicit
+                # cleanup is safe only after the process has retired.
+                temporary.cleanup()
 
 
 @dataclass(frozen=True)
@@ -43,13 +74,18 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     # EPERM: on macOS a group whose only member is the unreaped leader refuses signals.
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError, PermissionError:
+    except ProcessLookupError:
         pass
 
 
 def _cleanup_process(process: subprocess.Popen[bytes], *, preserve_error: bool) -> None:
     """Attempt every owned resource even when an earlier cleanup stage fails."""
+    primary = sys.exception()
     failed = False
+    uncertain = False
+    kill_denied = False
+    reaped = False
+    cleanup_deadline = monotonic() + _REAP_TIMEOUT_SECONDS
     stages: list[tuple[str, Callable[[], object]]] = [
         ("kill", lambda: _kill_process_group(process)),
     ]
@@ -57,15 +93,45 @@ def _cleanup_process(process: subprocess.Popen[bytes], *, preserve_error: bool) 
         pipe = getattr(process, name)
         if pipe is not None:
             stages.append((name, pipe.close))
-    stages.append(("reap", process.wait))
+    stages.append(("reap", lambda: process.wait(timeout=max(0.0, cleanup_deadline - monotonic()))))
     for name, action in stages:
         try:
             action()
+            if name == "reap":
+                reaped = True
+        except PermissionError:
+            if name == "kill":
+                # macOS refuses a signal to a zombie-only group. Defer judgment
+                # until after reaping, then probe existence without signaling.
+                kill_denied = True
+                continue
+            failed = True
+            uncertain |= name == "reap"
+            _LOGGER.warning("Process cleanup failed at %s; operator recovery may be needed.", name)
         except BaseException:
             failed = True
+            uncertain |= name in {"kill", "reap"}
             _LOGGER.warning("Process cleanup failed at %s; operator recovery may be needed.", name)
+    if kill_denied:
+        group_gone = False
+        if reaped:
+            try:
+                # Signal 0 is safe even if the former group ID has been reused.
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                group_gone = True
+            except BaseException:
+                pass
+        if not group_gone:
+            failed = uncertain = True
+            _LOGGER.warning("Process cleanup failed at kill; operator recovery may be needed.")
+    if uncertain and primary is not None:
+        primary.add_note(PROCESS_OWNERSHIP_UNCERTAIN)
     if failed and not preserve_error:
-        raise RuntimeError("Process cleanup failed; operator recovery may be needed.")
+        error = RuntimeError("Process cleanup failed; operator recovery may be needed.")
+        if uncertain:
+            error.add_note(PROCESS_OWNERSHIP_UNCERTAIN)
+        raise error
 
 
 def run_owned_process(
@@ -82,8 +148,9 @@ def run_owned_process(
     ``fail_on_diagnostic_overflow=False`` (tools fed arbitrary user media), further
     output is drained and discarded so a noisy but successful run still succeeds.
     The deadline covers the whole run, including pipes held
-    open by descendants; on any exit path the whole process group is killed and the
-    child reaped. Failures raise ``RuntimeError`` with the given fixed messages
+    open by descendants; every exit attempts group retirement and bounded child
+    reaping. Unconfirmed retirement marks the failure for writable-output recovery.
+    Failures raise ``RuntimeError`` with the given fixed messages
     (timeouts chain ``subprocess.TimeoutExpired``); a bounded prefix of the tool's
     output is logged for operators.
     """

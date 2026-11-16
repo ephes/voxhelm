@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Limit native-child reaping to a two-second cleanup budget and classify denied
+  termination explicitly, including groups whose leader already exited. Retain
+  writable scratch/partial exports when retirement is uncertain; never accept
+  their output as successful. Preserve the harmless macOS zombie-only case by
+  confirming group disappearance after reaping.
+
 - Independently attempt every owned native-process cleanup stage, preserving
   primary read/timeout/cancellation failures and refusing success after cleanup
   errors; report secondary failures with fixed stage diagnostics.
