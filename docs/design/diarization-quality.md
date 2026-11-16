@@ -1008,7 +1008,8 @@ Controls use strict UTF-8 object JSON: regular no-follow files, at most 64 MiB,
 128 levels, unique members and finite numbers. Errors identify schema locations,
 not control contents. Truth admits at most 1,000,000 null/nonempty-name frames,
 FPS in (0, 1000], and at most 5,000,000 cue/frame visits. Cues/turns/words admit
-50,000 entries, timestamps in [0, 7200] seconds with end >= start; booleans are
+50,000 entries, timestamps in [0, 86400] seconds with end >= start (an
+arithmetic bound, so long production episodes stay scorable); booleans are
 not numbers. Manifests admit 128 references/guest names and references of at
 most 600 seconds. Malformed controls fail before embedding/model startup.
 
@@ -1017,7 +1018,9 @@ bundle, with no `.`/`..`, backslashes, absolute paths or symlink components;
 hard-linked members are refused too.
 All opened NumPy 1.0/2.0 headers and exact file lengths are checked before sample
 allocation: nonempty native float32 mono vectors, at most two hours at 16 kHz
-for audio, five seconds per reference window, 1000 windows and 512 MiB aggregate
+for audio (the production Pyannote decode bound, `PYANNOTE_MAX_FRAMES`; capture
+decodes the job audio with that allowance first and refuses longer sources
+before ASR or diarization start), five seconds per reference window, 1000 windows and 512 MiB aggregate
 sample bytes (including repeated members). Samples must be finite before any
 embedding. After header admission fixed-count raw float32 reads avoid reparsing
 a potentially modified header; pickle is never enabled or used. Opened files
@@ -1035,8 +1038,14 @@ publisher is running, archive or remove that exact stage and retry. Lock files
 remain; advisory ownership is released automatically, so do not unlink locks.
 
 Version 2 binds the canonical manifest, actual source/reference bytes, explicit
-local model artifacts, backend settings, installed package versions and local
-transcription code. In addition to the example above manifests must now include:
+local model artifacts, backend settings, installed package versions and the
+capture-path transcription modules (`CAPTURE_CODE` in
+`evals/speaker_generations.py`: ASR service, diarization, decode, sanitizer and
+their imports). `transcriptions/known_speaker.py` is deliberately excluded: it is
+the postprocessing under comparison, and its decode/window output is frozen as
+sample-sealed arrays, so old/branch code replays of the same bundles keep working.
+When capture code gains a new `transcriptions` import, add it to `CAPTURE_CODE`
+(a regression test checks the import closure). In addition to the example above manifests must now include:
 
 ```json
 "generation_files": {

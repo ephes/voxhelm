@@ -20,7 +20,10 @@ JSON_MAX_BYTES = 64 * 1024 * 1024
 MAX_FRAMES = 1_000_000
 MAX_ITEMS = 50_000
 MAX_FRAME_VISITS = 5_000_000
-MAX_SECONDS = 7200
+# Timestamps bound arithmetic only; allocation has its own frame/array limits.
+MAX_SECONDS = 24 * 60 * 60
+# Frozen job audio matches production Pyannote decoding (PYANNOTE_MAX_FRAMES).
+MAX_AUDIO_SECONDS = 2 * 60 * 60
 MAX_WINDOWS = 1000
 MAX_ARRAY_BYTES = 512 * 1024 * 1024
 
@@ -188,7 +191,7 @@ def validate_bundle(value: Any) -> list[tuple[str, int]]:
             interval(turn, "bundle.turns[]")
             require(set(turn) == {"start", "end", "speaker"}, "bundle.turns[].fields")
             text(turn.get("speaker"), "bundle.turns[].speaker")
-    members = [(value.get("audio"), MAX_SECONDS * 16000)]
+    members = [(value.get("audio"), MAX_AUDIO_SECONDS * 16000)]
     for ref in items(value.get("references"), "bundle.references", 128):
         require(isinstance(ref, dict), "bundle.references[]")
         text(ref.get("id"), "bundle.references[].id")

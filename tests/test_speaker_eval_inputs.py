@@ -153,3 +153,15 @@ def test_bundle_hardlink_member_refuses_before_backend(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError):
         ev.run_bundle(path, {})
+
+
+def test_long_episode_timestamps_are_admitted():
+    from evals import speaker_inputs as inputs
+
+    three_hours = 3 * 60 * 60
+    assert inputs.interval({"start": three_hours - 1, "end": three_hours}, "x") == (
+        three_hours - 1,
+        three_hours,
+    )
+    with pytest.raises(ValueError):
+        inputs.interval({"start": 0, "end": inputs.MAX_SECONDS + 1}, "x")

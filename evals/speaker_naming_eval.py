@@ -30,6 +30,7 @@ from evals.speaker_generations import (
     verify_bundle_identity,
 )
 from evals.speaker_inputs import (
+    MAX_AUDIO_SECONDS,
     load_arrays,
     read_json,
     require,
@@ -299,6 +300,8 @@ def _capture_bundle(manifest_path: Path, destination: Path) -> None:
     validate_manifest(manifest)
     audio = (manifest_path.parent / manifest["audio"]).resolve()
     identity = source_identity(manifest_path, manifest)
+    # Refuse audio beyond the production diarization bound before ASR/diarization run.
+    job_samples = decode_mono_16k(audio, max_frames=MAX_AUDIO_SECONDS * SAMPLE_RATE)
     result = transcribe_audio(
         audio,
         TranscribeParams(
@@ -313,7 +316,7 @@ def _capture_bundle(manifest_path: Path, destination: Path) -> None:
         auth_token=settings.VOXHELM_HUGGINGFACE_TOKEN,
         device_name=settings.VOXHELM_PYANNOTE_DEVICE,
     ).diarize_annotations(audio, manifest_diarization_params(manifest))
-    numpy.save(destination / "audio.npy", decode_mono_16k(audio), allow_pickle=False)
+    numpy.save(destination / "audio.npy", job_samples, allow_pickle=False)
     references = []
     for index, reference in enumerate(manifest["references"]):
         path = (manifest_path.parent / reference.get("audio", manifest["audio"])).resolve()

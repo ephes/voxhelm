@@ -51,7 +51,7 @@ def test_bundle_failure_never_publishes_and_retry_succeeds(capture, monkeypatch,
         elif stage == "reference":
 
             def decode(path, **kwargs):
-                if kwargs:
+                if "start" in kwargs:
                     fail()
                 return np.ones(16000, dtype=np.float32)
 
@@ -99,6 +99,58 @@ def test_unchanged_identity_and_postprocess_variants_reuse(capture):
     ev.verify_bundle_identity(manifest, destination)
     # Postprocess configuration is intentionally absent from the frozen identity.
     assert ev.read_json(destination / "bundle.json")["version"] == 2
+
+
+def test_long_job_audio_refuses_before_asr(capture, monkeypatch):
+    from evals.speaker_inputs import MAX_AUDIO_SECONDS
+    from transcriptions.diarization import PYANNOTE_MAX_FRAMES
+    from transcriptions.known_speaker import KnownSpeakerError
+
+    manifest, destination = capture
+    assert MAX_AUDIO_SECONDS * 16000 == PYANNOTE_MAX_FRAMES
+    allowances = []
+
+    def decode(path, **kwargs):
+        allowances.append(kwargs.get("max_frames"))
+        raise KnownSpeakerError("over the decoded frame limit")
+
+    monkeypatch.setattr("transcriptions.known_speaker.decode_mono_16k", decode)
+    monkeypatch.setattr(
+        "transcriptions.service.transcribe_audio", lambda *a, **k: pytest.fail("ASR started")
+    )
+    with pytest.raises(KnownSpeakerError):
+        ev.create_bundle(manifest, destination)
+    assert allowances == [PYANNOTE_MAX_FRAMES]
+    assert not destination.exists()
+
+
+def test_capture_code_identity_excludes_postprocess_and_covers_capture_imports(capture):
+    import ast
+    from pathlib import Path
+
+    from evals.speaker_generations import CAPTURE_CODE
+
+    manifest, destination = capture
+    ev.create_bundle(manifest, destination)
+    identity = ev.read_json(destination / "bundle.json")["identity"]
+    # Old/new postprocessing code must be able to replay the same frozen bundles.
+    assert "known_speaker.py" not in identity["code"]
+    assert set(identity["code"]) == set(CAPTURE_CODE)
+    package = Path(ev.__file__).resolve().parent.parent / "transcriptions"
+    pending, seen = ["service.py", "diarization.py"], set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for node in ast.walk(ast.parse((package / name).read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+                if node.level == 1:
+                    module = "transcriptions." + module
+                if module.startswith("transcriptions."):
+                    pending.append(module.removeprefix("transcriptions.") + ".py")
+    assert seen <= set(CAPTURE_CODE)
 
 
 @pytest.fixture

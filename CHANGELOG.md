@@ -16,6 +16,9 @@
 - Publish frozen speaker bundles only after complete staged capture. Version 2
   records source/model generation hashes and refuses stale suite reuse; local
   model artifact lists are now required for capture. Standalone v1 replay remains.
+  The code identity covers only capture-path modules, so postprocessing edits
+  still replay the same bundles; job audio over the two-hour Pyannote bound is
+  refused before ASR, and control timestamps admit episodes up to 24 hours.
 
 - Admit bounded strict offline controls and contained frozen NumPy members;
   validate array geometry, aggregate work and finite samples before embeddings.

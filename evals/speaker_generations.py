@@ -45,6 +45,22 @@ GENERATION_SETTINGS = (
     "VOXHELM_SANITIZE_REPEAT_THRESHOLD",
 )
 
+# Capture-path modules (ASR, diarization, decode, sanitizer). known_speaker.py is
+# the postprocessing under comparison: its reference/job decode outputs are frozen
+# as sample-sealed arrays, so editing it must still replay the same bundles.
+CAPTURE_CODE = (
+    "audio_decode.py",
+    "coverage.py",
+    "diarization.py",
+    "errors.py",
+    "formats.py",
+    "json_input.py",
+    "native_output.py",
+    "owned_process.py",
+    "sanitizer.py",
+    "service.py",
+)
+
 
 def json_digest(value: Any) -> str:
     return hashlib.sha256(
@@ -112,7 +128,7 @@ def source_identity(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, 
             {name: str(getattr(settings, name, "")) for name in GENERATION_SETTINGS}
         ),
         "packages": packages,
-        "code": {path.name: file_digest(path) for path in sorted(code.glob("*.py"))},
+        "code": {name: file_digest(code / name) for name in CAPTURE_CODE},
     }
 
 
