@@ -225,7 +225,11 @@ receive fingerprints. The entire upgrade rolls back on failure.
 ASGI artifact downloads read at most 64 KiB at a time. On disconnect, cancellation
 propagates immediately, while the active worker retains the reader until its read
 settles and closes it exactly once. Response closure also handles streams that
-never started. S3 reads use the transport's 60-second socket read timeout; local
+never started. Reader ownership starts before response/header construction: a
+construction failure closes it once and preserves the original error. During
+streaming, a read error or cancellation remains authoritative if closing also
+fails; a fixed warning reports the secondary cleanup failure without reader
+diagnostics. A close failure at otherwise normal EOF still fails the stream. S3 reads use the transport's 60-second socket read timeout; local
 regular-file reads settle through the filesystem. Closing never races a read.
 ASGI responses keep the `Content-Length` (and any `Content-Disposition`) that a
 filesystem download would send under WSGI.

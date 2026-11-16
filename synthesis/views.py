@@ -65,11 +65,7 @@ def audio_speech(request: HttpRequest) -> HttpResponseBase:
         # Stream from an open handle. The files are unlinked in ``finally`` below; on
         # POSIX the open handle keeps the data readable until the response closes it.
         handle = exported.path.open("rb")
-        try:
-            response = reader_response(request, handle, content_type=exported.content_type)
-        except BaseException:
-            handle.close()
-            raise
+        response = reader_response(request, handle, content_type=exported.content_type)
         response["Content-Disposition"] = f'inline; filename="speech.{exported.format_name}"'
         # Expose the effective backend/voice/language (post-routing) for debugging
         # and Slice 6's metadata assertions.

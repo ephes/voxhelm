@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Close owned download readers once when response/header construction fails;
+  preserve read/cancellation errors if closure also fails, with bounded private
+  cleanup diagnostics and no close/read race.
+
 - Include untied pyannote-label episode profiles for guests without reference
   audio. Preserve original overlap labels on relabelled short cues and expose
   ranked episode candidates; add offline guest/profile sanity diagnostics.
