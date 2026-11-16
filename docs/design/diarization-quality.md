@@ -1022,3 +1022,39 @@ embedding. After header admission fixed-count raw float32 reads avoid reparsing
 a potentially modified header; pickle is never enabled or used. Opened files
 must remain unchanged during reads. These are offline capacity limits, not
 changes to production inference admission.
+
+### Frozen generation publication and identity (bundle version 2)
+
+`bundle` captures into a uniquely owned sibling `.NAME.stage-*` directory, checks
+the complete manifest/arrays, then renames it into an absent destination under
+a nonblocking `.NAME.lock` publisher lock. Existing destinations are refused,
+including incomplete legacy directories. A failed attempt removes only its own
+stage and can be retried. Process death may retain a stage; after verifying no
+publisher is running, archive or remove that exact stage and retry. Lock files
+remain; advisory ownership is released automatically, so do not unlink locks.
+
+Version 2 binds the canonical manifest, actual source/reference bytes, explicit
+local model artifacts, backend settings, installed package versions and local
+transcription code. In addition to the example above manifests must now include:
+
+```json
+"generation_files": {
+  "asr": ["../models/asr-weights.bin", "../bin/whisper-cli"],
+  "diarization": ["../models/segmentation.bin", "../models/embedding.bin"]
+}
+```
+
+Each role requires 1–128 regular files (relative to the manifest, or absolute).
+Enumerate the actual weights, configuration/tokenizers and native executable
+used by that role, including all possible configured fallback backends. These
+are explicit local generation inputs: the harness does not download or guess
+model cache identities. Use an immutable local snapshot and offline inference;
+a mutable remote-only model cannot qualify as exact frozen suite evidence.
+Hashes are checked before and after capture. The suite recomputes identities
+before replay and refuses a changed manifest, source, reference, model, code or
+backend configuration. Choose a new bundle/root on mismatch; historical evidence
+is never overwritten automatically. Postprocessing options are deliberately
+outside the bundle identity so variants reuse the same frozen inputs.
+Version-1 bundles remain readable by standalone `run`; suite reuse requires
+version 2 and an explicit rebuild in a new directory. Old reports are historical
+measurements, not proof of the new input/scoring contract.

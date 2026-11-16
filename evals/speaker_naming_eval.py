@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import shutil
+import tempfile
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -17,6 +20,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from evals.speaker_generations import publisher, source_identity, verify_bundle_identity
 from evals.speaker_inputs import (
     load_arrays,
     read_json,
@@ -237,6 +241,24 @@ def manifest_diarization_params(manifest: dict[str, Any]) -> Any:
 
 
 def create_bundle(manifest_path: Path, destination: Path) -> None:
+    """Publish a complete absent bundle; remove only this attempt's failed stage."""
+    with publisher(destination.parent, destination.name):
+        if os.path.lexists(destination):
+            raise ValueError("Bundle destination already exists; choose a new directory")
+        stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.stage-", dir=destination.parent))
+        try:
+            _capture_bundle(manifest_path, stage)
+            frozen = read_json(stage / "bundle.json")
+            load_arrays(stage, validate_bundle(frozen))
+            if os.path.lexists(destination):
+                raise ValueError("Bundle destination already exists; choose a new directory")
+            stage.rename(destination)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+
+
+def _capture_bundle(manifest_path: Path, destination: Path) -> None:
     """Freeze production ASR, both anonymous annotations and decoded reference windows.
 
     Manifest paths are relative to the manifest, not the current directory.
@@ -257,7 +279,7 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
     manifest = read_json(manifest_path)
     validate_manifest(manifest)
     audio = (manifest_path.parent / manifest["audio"]).resolve()
-    destination.mkdir(parents=True, exist_ok=False)
+    identity = source_identity(manifest_path, manifest)
     result = transcribe_audio(
         audio,
         TranscribeParams(
@@ -296,10 +318,13 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
                 "source": reference,
             }
         )
+    if source_identity(manifest_path, read_json(manifest_path)) != identity:
+        raise ValueError("Evaluation source identity changed during capture")
     write_json(
         destination / "bundle.json",
         {
-            "version": 1,
+            "version": 2,
+            "identity": identity,
             "audio": "audio.npy",
             "result": asdict(result),
             "turns": {
@@ -446,6 +471,7 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
         bundle = root / "bundles" / episode
         if not (bundle / "bundle.json").exists():
             create_bundle(manifest_path, bundle)
+        verify_bundle_identity(manifest_path, bundle)
         first, elapsed = run_bundle(
             bundle, config_data, diagnostics_path=output / f"{episode}.profiles.json"
         )

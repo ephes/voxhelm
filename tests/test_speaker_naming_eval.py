@@ -107,6 +107,8 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
     monkeypatch.setattr(
         "transcriptions.known_speaker.get_known_speaker_backend", lambda _: Backend()
     )
+    (tmp_path / "episode.wav").write_bytes(b"synthetic")
+    (tmp_path / "model.bin").write_bytes(b"synthetic model")
     manifest = tmp_path / "manifest.json"
     write_json(
         manifest,
@@ -114,6 +116,7 @@ def test_bundle_uses_production_paths_and_replays_deterministically(tmp_path, mo
             "audio": "episode.wav",
             "language": "en",
             "num_speakers": 2,
+            "generation_files": {"asr": ["model.bin"], "diarization": ["model.bin"]},
             "references": [{"id": "alice", "name": "Alice", "start": 0, "end": 3}],
         },
     )
@@ -214,6 +217,7 @@ def test_suite_covers_required_episodes_and_checks_replay(tmp_path, monkeypatch)
         calls.append(bundle.name)
         return sidecar, 1.25
 
+    monkeypatch.setattr("evals.speaker_naming_eval.verify_bundle_identity", lambda *a: {})
     monkeypatch.setattr("evals.speaker_naming_eval.run_bundle", run)
     run_suite(tmp_path, {}, "baseline")
     assert calls == [name for name in episodes for _ in range(2)]

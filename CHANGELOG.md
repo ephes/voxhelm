@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Publish frozen speaker bundles only after complete staged capture. Version 2
+  records source/model generation hashes and refuses stale suite reuse; local
+  model artifact lists are now required for capture. Standalone v1 replay remains.
+
 - Admit bounded strict offline controls and contained frozen NumPy members;
   validate array geometry, aggregate work and finite samples before embeddings.
 
