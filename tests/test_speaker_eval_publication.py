@@ -144,12 +144,21 @@ def test_capture_code_identity_excludes_postprocess_and_covers_capture_imports(c
             continue
         seen.add(name)
         for node in ast.walk(ast.parse((package / name).read_text())):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                module = node.module
-                if node.level == 1:
-                    module = "transcriptions." + module
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = "transcriptions" if node.level == 1 else node.module or ""
+                if node.level == 1 and node.module:
+                    base = "transcriptions." + node.module
+                if base == "transcriptions":
+                    # `from transcriptions import formats` imports submodules by name.
+                    modules = [f"transcriptions.{alias.name}" for alias in node.names]
+                else:
+                    modules = [base]
+            for module in modules:
                 if module.startswith("transcriptions."):
-                    pending.append(module.removeprefix("transcriptions.") + ".py")
+                    pending.append(module.removeprefix("transcriptions.").split(".")[0] + ".py")
     assert seen <= set(CAPTURE_CODE)
 
 
