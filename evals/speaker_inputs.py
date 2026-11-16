@@ -29,6 +29,17 @@ def require(ok: bool, location: str) -> None:
         raise ValueError(f"Invalid evaluation input at {location}")
 
 
+def file_generation(metadata: os.stat_result) -> tuple[int, ...]:
+    # Reads may update access time; only identity, geometry and mutations matter.
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         return decode_json_object(read_native_json(path, limit=JSON_MAX_BYTES))
@@ -231,7 +242,8 @@ def load_arrays(root: Path, members: list[tuple[str, int]]) -> list[Any]:
                 # and never invoke pickle or allocate from untrusted shape metadata.
                 raw = handle.read(size + 1)
                 require(
-                    len(raw) == size and os.fstat(handle.fileno()) == metadata,
+                    len(raw) == size
+                    and file_generation(os.fstat(handle.fileno())) == file_generation(metadata),
                     "bundle.array.changed",
                 )
                 array = np.frombuffer(raw, dtype=np.float32)

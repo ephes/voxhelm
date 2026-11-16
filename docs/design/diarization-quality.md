@@ -1058,3 +1058,31 @@ outside the bundle identity so variants reuse the same frozen inputs.
 Version-1 bundles remain readable by standalone `run`; suite reuse requires
 version 2 and an explicit rebuild in a new directory. Old reports are historical
 measurements, not proof of the new input/scoring contract.
+
+### Complete suite result generations and tags
+
+Tags are one portable ASCII component, 1–64 characters, starting with an
+alphanumeric character and containing only alphanumerics, `_`, `-`, `.`. Trailing
+dots and reserved device names are refused before creating directories or
+starting a backend. `baseline` is the explicit comparison baseline.
+
+The suite validates and snapshots all manifests, truth, baseline sidecars and
+configuration before replay. Reused bundles must match source identities;
+variants retain the baseline embedding model. It stages all six episodes,
+profiles and scores under `results/.TAG.stage-*`, then writes `complete.json`
+with exact generated-member hashes, full effective configuration and per-episode
+bundle/truth/baseline identities. Only deterministic, complete generations may
+publish. A nonblocking `.TAG.lock` excludes cooperating same-tag publishers.
+
+A completed generation lives in `results/.TAG.generation-*`; `results/TAG` is an
+atomically replaced relative symlink. Readers that need a multi-file snapshot
+must resolve the tag once and read that generation. Previous generations are
+retained, including when a later episode or write fails. Failed stages are also
+retained, carry no completion authority, and are named in the exception note.
+After verifying no publisher is running, archive/remove only the intended stage
+or obsolete generation. Never delete the persistent lock file. A process may
+die after completion but before pointer publication; its unreferenced complete
+generation is retained and the previous tag remains authoritative. Existing
+legacy real tag directories must be archived/moved explicitly before a rerun;
+the harness will not overwrite or mix them. Recreate legacy baselines with the
+new format before running variants. No production model campaign is implied.

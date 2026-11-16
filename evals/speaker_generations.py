@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from evals.speaker_inputs import items, read_json, require, text, validate_manifest
+from evals.speaker_inputs import file_generation, items, read_json, require, text, validate_manifest
 
 GENERATION_SETTINGS = (
     "VOXHELM_STT_BACKEND",
@@ -46,7 +46,11 @@ def file_digest(path: Path) -> str:
             digest = hashlib.sha256()
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
-            require(os.fstat(fd) == before and path.stat() == before, "identity.changed")
+            require(
+                file_generation(os.fstat(fd)) == file_generation(before)
+                and file_generation(path.stat()) == file_generation(before),
+                "identity.changed",
+            )
             return digest.hexdigest()
     except OSError as exc:
         raise ValueError("Invalid evaluation identity file") from exc

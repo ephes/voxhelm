@@ -205,7 +205,8 @@ def test_suite_covers_required_episodes_and_checks_replay(tmp_path, monkeypatch)
     calls = []
     for episode_id in episodes:
         write_json(
-            tmp_path / "manifests" / f"{episode_id}.json", {"unreferenced_speakers": ["Guest"]}
+            tmp_path / "manifests" / f"{episode_id}.json",
+            {"audio": "source.wav", "references": [], "unreferenced_speakers": ["Guest"]},
         )
         directory = tmp_path / "bundles" / episode_id
         directory.mkdir(parents=True)
@@ -215,6 +216,8 @@ def test_suite_covers_required_episodes_and_checks_replay(tmp_path, monkeypatch)
 
     def run(bundle, config, **kwargs):
         calls.append(bundle.name)
+        if kwargs.get("diagnostics_path"):
+            write_json(kwargs["diagnostics_path"], {})
         return sidecar, 1.25
 
     monkeypatch.setattr("evals.speaker_naming_eval.verify_bundle_identity", lambda *a: {})

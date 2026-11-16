@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Publish complete deterministic suite generations with exact member/input hashes
+  and one same-tag publisher; retain previous results and failed recovery stages.
+  Validate portable tags before work and keep variants on the baseline embedding model.
+
 - Publish frozen speaker bundles only after complete staged capture. Version 2
   records source/model generation hashes and refuses stale suite reuse; local
   model artifact lists are now required for capture. Standalone v1 replay remains.

@@ -11,8 +11,10 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
+import uuid
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -20,10 +22,17 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from evals.speaker_generations import publisher, source_identity, verify_bundle_identity
+from evals.speaker_generations import (
+    file_digest,
+    json_digest,
+    publisher,
+    source_identity,
+    verify_bundle_identity,
+)
 from evals.speaker_inputs import (
     load_arrays,
     read_json,
+    require,
     validate_bundle,
     validate_manifest,
     validate_sidecar,
@@ -461,39 +470,139 @@ def profile_diagnostics(
     }
 
 
+EPISODES = ("pp59", "pp77", "pp78", "pp80", "dc209", "dc210")
+
+
+def validate_tag(tag: str) -> None:
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    require(
+        isinstance(tag, str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", tag) is not None
+        and not tag.endswith(".")
+        and tag.split(".")[0].upper() not in reserved,
+        "suite.tag",
+    )
+
+
+def complete_generation(path: Path) -> dict[str, Any]:
+    complete = read_json(path / "complete.json")
+    require(
+        complete.get("version") == 1 and isinstance(complete.get("members"), dict),
+        "suite.completion",
+    )
+    expected = {f"{ep}{suffix}.json" for ep in EPISODES for suffix in ("", ".score", ".profiles")}
+    require(
+        set(complete["members"]) == expected
+        and {p.name for p in path.iterdir()} == expected | {"complete.json"},
+        "suite.members",
+    )
+    for name, digest in complete["members"].items():
+        require(file_digest(path / name) == digest, "suite.member.identity")
+    return complete
+
+
 def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
-    """The six required episodes, with deterministic replay and published-name diffs."""
-    output = root / "results" / tag
-    output.mkdir(parents=True, exist_ok=True)
-    for episode in ("pp59", "pp77", "pp78", "pp80", "dc209", "dc210"):
-        manifest_path = root / "manifests" / f"{episode}.json"
-        manifest = read_json(manifest_path)
-        bundle = root / "bundles" / episode
-        if not (bundle / "bundle.json").exists():
-            create_bundle(manifest_path, bundle)
-        verify_bundle_identity(manifest_path, bundle)
-        first, elapsed = run_bundle(
-            bundle, config_data, diagnostics_path=output / f"{episode}.profiles.json"
+    """Publish only a complete deterministic six-episode generation."""
+    from transcriptions.known_speaker import known_speaker_config_from_mapping
+
+    validate_tag(tag)
+    config = asdict(known_speaker_config_from_mapping(config_data))
+    parent = root / "results"
+    with publisher(parent, tag):
+        output = parent / tag
+        # A legacy real directory cannot be atomically replaced by a pointer.
+        require(
+            not os.path.lexists(output) or output.is_symlink(),
+            "suite.tag (archive legacy directory before rerunning)",
         )
-        second, _ = run_bundle(bundle, config_data)
-        if first != second:
-            raise ValueError(f"Nondeterministic replay: {episode}")
-        write_json(output / f"{episode}.json", first)
-        baseline_path = root / "results" / "baseline" / f"{episode}.json"
-        baseline = read_json(baseline_path) if tag != "baseline" else None
-        truth_path = root / "truth" / f"{episode}.json"
-        if episode.startswith("pp") and not truth_path.is_file():
-            raise ValueError(f"Missing required truth: {truth_path}")
-        report = score(
-            first,
-            read_json(truth_path) if truth_path.is_file() else None,
-            guests=manifest.get("unreferenced_speakers", []),
-            baseline=baseline,
-        )
-        report["postprocess_seconds"] = elapsed
-        report["deterministic_replay"] = True
-        write_json(output / f"{episode}.score.json", report)
-        print(episode, json.dumps({key: report[key] for key in ("frames", "lines")}))
+        if os.path.lexists(output):
+            complete_generation(output.resolve(strict=True))
+        baseline_dir = None
+        if tag != "baseline":
+            baseline_dir = (parent / "baseline").resolve(strict=True)
+            baseline_complete = complete_generation(baseline_dir)
+            require(
+                baseline_complete["config"]["embedding_model"] == config["embedding_model"],
+                "suite.embedding_model (keep the baseline embedding model)",
+            )
+        # Freeze all controls and validate existing bundle identities before inference.
+        inputs = []
+        for episode in EPISODES:
+            manifest_path = root / "manifests" / f"{episode}.json"
+            manifest = read_json(manifest_path)
+            validate_manifest(manifest)
+            truth_path = root / "truth" / f"{episode}.json"
+            if episode.startswith("pp") and not truth_path.is_file():
+                raise ValueError(f"Missing required truth: {episode}")
+            truth = read_json(truth_path) if truth_path.exists() else None
+            if truth is not None:
+                validate_truth(truth)
+            baseline = read_json(baseline_dir / f"{episode}.json") if baseline_dir else None
+            if baseline is not None:
+                validate_sidecar(baseline, [], 10)
+            bundle = root / "bundles" / episode
+            if os.path.lexists(bundle):
+                verify_bundle_identity(manifest_path, bundle)
+            inputs.append((episode, manifest_path, manifest, truth, baseline, bundle))
+        stage = Path(tempfile.mkdtemp(prefix=f".{tag}.stage-", dir=parent))
+        try:
+            identities = {}
+            for episode, manifest_path, manifest, truth, baseline, bundle in inputs:
+                if not os.path.lexists(bundle):
+                    create_bundle(manifest_path, bundle)
+                identity = verify_bundle_identity(manifest_path, bundle)
+                bundle_digest = file_digest(bundle / "bundle.json")
+                first, elapsed = run_bundle(
+                    bundle, config_data, diagnostics_path=stage / f"{episode}.profiles.json"
+                )
+                second, _ = run_bundle(bundle, config_data)
+                if first != second:
+                    raise ValueError(f"Nondeterministic replay: {episode}")
+                require(
+                    file_digest(bundle / "bundle.json") == bundle_digest
+                    and verify_bundle_identity(manifest_path, bundle) == identity,
+                    "suite.bundle.identity",
+                )
+                write_json(stage / f"{episode}.json", first)
+                report = score(
+                    first,
+                    truth,
+                    guests=manifest.get("unreferenced_speakers", []),
+                    baseline=baseline,
+                )
+                report["postprocess_seconds"] = elapsed
+                report["deterministic_replay"] = True
+                write_json(stage / f"{episode}.score.json", report)
+                identities[episode] = {
+                    "bundle_identity": identity,
+                    "bundle_json_sha256": bundle_digest,
+                    "truth_sha256": json_digest(truth),
+                    "baseline_sha256": json_digest(baseline),
+                }
+            members = {path.name: file_digest(path) for path in stage.iterdir()}
+            write_json(
+                stage / "complete.json",
+                {"version": 1, "config": config, "episodes": identities, "members": members},
+            )
+            complete_generation(stage)
+            generation = parent / f".{tag}.generation-{uuid.uuid4().hex}"
+            stage.rename(generation)
+            pointer = parent / f".{tag}.pointer-{uuid.uuid4().hex}"
+            try:
+                pointer.symlink_to(generation.name, target_is_directory=True)
+                pointer.replace(output)
+            finally:
+                pointer.unlink(missing_ok=True)
+        except BaseException as exc:
+            exc.add_note(f"Owned suite recovery stage retained: {stage}")
+            raise
 
 
 def main() -> None:
@@ -521,6 +630,8 @@ def main() -> None:
     suite.add_argument("--config", type=Path)
     suite.add_argument("--tag", required=True)
     args = parser.parse_args()
+    if args.command == "suite":
+        validate_tag(args.tag)
     if args.command != "score":
         from jobs.remote_worker_cli import load_env_file, setup_django_for_worker
 
@@ -553,4 +664,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError) as exc:
+        raise SystemExit(str(exc)) from None
