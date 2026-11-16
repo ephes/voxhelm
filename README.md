@@ -188,9 +188,14 @@ jobs naming a concrete model, are never rerouted. See
 Pyannote diarization accepts at most two decoded hours of 16 kHz, 16-bit mono
 PCM. Decode stops after one extra sample to detect oversized compressed inputs;
 WAV geometry, frame count and complete PCM bytes are checked before waveform
-allocation. Decoder stdout and diagnostics are discarded, with a 64 KiB stderr
-allowance and the configured decode deadline; failures expose only safe categories.
-Temporary decoded audio is removed on every exit. Pipeline initialization is
+allocation. Decoder stdout is discarded; stderr has a 64 KiB allowance and at most
+a 2 KiB prefix is logged on nonzero exit. The configured decode deadline applies;
+public failures expose only safe categories.
+The decoder owns its process group and retires descendants even after leader success.
+Retirement has a separate two-second reap allowance; cleanup failures preserve the
+initiating timeout/diagnostic failure. Uncertain retirement retains the
+`voxhelm-pyannote-*` scratch for operator recovery under the native cleanup policy.
+Otherwise temporary decoded audio is removed on every exit. Pipeline initialization is
 cached only after successful device placement, so failed placement can be retried.
 
 ## WebVTT Output
@@ -563,6 +568,13 @@ curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
   -F "model=gpt-4o-mini-transcribe"
 ```
 
+Synchronous transcription JSON uses the same strict object admission as native
+responses: at most 2 MiB (413 above it), 128 nesting levels, unique members at every
+level and finite numbers. Malformed UTF-8, parser resource failures and invalid JSON
+return a fixed 400 before media fetching. URL media suffixes come from the path, so
+signed query strings and fragments neither remove nor confer an audio suffix;
+uploaded filenames keep their existing behavior.
+
 JSON URL input:
 
 ```bash
@@ -908,6 +920,28 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
 - Backstop: `prune_job_artifacts` deletes every artifact and the row of an
   `ad-analysis-v1` job 7 days after it finished (see the retention section).
 
+Profile word tokens require finite confidence in [0, 1], nonnegative ordered
+intervals and nondecreasing starts and ends across sentences. Invalid evidence
+fails before words publication. Word fragments are joined once per word; confidence
+uses a running sum/count with the existing three-decimal rounding.
+
+Profiles capture engine provenance before inference and recheck CLI, model directory,
+config, weights, revision marker and turbo runtime generations before returning any
+result. The configured model name is checked too, and inference uses the admitted
+resolved directory and CLI path. Replacements fail the attempt; existing complete artifacts stay intact.
+CLI environment versions refresh at least every 60 seconds even with an unchanged
+entrypoint; one job keeps its captured version record. Stop workers for environment
+upgrades: package changes during inference have no reliable filesystem generation.
+
+Profile model revision markers are optional only when missing. Present markers must
+be regular, no-follow UTF-8 files of at most 16 KiB from one stable opened generation;
+invalid, oversized or changing metadata fails before inference/publication. Parakeet
+version probes read shebangs from bounded regular snapshots, own their process
+group, accept at most 4 KiB across both pipes and obey
+cancellation and a 60-second deadline. Missing/nonzero/oversized version responses
+leave optional versions empty; uncertain retirement fails the job. Cancellable jobs
+probe fresh versions rather than sharing cached results.
+
 See `specs/2026-10-16_ad_analysis_profile.md`.
 
 ### Chapter windows (whisper turbo, `turbo-window-v1`)
@@ -923,21 +957,25 @@ DTW token timestamps (`-dtw large.v3.turbo`), one word per segment
 whisper.cpp's default decoding passed explicitly (`-t 4 -p 1 -bs 5 -bo 5
 -tp 0.00 -tpi 0.20`). When whisper.cpp exits with an error (a DTW abort) the
 clip is shifted by 0.7, -0.7, 1.9 and -1.9 s in turn; the pinned model is
-checked again after every failed clip, so a model that went away fails the job
-instead of producing untranscribed windows. Words are every non-blank segment's
+held open and checked before and after every inference, so a changed model fails
+the job even after a successful clip. Words are every non-blank segment's
 stripped text with the clip start plus its offsets, rounded to 3 decimals.
 Offsets of kept words must be integers with `0 <= from <= to <= 121 s`: the
 120 s clip plus a 1 s tolerance, because whisper.cpp's DTW timestamps can end
 slightly past the last decoded sample (the G6 research windows end at most
 100 ms past the clip). Impossible offsets, like other malformed output, fail
 the run, as do whisper.cpp JSON files over 8 MiB. The JSON is opened without
-following a symlink or blocking and must be a regular file: for the drift-check
-windows anything else fails the run; for chapter windows a FIFO or directory at
-the output path counts as a failed clip (shifted and retried, then an untranscribed
-window) and a symlink fails the run. On
+following a symlink or blocking and must be a regular file; missing or nonregular
+output after exit status 0 fails immediately. On
 the 26 episodes of the podcast gate G6 the 102 windows are identical, word for
 word and to the millisecond, to the research's. See
 `specs/2026-10-17_chapter_windows.md`.
+
+Chapter inference holds the checked turbo model descriptor through each window and
+inherits it via `/dev/fd/<n>`, checking both opened and named generations before
+launch and after every completion. A changed model discards successful output too.
+A zero exit requires a regular, bounded JSON artifact; missing output fails after
+one attempt. Only nonzero DTW exits use the five clip attempts and `ok: false`.
 
 ### Window transcription (whisper turbo)
 

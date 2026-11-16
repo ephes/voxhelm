@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from django.conf import settings
 
@@ -54,7 +55,9 @@ def download_allowed_url_to_tempfile(*, source_url: str) -> Path:
 
 
 def detect_suffix(filename_or_url: str, content_type: str) -> str:
-    lower_name = filename_or_url.lower()
+    # Upload names retain their literal suffix semantics.
+    parsed = urlsplit(filename_or_url) if "://" in filename_or_url else None
+    lower_name = (parsed.path if parsed is not None else filename_or_url).lower()
     for suffix in SUPPORTED_SUFFIXES:
         if lower_name.endswith(suffix):
             return suffix

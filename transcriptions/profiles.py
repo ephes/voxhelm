@@ -29,12 +29,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import os
 import re
 import subprocess
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from django.conf import settings
@@ -48,6 +51,11 @@ from transcriptions.chapter_windows import (
     run_chapter_windows,
 )
 from transcriptions.drift import DRIFT_RULE, DriftRule, run_drift_check
+from transcriptions.owned_process import (
+    NativeOutputLimitError,
+    process_ownership_uncertain,
+    run_native_process,
+)
 from transcriptions.service import (
     PARAKEET_BACKEND_NAME,
     BackendUnavailableError,
@@ -61,8 +69,11 @@ from transcriptions.service import (
     resolve_parakeet_runtime,
 )
 from transcriptions.windows import (
+    model_generation,
+    open_window_model,
     raise_if_cancelled,
     resolve_window_runtime,
+    verify_model_generation,
     window_identity,
     window_runtime_available,
 )
@@ -226,9 +237,13 @@ def run_profile_transcription(
         check_marks_within(chapter_marks_ms, duration_ms)
         raise_if_cancelled(cancel_event)
     model_name = settings.VOXHELM_PARAKEET_MODEL_NAME
-    backend = ParakeetBackend(
+    executable, model_dir = resolve_parakeet_runtime(
         binary_path=settings.VOXHELM_PARAKEET_BIN,
         model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+    )
+    backend = ParakeetBackend(
+        binary_path=executable,
+        model_dir=str(model_dir),
         model_name=model_name,
         chunk_seconds=profile.chunk_seconds,
         overlap_seconds=profile.overlap_seconds,
@@ -236,10 +251,28 @@ def run_profile_transcription(
         timeout_seconds=settings.VOXHELM_PARAKEET_TIMEOUT_SECONDS,
         local_attention=profile.local_attention,
     )
-    executable, model_dir = resolve_parakeet_runtime(
-        binary_path=settings.VOXHELM_PARAKEET_BIN,
-        model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+    generation_paths = [
+        Path(executable),
+        model_dir,
+        Path(settings.VOXHELM_PARAKEET_MODEL_DIR).expanduser(),
+        model_dir / MODEL_REVISION_FILE,
+        model_dir / "config.json",
+        model_dir / "model.safetensors",
+        Path(window_executable),
+        window_model,
+    ]
+    generations = _profile_generations(generation_paths)
+    identity = profile_identity(
+        profile,
+        executable=executable,
+        model_dir=model_dir,
+        model_name=model_name,
+        language_hint=language_hint,
+        window_executable=window_executable,
+        cancel_event=cancel_event,
     )
+    if generations != _profile_generations(generation_paths):
+        raise RuntimeError("Profile engine generation changed; retry with stable runtimes.")
     payload = backend.run(
         audio_path,
         TranscribeParams(
@@ -268,14 +301,9 @@ def run_profile_transcription(
             duration_ms=duration_ms,
             cancel_event=cancel_event,
         )
-    identity = profile_identity(
-        profile,
-        executable=executable,
-        model_dir=model_dir,
-        model_name=model_name,
-        language_hint=language_hint,
-        window_executable=window_executable,
-    )
+    if generations != _profile_generations(generation_paths):
+        raise RuntimeError("Profile engine generation changed; retry with stable runtimes.")
+    raise_if_cancelled(cancel_event)
     return ProfileTranscription(
         result=result,
         words=drift.words,
@@ -283,6 +311,16 @@ def run_profile_transcription(
         drift=drift.record,
         chapter_windows=chapter_windows,
     )
+
+
+def _profile_generations(paths: list[Path]) -> list[tuple[int, ...] | None]:
+    generations: list[tuple[int, ...] | None] = []
+    for path in paths:
+        try:
+            generations.append(model_generation(path.stat()))
+        except FileNotFoundError:
+            generations.append(None)
+    return generations
 
 
 def parakeet_payload_words(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -298,24 +336,38 @@ def parakeet_payload_words(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw_sentences, list):
         raise RuntimeError("Parakeet output has no sentence list.")
     words: list[dict[str, Any]] = []
-    confidences: list[list[float]] = []
+    fragments: list[str] = []
+    total = 0.0
+    count = 0
+    previous = (0.0, 0.0)
+
+    def finish() -> None:
+        if fragments:
+            words[-1]["w"] = "".join(fragments)
+            words[-1]["s"] = round(words[-1]["s"], 3)
+            words[-1]["e"] = round(words[-1]["e"], 3)
+            words[-1]["c"] = round(total / count, 3)
+
     for sentence in raw_sentences:
         tokens = sentence.get("tokens") if isinstance(sentence, dict) else None
         if not isinstance(tokens, list):
             raise RuntimeError("Parakeet output has a sentence without tokens.")
         for token in tokens:
             text, start, end, confidence = _token_fields(token)
+            if start < previous[0] or end < previous[1]:
+                raise RuntimeError("Parakeet output has regressing token times.")
+            previous = (start, end)
             if not words or text.startswith(" "):
-                words.append({"w": text.strip(), "s": start, "e": end})
-                confidences.append([confidence])
+                finish()
+                words.append({"s": start, "e": end})
+                fragments = [text.strip()]
+                total, count = confidence, 1
             else:
-                words[-1]["w"] += text
+                fragments.append(text)
                 words[-1]["e"] = end
-                confidences[-1].append(confidence)
-    for word, values in zip(words, confidences, strict=True):
-        word["s"] = round(word["s"], 3)
-        word["e"] = round(word["e"], 3)
-        word["c"] = round(sum(values) / len(values), 3)
+                total += confidence
+                count += 1
+    finish()
     return words
 
 
@@ -330,7 +382,15 @@ def _token_fields(token: object) -> tuple[str, float, float, float]:
         value = token.get(key)
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise RuntimeError(f"Parakeet output has a token without {key}.")
-        numbers.append(float(value))
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise RuntimeError("Parakeet output has an invalid token number.") from exc
+        if not math.isfinite(number):
+            raise RuntimeError("Parakeet output has an invalid token number.")
+        numbers.append(number)
+    if not 0 <= numbers[0] <= numbers[1] or not 0 <= numbers[2] <= 1:
+        raise RuntimeError("Parakeet output has a token outside its numeric domain.")
     return text, numbers[0], numbers[1], numbers[2]
 
 
@@ -342,8 +402,9 @@ def profile_identity(
     model_name: str,
     language_hint: str | None,
     window_executable: str,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
-    versions = cli_versions(executable)
+    versions = cli_versions(executable, cancel_event=cancel_event)
     return {
         "profile": profile.name,
         "backend": profile.backend,
@@ -367,10 +428,28 @@ def model_revision(model_dir: Path) -> dict[str, str]:
     fields are empty.
     """
     record = {"model_repo": "", "model_revision": "", "model_sha256": ""}
+    marker_path = model_dir / MODEL_REVISION_FILE
     try:
-        marker = (model_dir / MODEL_REVISION_FILE).read_text(encoding="utf-8")
-    except OSError:
-        marker = ""
+        handle = open_window_model(marker_path)
+    except BackendUnavailableError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            handle = None
+        else:
+            raise RuntimeError("Profile model metadata is not a regular file.") from exc
+    marker = ""
+    if handle is not None:
+        try:
+            with handle:
+                generation = model_generation(os.fstat(handle.fileno()))
+                if generation[2] > 16 * 1024:
+                    raise RuntimeError("Profile model metadata exceeds its byte limit.")
+                raw = handle.read(16 * 1024 + 1)
+                verify_model_generation(marker_path, handle, generation)
+                if len(raw) > 16 * 1024:
+                    raise RuntimeError("Profile model metadata exceeds its byte limit.")
+                marker = raw.decode("utf-8")
+        except (OSError, UnicodeError, BackendUnavailableError) as exc:
+            raise RuntimeError("Profile model metadata is not a stable UTF-8 snapshot.") from exc
     for line in marker.splitlines():
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
@@ -389,37 +468,51 @@ def model_revision(model_dir: Path) -> dict[str, str]:
     return record
 
 
-def cli_versions(executable: str) -> dict[str, str]:
+def cli_versions(executable: str, *, cancel_event: threading.Event | None = None) -> dict[str, str]:
+    raise_if_cancelled(cancel_event)
+    if cancel_event is not None:
+        return dict(_probe_cli_versions(executable, cancel_event=cancel_event))
     path = Path(executable)
     try:
-        mtime_ns = path.stat().st_mtime_ns
+        generation = model_generation(path.stat())
     except OSError:
-        mtime_ns = 0
-    return dict(_cli_versions(str(path), mtime_ns))
+        generation = ()
+    return dict(_cli_versions(str(path), generation, int(monotonic() // 60)))
 
 
 @lru_cache(maxsize=8)
-def _cli_versions(executable: str, mtime_ns: int) -> tuple[tuple[str, str], ...]:
+def _cli_versions(
+    executable: str, generation: tuple[int, ...], refresh: int
+) -> tuple[tuple[str, str], ...]:
     """``parakeet-mlx`` and ``mlx`` versions of the CLI's own environment, cached per file.
 
     The CLI is a script whose interpreter lives in its tool environment, so that
     interpreter reports both package versions; ``--version`` is the fallback for the CLI.
     """
-    del mtime_ns
+    del generation, refresh
+    return _probe_cli_versions(executable)
+
+
+def _probe_cli_versions(
+    executable: str, *, cancel_event: threading.Event | None = None
+) -> tuple[tuple[str, str], ...]:
     versions: dict[str, str] = {}
     interpreter = _script_interpreter(Path(executable))
     if interpreter is not None:
-        output = _run_quietly([interpreter, "-I", "-c", _VERSION_SCRIPT])
+        output = _run_quietly([interpreter, "-I", "-c", _VERSION_SCRIPT], cancel_event=cancel_event)
         try:
             parsed = json.loads(output) if output else {}
-        except json.JSONDecodeError:
+        except ValueError, RecursionError:
             parsed = {}
         if isinstance(parsed, dict):
             versions.update(
                 {str(key): str(value) for key, value in parsed.items() if isinstance(value, str)}
             )
     if "parakeet-mlx" not in versions:
-        match = re.search(r"parakeet-mlx\s+(\S+)", _run_quietly([executable, "--version"]))
+        match = re.search(
+            r"parakeet-mlx\s+(\S+)",
+            _run_quietly([executable, "--version"], cancel_event=cancel_event),
+        )
         if match:
             versions["parakeet-mlx"] = match.group(1)
     LOGGER.info("parakeet cli versions=%s executable=%s", versions, executable)
@@ -428,9 +521,12 @@ def _cli_versions(executable: str, mtime_ns: int) -> tuple[tuple[str, str], ...]
 
 def _script_interpreter(executable: Path) -> str | None:
     try:
-        with executable.open("rb") as handle:
+        path = executable.resolve(strict=True)
+        with open_window_model(path) as handle:
+            generation = model_generation(os.fstat(handle.fileno()))
             first_line = handle.readline(4096)
-    except OSError:
+            verify_model_generation(path, handle, generation)
+    except OSError, RuntimeError:
         return None
     if not first_line.startswith(b"#!"):
         return None
@@ -440,18 +536,20 @@ def _script_interpreter(executable: Path) -> str | None:
     return parts[0] if Path(parts[0]).is_file() else None
 
 
-def _run_quietly(args: list[str]) -> str:
+def _run_quietly(args: list[str], *, cancel_event: threading.Event | None = None) -> str:
     try:
-        completed = subprocess.run(
+        completed = run_native_process(
             args,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+            check_cancelled=lambda: raise_if_cancelled(cancel_event),
             timeout=60,
+            poll_seconds=0.1,
+            terminate_grace_seconds=0,
             env=parakeet_child_env(),
+            pass_fds=(),
+            output_limit=4096,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired, NativeOutputLimitError) as exc:
+        if process_ownership_uncertain(exc):
+            raise
         return ""
     return completed.stdout.strip() if completed.returncode == 0 else ""

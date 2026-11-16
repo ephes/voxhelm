@@ -1,7 +1,7 @@
 """Run a converter that owns its process group, with bounded diagnostics and one deadline.
 
-Shared by speech export and transcription audio normalization. Only the standard
-library is imported, so any app can use it without import cycles.
+Shared by speech export, transcription decoders and native inference/version probes.
+Only the standard library is imported, so any app can use it without import cycles.
 """
 
 from __future__ import annotations
@@ -224,6 +224,10 @@ def run_owned_process(
         raise RuntimeError(messages.failure)
 
 
+class NativeOutputLimitError(RuntimeError):
+    """A small protocol response exceeded its byte allowance."""
+
+
 def run_native_process(
     args: list[str],
     *,
@@ -233,14 +237,16 @@ def run_native_process(
     terminate_grace_seconds: float,
     env: Mapping[str, str] | None,
     pass_fds: tuple[int, ...],
+    output_limit: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Drain both pipes keeping a bounded head and tail of each (64 KiB in total).
 
     stderr keeps its first 52 KiB and last 8 KiB, stdout its first and last 2 KiB.
 
     Output beyond that is discarded, not refused: whisper-cli prints every
-    transcript segment to stdout, so long jobs exceed any small cap. Return
-    codes and process-group ownership are preserved.
+    transcript segment to stdout, so long jobs exceed any small cap. Small protocol
+    responses may instead set ``output_limit`` to refuse combined byte overflow.
+    Return codes and process-group ownership are preserved.
     """
     deadline = None if timeout is None else monotonic() + timeout
     check_cancelled()
@@ -260,6 +266,7 @@ def run_native_process(
         "stdout": _HeadTail(head=_STDOUT_HEAD_BYTES, tail=_STDOUT_TAIL_BYTES),
         "stderr": _HeadTail(head=_STDERR_HEAD_BYTES, tail=_STDERR_TAIL_BYTES),
     }
+    received = 0
     exited_drain_until: float | None = None
     primary: BaseException | None = None
     try:
@@ -293,6 +300,9 @@ def run_native_process(
                         # whisper-cli prints every transcript segment to stdout, so
                         # long jobs legitimately exceed the cap: keep a bounded head
                         # (language/version evidence) and tail (errors), drop the rest.
+                        received += len(chunk)
+                        if output_limit is not None and received > output_limit:
+                            raise NativeOutputLimitError("Native response exceeded its byte limit.")
                         streams[key.data].add(chunk)
                 else:
                     if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):

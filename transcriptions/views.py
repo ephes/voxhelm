@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from config.settings import get_accepted_stt_models
 
 from .errors import ApiError
 from .input_media import detect_suffix, download_allowed_url_to_tempfile, write_upload_to_tempfile
+from .json_input import decode_json_object
 from .observability import emit_transcription_debug_log, summarize_audio_file
 from .service import (
     InferenceCancelled,
@@ -196,13 +196,13 @@ def parse_multipart_request(request: HttpRequest) -> ParsedRequest:
 
 
 def parse_json_request(request: HttpRequest) -> ParsedRequest:
+    raw = request.read(2 * 1024 * 1024 + 1)
+    if len(raw) > 2 * 1024 * 1024:
+        raise ApiError("JSON request exceeds the 2 MiB limit.", status=413)
     try:
-        payload = json.loads(request.body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        payload = decode_json_object(raw)
+    except (ValueError, RecursionError) as exc:
         raise ApiError("Request body was not valid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise ApiError("JSON request body must be an object.")
-
     source_url = payload.get("url")
     if not isinstance(source_url, str) or not source_url.strip():
         raise ApiError("JSON requests must include a non-empty 'url' field.")

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Hold and verify chapter model generations around successful inference; require JSON output after zero exit without DTW retries.
+
+- Detect sync URL media suffixes from the path and reject ambiguous, deeply nested or oversized sync transcription JSON before fetching.
+
+- Bound profile revision snapshots and supervise cancellable version probes with a small output limit.
+- Retire pyannote decoder descendants on every exit with finite cleanup; preserve primary failures and retain scratch on uncertain retirement.
+
+- Capture profile provenance before inference, reject changed runtime generations and refresh CLI environment versions within 60 seconds.
+
+- Validate profile token confidence and temporal ordering before word publication; assemble long words in linear work.
+
 - Seal frozen numeric samples and require exact baseline bundle/truth identities
   for variants; admit constructor fields and decode/sanitizer generation settings.
 

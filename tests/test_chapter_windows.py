@@ -217,7 +217,7 @@ def test_local_job_writes_the_chapter_windows_artifact(client, settings, runtime
     # One clip per mark, [t - 60, t + 60), clamped at the start of the file.
     assert [start for start, _args in calls] == ["0.000", "1531.000", "1641.741"]
     args = calls[1][1]
-    assert args[args.index("-m") + 1] == str(window.model)  # the pinned turbo file
+    assert args[args.index("-m") + 1].startswith("/dev/fd/")  # held pinned model
     assert args[args.index("-l") + 1] == "en"
     assert args[args.index("-dtw") + 1] == "large.v3.turbo"
     assert args[args.index("-ml") + 1] == "1"
@@ -408,7 +408,7 @@ def test_the_model_lost_during_the_windows_fails_the_job(client, settings, runti
     payload = run_local_profile_job(client, settings, language_hint="en", chapter_marks_ms=MARKS)
 
     assert payload["state"] == "failed"
-    assert "is missing" in payload["error"]["message"]
+    assert "model changed" in payload["error"]["message"]
     # One clip, then the model check: never five "untranscribed" clips.
     assert len(runtime.window.chapter_calls()) == 1
     assert not JobArtifact.objects.filter(kind=JobArtifact.Kind.CHAPTER_WINDOWS).exists()
@@ -860,3 +860,59 @@ def test_a_synthesis_job_refuses_chapter_marks(marks: Any) -> None:
     payload["chapter_marks_ms"] = marks
     with pytest.raises(ApiError, match="chapter_marks_ms requires a profile"):
         parse_job_request(payload)
+
+
+@pytest.mark.parametrize("change", ["replace", "rewrite"])
+def test_chapter_success_rejects_model_generation_change(runtime, tmp_path, monkeypatch, change):
+    original = chapter_windows.run_cancellable_process
+
+    def run(args, **kwargs):
+        result = original(args, **kwargs)
+        if "-dtw" in args:
+            if change == "replace":
+                other = tmp_path / "other-model"
+                other.write_bytes(b"replacement")
+                other.replace(runtime.window.model)
+            else:
+                runtime.window.model.write_bytes(b"rewritten")
+        return result
+
+    monkeypatch.setattr(chapter_windows, "run_cancellable_process", run)
+    executable, model = windows.resolve_window_runtime()
+    with pytest.raises(RuntimeError, match="model changed"):
+        run_chapter_windows(
+            tmp_path / "audio", [60000], executable=executable, model_path=model, duration_ms=100000
+        )
+
+
+@pytest.mark.parametrize("artifact", ["missing", "fifo", "directory", "symlink", "oversized"])
+def test_chapter_zero_exit_requires_output(runtime, tmp_path, monkeypatch, artifact):
+    original = chapter_windows.run_cancellable_process
+    attempts = []
+
+    def run(args, **kwargs):
+        result = original(args, **kwargs)
+        if "-dtw" in args:
+            attempts.append(args)
+            path = Path(args[args.index("-of") + 1]).with_suffix(".json")
+            path.unlink()
+            if artifact == "fifo":
+                import os
+
+                os.mkfifo(path)
+            elif artifact == "directory":
+                path.mkdir()
+            elif artifact == "symlink":
+                path.symlink_to(runtime.window.model)
+            elif artifact == "oversized":
+                with path.open("wb") as handle:
+                    handle.truncate(windows.WINDOW_JSON_MAX_BYTES + 1)
+        return result
+
+    monkeypatch.setattr(chapter_windows, "run_cancellable_process", run)
+    executable, model = windows.resolve_window_runtime()
+    with pytest.raises(RuntimeError, match="JSON output"):
+        run_chapter_windows(
+            tmp_path / "audio", [60000], executable=executable, model_path=model, duration_ms=100000
+        )
+    assert len(attempts) == 1

@@ -45,8 +45,9 @@ if "-dtw" in args:
         log.write(json.dumps([start, args]) + "\\n")
     time.sleep(config["chapter_sleep"])
     if config["chapter_remove_model"]:
-        Path(args[args.index("-m") + 1]).unlink()
+        Path(config["model_path"]).unlink()
         sys.exit(1)
+    assert Path(args[args.index("-m") + 1]).read_bytes() == b"turbo weights"
     status = config["chapter_fail"].get(start, 0)
     if status:
         sys.exit(status)
@@ -134,6 +135,7 @@ class FakeWindowRuntime:
         self.config_path.write_text(
             json.dumps(
                 {
+                    "model_path": str(self.model),
                     "languages": self.languages,
                     "tokens": self.tokens,
                     "duration": self.duration,

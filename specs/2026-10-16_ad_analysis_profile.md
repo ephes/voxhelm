@@ -121,7 +121,9 @@ the mean of the word's token confidences; times and `c` rounded to 3
 decimals. The CLI writes token confidences already rounded to 3 decimals, so
 `c` can differ from the research value (mean of unrounded confidences) by
 0.001; words and times are unaffected. Malformed output (missing tokens,
-times or confidences) fails the run.
+times or confidences) fails the run. Tokens also require finite confidence in [0, 1],
+nonnegative ordered intervals, and nondecreasing starts and ends across sentences.
+Fragments are accumulated and joined once per word, with a running confidence sum/count.
 
 Remote completions of a profile job must include `words.json`; other jobs
 must not.
@@ -135,13 +137,26 @@ must not.
 | `profile`, `backend`, `settings` | the profile entry |
 | `model` | `VOXHELM_PARAKEET_MODEL_NAME` |
 | `model_repo`, `model_revision`, `model_sha256` | the `VOXHELM_MODEL_REVISION` marker the ops-library role writes into the model directory; for a Hugging Face snapshot directory the commit is its name; empty when unknown |
-| `cli`, `cli_version`, `mlx_version` | the CLI script's own interpreter (`importlib.metadata` of `parakeet-mlx` and `mlx`), `--version` as fallback; cached per CLI file and mtime |
+| `cli`, `cli_version`, `mlx_version` | the CLI script's own interpreter (`importlib.metadata` of `parakeet-mlx` and `mlx`), `--version` as fallback; cached per CLI file generation for at most 60 seconds; cancellable jobs probe fresh |
 | `drift` | the drift rule (`fw-en4-share10-v1`, thresholds, function-word list hash, acceptance) and `retry`: whisper.cpp version, turbo model name and SHA-256, decoding settings (D-28) |
 | `language_hint` | the job's hint |
 
 The control plane keeps only these fields from a remote worker and sets
 `language_hint` from the job; the worker's `drift` must equal the control
 plane's own (only its whisper.cpp version is kept from it).
+
+Identity is captured before inference. The CLI, model directory, config, weights,
+revision marker and turbo runtime generations are checked around identity acquisition
+and before returning results; any change fails the attempt before artifact publication.
+The configured model name is also checked for symlink retargeting, and inference
+uses the already admitted resolved directory and CLI path.
+Package upgrades must run with workers stopped; package files have no reliable shared
+generation. Present revision markers must be no-follow regular files, at most 16 KiB,
+strict UTF-8 and stable across the opened read. Only a missing marker retains the
+unknown/snapshot-directory fallback. Invalid metadata fails the job.
+Parakeet version probes use the owned process supervisor: cancellation, a 60-second deadline,
+4 KiB total output and group retirement. Optional unavailable versions remain empty;
+uncertain retirement propagates as a failure.
 
 ### Retention
 

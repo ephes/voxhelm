@@ -143,3 +143,27 @@ def test_real_compressed_decode_refuses_over_budget(tmp_path, monkeypatch, setti
     monkeypatch.setattr(d, "PYANNOTE_MAX_FRAMES", 16000, raising=False)
     with pytest.raises(d.DiarizationError, match="frame limit"):
         d.load_audio_for_pyannote(compressed)
+
+
+def test_uncertain_decoder_retirement_retains_pyannote_scratch(tmp_path, monkeypatch):
+    import tempfile
+
+    from transcriptions import diarization
+    from transcriptions.audio_decode import AudioDecodeError
+    from transcriptions.owned_process import PROCESS_OWNERSHIP_UNCERTAIN
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    paths = []
+
+    def decode(argv, **kwargs):
+        path = Path(argv[-1])
+        path.write_bytes(b"partial")
+        paths.append(path)
+        error = AudioDecodeError("Audio decode failed.")
+        error.add_note(PROCESS_OWNERSHIP_UNCERTAIN)
+        raise error
+
+    monkeypatch.setattr(diarization, "run_audio_decode", decode)
+    with pytest.raises(diarization.DiarizationError):
+        diarization.load_audio_for_pyannote(tmp_path / "input")
+    assert paths[0].read_bytes() == b"partial"

@@ -76,3 +76,67 @@ def test_speech_export_disables_stdin(tmp_path, settings, output_format):
     exported = export_audio(result, output_format=output_format)
     assert "-nostdin" in json.loads(argv_path.read_text())
     exported.path.unlink()
+
+
+def test_pyannote_decoder_retires_successful_leaders_child(tmp_path):
+    from transcriptions.audio_decode import run_audio_decode
+
+    ready = tmp_path / "ready"
+    late = tmp_path / "late"
+    code = (
+        "import os, pathlib, time\n"
+        "if os.fork() == 0:\n"
+        "    os.close(2)\n"
+        f"    pathlib.Path({str(ready)!r}).touch()\n"
+        "    time.sleep(.4)\n"
+        f"    pathlib.Path({str(late)!r}).touch()\n"
+        "    os._exit(0)\n"
+        f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(.01)\n"
+    )
+    run_audio_decode([sys.executable, "-c", code], timeout=2)
+    time.sleep(0.6)
+    assert ready.exists()
+    assert not late.exists()
+
+
+@pytest.mark.parametrize("outcome", ["diagnostic", "deadline"])
+def test_pyannote_decode_primary_survives_failed_retirement(monkeypatch, outcome):
+    from transcriptions import audio_decode, owned_process
+    from transcriptions.owned_process import process_ownership_uncertain
+
+    # Real child exits; inject a failed kill and reap at the cleanup seam only.
+    original = owned_process._cleanup_process
+
+    def cleanup(process, *, primary):
+        process.wait(timeout=1)
+
+        def denied():
+            raise PermissionError("private detail")
+
+        monkeypatch.setattr(owned_process, "_kill_process_group", lambda process: denied())
+        monkeypatch.setattr(
+            process,
+            "wait",
+            lambda *, timeout: (_ for _ in ()).throw(subprocess.TimeoutExpired("private", timeout)),
+        )
+        original(process, primary=primary)
+
+    monkeypatch.setattr(owned_process, "_cleanup_process", cleanup)
+    started = time.monotonic()
+    error_type = (
+        audio_decode.AudioDecodeError if outcome == "diagnostic" else subprocess.TimeoutExpired
+    )
+    code = (
+        'import os; os.write(2,b"x"*70000)'
+        if outcome == "diagnostic"
+        else "import time; time.sleep(.2)"
+    )
+    with pytest.raises(error_type) as caught:
+        audio_decode.run_audio_decode(
+            [sys.executable, "-c", code], timeout=2 if outcome == "diagnostic" else 0.05
+        )
+    if outcome == "diagnostic":
+        assert "diagnostic" in str(caught.value)
+    assert time.monotonic() - started < 3
+    assert process_ownership_uncertain(caught.value)
+    assert "private" not in str(caught.value)

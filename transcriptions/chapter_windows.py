@@ -26,10 +26,10 @@ reproduces that transcription exactly, as the ``turbo-window-v1`` rule (D-29):
 
 It never runs another model: a missing ``whisper-cli``, a missing turbo model or one with
 another hash raises ``BackendUnavailableError`` (resolved by the caller before
-anything runs). Nothing outlives the call: clips and whisper.cpp output live in one
-temporary directory removed on every exit path, and error messages carry whisper.cpp's
-or ffmpeg's log, never a transcript. The caller admits the run through the lane
-scheduler (the profile runs it inside its own admission).
+anything runs). Clips and whisper.cpp output live in one temporary directory, removed
+after confirmed process retirement and retained for recovery if ownership is uncertain.
+Error messages carry whisper.cpp's or ffmpeg's log, never a transcript. The caller
+admits the run through the lane scheduler (the profile runs it inside its own admission).
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -282,8 +283,8 @@ def run_chapter_windows(
     """Transcribe the window of every mark, one after another, in mark order.
 
     ``executable`` and ``model_path`` come from ``resolve_window_runtime`` (the pinned
-    turbo model), which is checked again before the first window and after every clip
-    whisper.cpp failed on: ``BackendUnavailableError`` when the model went away or
+    turbo model), which is held open and checked around every inference, including
+    success: ``BackendUnavailableError`` when the model went away or
     changed. Raises ``RuntimeError`` when ffmpeg fails, whisper.cpp cannot be
     started, times out or writes malformed JSON, and ``InferenceCancelled`` when
     ``cancel_event`` is set; a window whose five clips all end in a whisper.cpp error is
@@ -321,85 +322,97 @@ def transcribe_chapter_window(
     cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """One window ``{mark_ms, ok, clip_start, shift, exit_codes, seconds, words}``."""
-    window = CHAPTER_WINDOW_SETTINGS
-    t = mark_ms / 1000
-    started = monotonic()
-    clip_path = temp_root / "x.wav"
-    output_base = temp_root / "x"
-    json_path = temp_root / "x.json"
-    exit_codes: list[int] = []
-    ok = False
-    clip_start = 0.0
-    shift = 0.0
-    for shift in window.shifts_seconds:
-        raise_if_cancelled(cancel_event)
-        clip_start = max(0.0, t - window.half_window_seconds + shift)
-        decode_chapter_clip(audio_path, clip_path, start=clip_start, cancel_event=cancel_event)
-        raise_if_cancelled(cancel_event)
+    with window_module.open_window_model(model_path) as model_handle:
+        generation = window_module.model_generation(os.fstat(model_handle.fileno()))
+        if window_module.model_sha256(model_path) != window_module.WINDOW_MODEL_SHA256:
+            raise BackendUnavailableError("Window model changed; retry with the pinned model.")
+        window_module.verify_model_generation(model_path, model_handle, generation)
+        window = CHAPTER_WINDOW_SETTINGS
+        t = mark_ms / 1000
+        started = monotonic()
+        clip_path = temp_root / "x.wav"
+        output_base = temp_root / "x"
+        json_path = temp_root / "x.json"
+        exit_codes: list[int] = []
+        ok = False
+        clip_start = 0.0
+        shift = 0.0
+        for shift in window.shifts_seconds:
+            raise_if_cancelled(cancel_event)
+            clip_start = max(0.0, t - window.half_window_seconds + shift)
+            decode_chapter_clip(audio_path, clip_path, start=clip_start, cancel_event=cancel_event)
+            raise_if_cancelled(cancel_event)
+            json_path.unlink(missing_ok=True)
+            args = [
+                executable,
+                "-m",
+                f"/dev/fd/{model_handle.fileno()}",
+                "-l",
+                window.language,
+                "-t",
+                str(window.threads),
+                "-p",
+                str(window.processors),
+                "-bs",
+                str(window.beam_size),
+                "-bo",
+                str(window.best_of),
+                "-tp",
+                f"{window.temperature:.2f}",
+                "-tpi",
+                f"{window.temperature_inc:.2f}",
+                "-dtw",
+                window.dtw,
+                "-ml",
+                str(window.max_len),
+                "-sow",
+                "--prompt",
+                window.prompt,
+                "-oj",
+                "-of",
+                str(output_base),
+                "-np",
+                str(clip_path),
+            ]
+            window_module.verify_model_generation(model_path, model_handle, generation)
+            model_handle.seek(0)
+            try:
+                completed = run_cancellable_process(
+                    args,
+                    cancel_event=cancel_event,
+                    timeout_seconds=settings.VOXHELM_WINDOW_TIMEOUT_SECONDS,
+                    pass_fds=(model_handle.fileno(),),
+                )
+            except OSError as exc:
+                raise RuntimeError(f"whisper.cpp could not be started: {exc}") from exc
+            window_module.verify_model_generation(model_path, model_handle, generation)
+            exit_codes.append(completed.returncode)
+            if completed.returncode == 0:
+                ok = True
+                break
+            # A failed clip is the research's DTW abort only while the pinned model is still
+            # there; a model that went away (or was replaced) fails the run instead of
+            # passing as an untranscribed window.
+            resolve_window_runtime()
+        words: list[dict[str, Any]] = []
+        if ok:
+            try:
+                raw = window_module.read_window_json(json_path)
+            except OSError as exc:
+                raise RuntimeError("whisper.cpp chapter window produced no JSON output.") from exc
+            words = chapter_window_words(raw, clip_start=clip_start)
+            window_module.verify_model_generation(model_path, model_handle, generation)
         json_path.unlink(missing_ok=True)
-        args = [
-            executable,
-            "-m",
-            str(model_path),
-            "-l",
-            window.language,
-            "-t",
-            str(window.threads),
-            "-p",
-            str(window.processors),
-            "-bs",
-            str(window.beam_size),
-            "-bo",
-            str(window.best_of),
-            "-tp",
-            f"{window.temperature:.2f}",
-            "-tpi",
-            f"{window.temperature_inc:.2f}",
-            "-dtw",
-            window.dtw,
-            "-ml",
-            str(window.max_len),
-            "-sow",
-            "--prompt",
-            window.prompt,
-            "-oj",
-            "-of",
-            str(output_base),
-            "-np",
-            str(clip_path),
-        ]
-        try:
-            completed = run_cancellable_process(
-                args,
-                cancel_event=cancel_event,
-                timeout_seconds=settings.VOXHELM_WINDOW_TIMEOUT_SECONDS,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"whisper.cpp could not be started: {exc}") from exc
-        exit_codes.append(completed.returncode)
-        if completed.returncode == 0 and json_path.is_file():
-            ok = True
-            break
-        # A failed clip is the research's DTW abort only while the pinned model is still
-        # there; a model that went away (or was replaced) fails the run instead of
-        # passing as an untranscribed window.
-        resolve_window_runtime()
-    words: list[dict[str, Any]] = []
-    if ok:
-        words = chapter_window_words(
-            window_module.read_window_json(json_path), clip_start=clip_start
-        )
-    json_path.unlink(missing_ok=True)
-    clip_path.unlink(missing_ok=True)
-    return {
-        "mark_ms": mark_ms,
-        "ok": ok,
-        "clip_start": round(clip_start, 3),
-        "shift": shift,
-        "exit_codes": exit_codes,
-        "seconds": round(monotonic() - started, 3),
-        "words": words,
-    }
+        clip_path.unlink(missing_ok=True)
+        return {
+            "mark_ms": mark_ms,
+            "ok": ok,
+            "clip_start": round(clip_start, 3),
+            "shift": shift,
+            "exit_codes": exit_codes,
+            "seconds": round(monotonic() - started, 3),
+            "words": words,
+        }
 
 
 def decode_chapter_clip(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import math
 import subprocess
-import tempfile
 import wave
 from bisect import bisect_left
 from collections.abc import Sequence
@@ -17,6 +16,7 @@ from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, admit_local_inference
 from transcriptions.audio_decode import AudioDecodeError, run_audio_decode
+from transcriptions.owned_process import process_output_directory
 from transcriptions.service import TranscriptionResult
 
 # Two hours of 16 kHz PCM; bound the compressed-to-decoded expansion.
@@ -91,7 +91,7 @@ def load_audio_for_pyannote(audio_path: Path) -> dict[str, Any]:
     numpy = importlib.import_module("numpy")
     torch = importlib.import_module("torch")
 
-    with tempfile.TemporaryDirectory(prefix="voxhelm-pyannote-") as temp_dir:
+    with process_output_directory(prefix="voxhelm-pyannote-") as temp_dir:
         wav_path = Path(temp_dir) / "audio.wav"
         try:
             run_audio_decode(

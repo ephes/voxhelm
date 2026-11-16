@@ -1209,3 +1209,96 @@ def test_sync_json_invalid_utf8(client, monkeypatch, endpoint, authenticated):
     download.assert_not_called()
     synthesize.assert_not_called()
     transcribe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"url":"https://media.example.com/a.mp3","url":"https://media.example.com/b.mp3","model":"whisper-1"}',
+        b'{"url":"https://media.example.com/a.mp3","model":"whisper-1","model":"whisper-1"}',
+        b'{"url":"https://media.example.com/a.mp3","model":"whisper-1","extra":{"x":1,"x":2}}',
+        b'{"extra":' + b"[" * 129 + b"0" + b"]" * 129 + b"}",
+        b'{"extra":' + b"1" * 5000 + b"}",
+        b'{"extra":NaN}',
+    ],
+)
+def test_sync_json_strict_before_download(client, monkeypatch, raw):
+    from transcriptions import views
+
+    def forbidden(**kwargs):
+        pytest.fail("invalid JSON reached media fetch")
+
+    monkeypatch.setattr(views, "download_allowed_url_to_tempfile", forbidden)
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data=raw,
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Request body was not valid JSON."
+
+
+def test_sync_json_byte_limit(client):
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data=b" " * (2 * 1024 * 1024 + 1),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("https://media.example.com/audio.mp3?signature=secret#part", ".mp3"),
+        ("https://media.example.com/unrelated?file=.mp3", ""),
+        ("https://media.example.com/unrelated#file.mp3", ""),
+        ("recording.MP3", ".mp3"),
+        ("local?name.mp3", ".mp3"),
+    ],
+)
+def test_transcription_suffix_uses_url_path(name, expected):
+    from transcriptions.input_media import detect_suffix
+
+    assert detect_suffix(name, "application/octet-stream") == expected
+
+
+def test_signed_url_generic_mime_download(monkeypatch, settings):
+    from email.message import Message
+
+    from transcriptions.input_media import download_allowed_url_to_tempfile
+
+    url = "https://media.example.com/audio.mp3?signature=synthetic#part"
+    settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+
+    class Response(io.BytesIO):
+        headers = Message()
+        headers["Content-Type"] = "application/octet-stream"
+
+        def geturl(self):
+            return url
+
+    monkeypatch.setattr("jobs.media.open_allowed_url", lambda *args, **kwargs: Response(b"media"))
+    path = download_allowed_url_to_tempfile(source_url=url)
+    try:
+        assert path.suffix == ".mp3"
+        assert path.read_bytes() == b"media"
+    finally:
+        path.unlink()
+
+
+def test_sync_json_parser_resource_failure(client, monkeypatch):
+    def fail(raw):
+        raise RecursionError("private parser detail")
+
+    monkeypatch.setattr("transcriptions.views.decode_json_object", fail)
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data=b"{}",
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Request body was not valid JSON."

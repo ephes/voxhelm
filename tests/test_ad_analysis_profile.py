@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from jobs.models import (
     StagedMedia,
 )
 from jobs.retention import prune_job_artifacts
+from lane_scheduler import InferenceCancelled
 from tests.test_jobs import configure_task_backend
 from tests.test_remote_workers import (
     claim_one,
@@ -1157,3 +1159,229 @@ def test_dry_run_refuses_an_attempt_prefix_the_real_run_refuses(settings):
     done = prune_job_artifacts()
     assert done.attempt_prefixes_refused == 1
     assert RemoteAttemptPrefix.objects.filter(job_id=job.id).exists()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"confidence": float("nan")},
+        {"confidence": float("inf")},
+        {"confidence": -0.1},
+        {"confidence": 1.1},
+        {"start": -1},
+        {"end": -1},
+        {"start": 2, "end": 1},
+        {"end": 10**400},
+    ],
+)
+def test_word_token_domain(changes):
+    with pytest.raises(RuntimeError):
+        parakeet_payload_words({"sentences": [{"tokens": [token(" a", 0, 1, 0.5) | changes]}]})
+
+
+@pytest.mark.parametrize("start,end", [(0, 2), (2, 2.5)])
+def test_word_token_boundaries_cannot_regress(start, end):
+    with pytest.raises(RuntimeError):
+        parakeet_payload_words(
+            {
+                "sentences": [
+                    {
+                        "tokens": [
+                            token(" a", 1, 3, 0.5),
+                            token("b", start, end, 0.5),
+                        ]
+                    }
+                ]
+            }
+        )
+
+
+def test_word_assembly_joins_fragments_once():
+    class Fragment(str):
+        copied = 0
+
+        def __radd__(self, other):
+            Fragment.copied += len(other) + len(self)
+            return Fragment(str(other) + str(self))
+
+    for size in (1000, 2000, 4000):
+        Fragment.copied = 0
+        words = parakeet_payload_words(
+            {"sentences": [{"tokens": [token(Fragment("x"), n, n + 1, 0.5) for n in range(size)]}]}
+        )
+        assert words == [{"w": "x" * size, "s": 0, "e": size, "c": 0.5}]
+        assert Fragment.copied <= size * 2
+
+
+@pytest.mark.parametrize("replacement", ["marker", "cli", "weights"])
+def test_profile_refuses_generation_changed_during_inference(
+    parakeet_cli, monkeypatch, tmp_path, replacement
+):
+    original = profiles.ParakeetBackend.run
+
+    def run(self, *args, **kwargs):
+        payload = original(self, *args, **kwargs)
+        paths = {
+            "marker": parakeet_cli.model_dir / profiles.MODEL_REVISION_FILE,
+            "weights": parakeet_cli.model_dir / "model.safetensors",
+            "cli": Path(self.binary_path),
+        }
+        with paths[replacement].open("ab") as handle:
+            handle.write(b"\nreplacement")
+        return payload
+
+    monkeypatch.setattr(profiles.ParakeetBackend, "run", run)
+    with pytest.raises(RuntimeError, match="generation changed"):
+        profiles.run_profile_transcription(
+            PROFILES[AD_ANALYSIS_V1], tmp_path / "audio", language_hint="en"
+        )
+
+
+def test_profile_versions_refresh_unchanged_entrypoint(tmp_path, monkeypatch):
+    cli = tmp_path / "cli"
+    cli.write_text("entrypoint")
+    clock = [0.0]
+    version = ["one"]
+    monkeypatch.setattr(profiles, "monotonic", lambda: clock[0], raising=False)
+    monkeypatch.setattr(
+        profiles, "_run_quietly", lambda args, **kwargs: "parakeet-mlx " + version[0]
+    )
+    profiles._cli_versions.cache_clear()
+    assert profiles.cli_versions(str(cli))["parakeet-mlx"] == "one"
+    version[0] = "two"
+    clock[0] = 61
+    assert profiles.cli_versions(str(cli))["parakeet-mlx"] == "two"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "oversized", "encoding", "changed", "removed"])
+def test_profile_revision_bounded_snapshot(tmp_path, monkeypatch, kind):
+    import os
+
+    marker = tmp_path / profiles.MODEL_REVISION_FILE
+    if kind == "fifo":
+        os.mkfifo(marker)
+        # The old unbounded reader must not hang this regression run.
+        original = Path.read_text
+
+        def guarded(path, *args, **kwargs):
+            if path == marker:
+                raise AssertionError("blocking marker reader used")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", guarded)
+    elif kind == "oversized":
+        marker.write_bytes(b"x" * (16 * 1024 + 1))
+    elif kind == "encoding":
+        marker.write_bytes(b"\xff")
+    else:
+        marker.write_text("revision=one")
+        original_stat = os.fstat
+        calls = [0]
+
+        def changing(fd):
+            calls[0] += 1
+            if calls[0] == 3:
+                if kind == "removed":
+                    marker.unlink()
+                else:
+                    marker.write_text("revision=replacement")
+            return original_stat(fd)
+
+        monkeypatch.setattr(os, "fstat", changing)
+    with pytest.raises(RuntimeError, match="metadata"):
+        model_revision(tmp_path)
+
+
+def test_profile_version_probe_bounded_output(tmp_path):
+    script = tmp_path / "noisy"
+    script.write_text(f'#!{sys.executable}\nimport os\nos.write(1, b"x" * 1000000)\n')
+    script.chmod(0o755)
+    assert profiles._run_quietly([str(script)]) == ""
+
+
+def test_profile_version_probe_cancellable(tmp_path):
+    event = threading.Event()
+    event.set()
+    with pytest.raises(InferenceCancelled):
+        profiles._run_quietly([sys.executable, "-c", "pass"], cancel_event=event)
+
+
+def test_version_cancellation_retires_pipe_holding_descendant(tmp_path):
+    import time
+
+    late = tmp_path / "late"
+    code = (
+        "import os, pathlib, time\n"
+        "if os.fork() == 0:\n"
+        "    time.sleep(.8)\n"
+        f"    pathlib.Path({str(late)!r}).touch()\n"
+        "    os._exit(0)\n"
+    )
+    event = threading.Event()
+    timer = threading.Timer(0.2, event.set)
+    timer.start()
+    try:
+        with pytest.raises(InferenceCancelled):
+            profiles._run_quietly([sys.executable, "-c", code], cancel_event=event)
+    finally:
+        timer.cancel()
+    time.sleep(0.9)
+    assert not late.exists()
+
+
+def test_version_unconfirmed_retirement_is_not_optional(monkeypatch):
+    import subprocess
+
+    from transcriptions.owned_process import PROCESS_OWNERSHIP_UNCERTAIN
+
+    error = subprocess.TimeoutExpired("version", 60)
+    error.add_note(PROCESS_OWNERSHIP_UNCERTAIN)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(profiles, "run_native_process", fail)
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        profiles._run_quietly(["version"])
+    assert caught.value is error
+
+
+def test_profile_detects_configured_model_symlink_retarget(
+    parakeet_cli, settings, tmp_path, monkeypatch
+):
+    link = tmp_path / "current-model"
+    link.symlink_to(parakeet_cli.model_dir, target_is_directory=True)
+    replacement = tmp_path / "replacement-model"
+    replacement.mkdir()
+    for name in ("config.json", "model.safetensors", profiles.MODEL_REVISION_FILE):
+        (replacement / name).write_bytes((parakeet_cli.model_dir / name).read_bytes())
+    settings.VOXHELM_PARAKEET_MODEL_DIR = str(link)
+    original = profiles.profile_identity
+
+    def identity(*args, **kwargs):
+        record = original(*args, **kwargs)
+        link.unlink()
+        link.symlink_to(replacement, target_is_directory=True)
+        return record
+
+    monkeypatch.setattr(profiles, "profile_identity", identity)
+    with pytest.raises(RuntimeError, match="generation changed"):
+        profiles.run_profile_transcription(
+            PROFILES[AD_ANALYSIS_V1], tmp_path / "audio", language_hint="en"
+        )
+
+
+def test_version_shebang_read_does_not_block_on_replaced_cli(tmp_path, monkeypatch):
+    import os
+
+    cli = tmp_path / "cli"
+    os.mkfifo(cli)
+    original = Path.open
+
+    def guarded(path, *args, **kwargs):
+        if path == cli:
+            raise AssertionError("blocking executable reader used")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded)
+    assert profiles._script_interpreter(cli) is None

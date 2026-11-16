@@ -88,11 +88,13 @@ caller holds (Django Tasks worker or `process_claim`):
      (`min(4, cores)` threads, beam search 5, best-of 5, temperature 0.00 with
      0.20 increments) and are passed explicitly so another host or whisper.cpp
      release cannot change them;
-   - exit status 0 and an `x.json`: the window is transcribed; otherwise the
-     next shift. Before the next shift the pinned model is resolved again
-     (cached by path, size, inode and modification time): a model that went
-     away or changed raises `BackendUnavailableError` instead of five failed
-     clips passing as an untranscribed window;
+   - each window holds the verified model descriptor and passes `/dev/fd/<n>`
+     to whisper-cli. Opened and named generations (device, inode, size, nanosecond
+     mtime/ctime) are verified before launch and after every completion, including
+     success. Changed or missing models fail before words are admitted;
+   - exit status 0 requires a regular, bounded `x.json`; missing output is a
+     protocol failure after one attempt. Only nonzero exits use the next shift;
+     before retrying the pinned model is resolved again;
    - none of the five: `ok: false`, no words (Delve keeps the edge's mark, as
      the research did), the exit statuses recorded.
 4. Words, as `asrwin120.py`: the JSON bytes decoded as UTF-8 with replacement
