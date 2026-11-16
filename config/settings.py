@@ -374,6 +374,14 @@ VOXHELM_WHISPERCPP_PROCESSORS = int(os.getenv("VOXHELM_WHISPERCPP_PROCESSORS", "
 # which curbs hallucinated text over music/silence (e.g. outro-music loops).
 VOXHELM_WHISPERCPP_MAX_CONTEXT = int(os.getenv("VOXHELM_WHISPERCPP_MAX_CONTEXT", "0"))
 VOXHELM_WHISPERCPP_SUPPRESS_NST = env_bool("VOXHELM_WHISPERCPP_SUPPRESS_NST", default=True)
+# Largest stretch of the media (start, between segments, end) a whisper.cpp
+# transcript may leave without text before the run is rejected as incomplete
+# (transcriptions/coverage.py). 0 disables the rejection. Long music or silence
+# without speech also exceeds it.
+VOXHELM_WHISPERCPP_MAX_GAP_SECONDS = validate_non_negative_int(
+    "VOXHELM_WHISPERCPP_MAX_GAP_SECONDS",
+    int(os.getenv("VOXHELM_WHISPERCPP_MAX_GAP_SECONDS", "600")),
+)
 # Parakeet (NVIDIA Parakeet TDT through the parakeet-mlx CLI, run as a child
 # process from its own Python 3.13 tool environment). The model directory is
 # deployed at a pinned commit; empty means the backend is unavailable.

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Report incomplete whisper.cpp output as an error (archive item 408: with
+  `-p 4`, whisper.cpp 1.9.5 merged three failed parts silently and exited 0).
+  Each whisper.cpp run checks its raw segments against the normalized WAV's
+  duration; a stretch without text longer than
+  `VOXHELM_WHISPERCPP_MAX_GAP_SECONDS` (default 600, 0 disables) raises
+  `IncompleteTranscriptError`, which fails closed without backend fallback
+  (remote: retryable attempt; local job: failed; sync endpoint: HTTP 500).
+  whisper-cli no longer runs with `-np`, so its library errors are kept;
+  error-looking stderr lines are logged, also on exit 0, and a failed run's
+  error carries them instead of stdout. Results record
+  `media_duration_seconds` and `covered_seconds` in `result_metadata`, which the
+  control plane now accepts from workers.
+
 - Include untied pyannote-label episode profiles for guests without reference
   audio. Preserve original overlap labels on relabelled short cues and expose
   ranked episode candidates; add offline guest/profile sanity diagnostics.

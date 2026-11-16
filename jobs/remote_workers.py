@@ -103,6 +103,8 @@ REMOTE_RESULT_METADATA_KEYS: set[str] = {
     "language",
     "duration_seconds",
     "processing_seconds",
+    "media_duration_seconds",
+    "covered_seconds",
     "source_url",
     "source_name",
     "source_content_type",
@@ -118,6 +120,9 @@ REMOTE_RESULT_METADATA_STRING_KEYS: set[str] = {
 REMOTE_RESULT_METADATA_NUMBER_KEYS: set[str] = {
     "duration_seconds",
     "processing_seconds",
+    # Set by whisper.cpp runs (transcriptions/coverage.py).
+    "media_duration_seconds",
+    "covered_seconds",
 }
 REMOTE_METADATA_STRING_MAX_LENGTH = 256
 PROFILE_IDENTITY_STRING_KEYS: set[str] = {

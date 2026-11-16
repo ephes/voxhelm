@@ -18,6 +18,7 @@ genuine speech.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import TYPE_CHECKING
 
@@ -117,15 +118,8 @@ def sanitize_result(
         return result
 
     rebuilt_text = " ".join(segment.text for segment in collapsed).strip()
-    from transcriptions.service import TranscriptionResult as _Result
-
-    return _Result(
-        text=rebuilt_text,
-        language=result.language,
-        segments=collapsed,
-        backend_name=result.backend_name,
-        model_name=result.model_name,
-    )
+    # ``replace`` keeps the backend's coverage, measured on its raw segments.
+    return dataclasses.replace(result, text=rebuilt_text, segments=collapsed)
 
 
 def _collapse_loops(

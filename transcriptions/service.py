@@ -13,7 +13,7 @@ import tempfile
 import threading
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -26,6 +26,12 @@ from django.conf import settings
 
 from lane_scheduler import LANE_NON_INTERACTIVE, InferenceCancelled, admit_local_inference
 from transcriptions import formats as transcript_formats
+from transcriptions.coverage import (
+    IncompleteTranscriptError,
+    TranscriptCoverage,
+    check_transcript_coverage,
+    wav_duration_seconds,
+)
 from transcriptions.json_input import decode_json_object
 from transcriptions.native_output import read_native_json
 from transcriptions.owned_process import OwnedProcessMessages, run_native_process, run_owned_process
@@ -55,6 +61,12 @@ LEADING_FILLER_PATTERNS = {
     )
     for language, words in LEADING_FILLER_WORDS.items()
 }
+# whisper.cpp stderr lines worth keeping: its library logs errors such as
+# "failed to encode" or "failed to decode" through the log callback, which
+# ``-np`` would silence. Bounded so a noisy run cannot flood logs or errors.
+_WHISPERCPP_ERROR_LINE = re.compile(r"fail|error|abort|out of memory", re.IGNORECASE)
+WHISPERCPP_DIAGNOSTIC_MAX_LINES = 20
+WHISPERCPP_DIAGNOSTIC_MAX_LINE_CHARS = 300
 GERMAN_DISCOURSE_PARTICLE_PATTERN = re.compile(
     r"^(?P<prefix>(?:wie|was)\s+ist)\s+(?P<particle>denn|eigentlich|mal)\s+",
     re.IGNORECASE,
@@ -116,6 +128,9 @@ class TranscriptionResult:
     segments: list[TranscriptionSegment]
     backend_name: str = ""
     model_name: str = ""
+    # Set by backends that measure their output against the media duration
+    # (whisper.cpp); ``None`` otherwise.
+    coverage: TranscriptCoverage | None = None
 
 
 @dataclass(frozen=True)
@@ -206,12 +221,14 @@ class WhisperCppBackend:
         processors: int,
         max_context: int = 0,
         suppress_nst: bool = True,
+        max_gap_seconds: float = 600.0,
     ) -> None:
         self.binary_path = binary_path
         self.model_name = model_name
         self.processors = processors
         self.max_context = max_context
         self.suppress_nst = suppress_nst
+        self.max_gap_seconds = max_gap_seconds
 
     def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
         executable = resolve_whispercpp_binary(self.binary_path)
@@ -243,7 +260,8 @@ class WhisperCppBackend:
                 str(processors),
                 "-l",
                 params.language or "auto",
-                "-np",
+                # No ``-np``: it silences whisper.cpp's library log, including the
+                # errors of a part that fails under ``-p N``.
                 # Anti-hallucination: bound decoder context (0 = do not condition on
                 # previously generated text, the main long-form repetition-loop trigger).
                 "--max-context",
@@ -258,15 +276,19 @@ class WhisperCppBackend:
 
             _raise_if_cancelled(params)
             completed = run_cancellable_process(args, cancel_event=params.cancel_event)
+            diagnostics = whispercpp_error_lines(completed.stderr)
             if completed.returncode != 0:
-                detail = "\n".join(
-                    part.strip()
-                    for part in (completed.stderr, completed.stdout)
-                    if isinstance(part, str) and part.strip()
-                )
+                detail = "; ".join(diagnostics or whispercpp_tail_lines(completed.stderr))
                 if detail:
                     raise RuntimeError(f"whisper.cpp transcription failed: {detail}")
                 raise RuntimeError("whisper.cpp transcription failed.")
+            if diagnostics:
+                # Exit 0 with error lines is how a lost ``-p N`` part shows up.
+                _LOGGER.warning(
+                    "whisper.cpp exited 0 but logged errors processors=%s: %s",
+                    processors,
+                    " | ".join(diagnostics),
+                )
 
             json_path = output_base.with_suffix(".json")
             try:
@@ -278,7 +300,49 @@ class WhisperCppBackend:
                     "whisper.cpp transcription produced invalid JSON output."
                 ) from exc
             _raise_if_cancelled(params)
-        return normalize_whispercpp_payload(payload, model_name=self.model_name)
+            result = normalize_whispercpp_payload(payload, model_name=self.model_name)
+            # Measured on the normalized WAV while it still exists: the raw
+            # segments against the real duration, before any sanitizing.
+            try:
+                coverage = check_transcript_coverage(
+                    result.segments,
+                    media_duration_seconds=wav_duration_seconds(normalized_audio_path),
+                    max_gap_seconds=self.max_gap_seconds,
+                    backend_name="whisper.cpp",
+                )
+            except IncompleteTranscriptError as exc:
+                _LOGGER.error(
+                    "%s processors=%s stderr_errors=%s",
+                    exc,
+                    processors,
+                    " | ".join(diagnostics) or "none",
+                )
+                raise
+        return replace(result, coverage=coverage)
+
+
+def whispercpp_error_lines(stderr: object) -> list[str]:
+    """The last error-looking stderr lines of a whisper.cpp run, bounded."""
+    if not isinstance(stderr, str):
+        return []
+    lines = [
+        line.strip()[:WHISPERCPP_DIAGNOSTIC_MAX_LINE_CHARS]
+        for line in stderr.splitlines()
+        if _WHISPERCPP_ERROR_LINE.search(line)
+    ]
+    return lines[-WHISPERCPP_DIAGNOSTIC_MAX_LINES:]
+
+
+def whispercpp_tail_lines(stderr: object, *, count: int = 5) -> list[str]:
+    """The last nonblank stderr lines, bounded, for a failure without error lines."""
+    if not isinstance(stderr, str):
+        return []
+    lines = [
+        line.strip()[:WHISPERCPP_DIAGNOSTIC_MAX_LINE_CHARS]
+        for line in stderr.splitlines()
+        if line.strip()
+    ]
+    return lines[-count:]
 
 
 NORMALIZATION_MESSAGES = OwnedProcessMessages(
@@ -1091,6 +1155,7 @@ def build_backend_service(*, backend_name: str, model_name: str) -> BackendProto
             processors=settings.VOXHELM_WHISPERCPP_PROCESSORS,
             max_context=settings.VOXHELM_WHISPERCPP_MAX_CONTEXT,
             suppress_nst=settings.VOXHELM_WHISPERCPP_SUPPRESS_NST,
+            max_gap_seconds=settings.VOXHELM_WHISPERCPP_MAX_GAP_SECONDS,
         )
     if backend_name == "whisperkit":
         return WhisperKitBackend(

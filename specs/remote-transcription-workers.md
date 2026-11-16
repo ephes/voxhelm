@@ -406,7 +406,9 @@ Request:
     "backend": "whisper.cpp",
     "model": "ggml-large-v3.bin",
     "language": "de",
-    "processing_seconds": 1234.5
+    "processing_seconds": 1234.5,
+    "media_duration_seconds": 11343.0,
+    "covered_seconds": 11290.4
   },
   "artifacts": [
     {

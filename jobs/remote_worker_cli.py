@@ -44,6 +44,7 @@ from transcriptions.chapter_windows import (
     ChapterMarkError,
     parse_chapter_marks,
 )
+from transcriptions.coverage import coverage_metadata
 from transcriptions.diarization import (
     DiarizationError,
     DiarizationParams,
@@ -1068,6 +1069,7 @@ def build_result_metadata(
         "processing_seconds": processing_seconds,
         "source_name": media.source_name,
         "source_content_type": media.content_type,
+        **coverage_metadata(result.coverage),
     }
     if speakers_artifact is not None:
         metadata["diarization"] = {

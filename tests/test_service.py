@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,15 @@ class OverlappingBackend:
         del audio_path, params
         self.barrier.wait()
         return TranscriptionResult(text="ok", language="en", segments=[])
+
+
+def write_wav(path: Path, *, seconds: float = 1.0, rate: int = 16000) -> None:
+    """A silent 16-bit mono PCM WAV of ``seconds`` (what ffmpeg normalization writes)."""
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(rate)
+        wav_file.writeframes(b"\0\0" * int(seconds * rate))
 
 
 def owned_process_from(fake_run):
@@ -599,7 +609,7 @@ def test_whispercpp_backend_normalizes_input_audio_before_transcribing(
         call = [str(part) for part in args]
         calls.append(call)
         assert call[0] == settings.VOXHELM_FFMPEG_BIN
-        Path(call[-1]).write_bytes(b"RIFFfakewav")
+        write_wav(Path(call[-1]))
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     def fake_whisper_cli(args, *, cancel_event, **kwargs):
@@ -681,7 +691,7 @@ def _capture_whispercpp_args(
         del kwargs
         call = [str(part) for part in args]
         calls.append(call)
-        Path(call[-1]).write_bytes(b"RIFFfakewav")
+        write_wav(Path(call[-1]))
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     def fake_whisper_cli(args, **kwargs):
@@ -884,7 +894,7 @@ def test_whispercpp_backend_raises_when_transcript_json_is_missing(
         del kwargs
         call = [str(part) for part in args]
         assert call[0] == settings.VOXHELM_FFMPEG_BIN
-        Path(call[-1]).write_bytes(b"RIFFfakewav")
+        write_wav(Path(call[-1]))
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     monkeypatch.setattr("transcriptions.service.run_owned_process", owned_process_from(fake_run))
@@ -1328,7 +1338,7 @@ def test_whispercpp_backend_raises_before_starting_whisper_cli_when_cancelled(
     def fake_run(args, **kwargs):
         del kwargs
         call = [str(part) for part in args]
-        Path(call[-1]).write_bytes(b"RIFFfakewav")
+        write_wav(Path(call[-1]))
         # The client disconnects while ffmpeg normalizes the upload.
         cancel_event.set()
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
@@ -1407,7 +1417,7 @@ def test_transcribe_audio_kills_real_whisper_cli_and_releases_the_slot(
     def fake_ffmpeg_run(args, **kwargs):
         del kwargs
         call = [str(part) for part in args]
-        Path(call[-1]).write_bytes(b"RIFFfakewav")
+        write_wav(Path(call[-1]))
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     monkeypatch.setattr(

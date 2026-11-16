@@ -58,6 +58,7 @@ from transcriptions.chapter_windows import (
     ChapterMarkError,
     parse_chapter_marks,
 )
+from transcriptions.coverage import coverage_metadata
 from transcriptions.diarization import (
     DiarizationError,
     DiarizationParams,
@@ -1276,6 +1277,7 @@ def build_transcription_metadata(
         "source_name": source_name,
         "source_url": source_url,
         "source_content_type": source_content_type,
+        **coverage_metadata(result.coverage),
     }
 
 

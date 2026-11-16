@@ -1055,13 +1055,7 @@ def resegment_result(
                     words=piece.words,
                 )
             )
-    resegmented = TranscriptionResult(
-        text=result.text,
-        language=result.language,
-        segments=segments,
-        backend_name=result.backend_name,
-        model_name=result.model_name,
-    )
+    resegmented = replace(result, segments=segments)
     return resegmented, from_split
 
 

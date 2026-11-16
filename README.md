@@ -80,6 +80,47 @@ removing genuine speech, only ever removes or collapses artifact segments, and
 returns clean transcripts unchanged. Disable it with
 `VOXHELM_SANITIZE_TRANSCRIPT=false` only to inspect raw decoder output.
 
+## Incomplete whisper.cpp transcripts
+
+whisper.cpp 1.9.5 with `-p N` (`VOXHELM_WHISPERCPP_PROCESSORS` above 1) runs
+parts 2..N of the audio in worker threads and ignores their return codes. A part
+that fails mid-way (for example `failed to encode` or `failed to decode`) keeps
+the segments it had, is merged silently, and `whisper-cli` still exits 0.
+Archive item 408 (2026-11-05, a 3 h episode with `-p 4`) came back as succeeded
+with more than half of the audio missing. The remote workers on `atlas` and
+`studio` therefore run with one processor (ops-control host config); with `-p 1`
+such an error reaches whisper-cli's non-zero exit.
+
+As a backstop, every whisper.cpp run checks its raw segments against the real
+duration of the normalized WAV (frames / rate) before the temporary WAV is
+removed (`transcriptions/coverage.py`). The largest stretch without text, at the
+start, between segments or at the end, must not exceed
+`VOXHELM_WHISPERCPP_MAX_GAP_SECONDS` (default `600`; `0` disables the rejection,
+a gap exactly at the threshold passes). Coverage is the sorted union of the
+segment intervals clamped to the media, so overlapping segments count once. An
+unreadable normalized WAV fails the run.
+
+- A longer gap raises `IncompleteTranscriptError` with the gap and the covered
+  seconds. It is not a backend-unavailable error, so no fallback backend runs:
+  a remote worker fails the attempt as retryable (the job is requeued until
+  `max_attempts`, then fails), a local job fails, and the synchronous
+  `/v1/audio/transcriptions` endpoint answers HTTP 500. No transcript artifact is
+  published.
+- whisper.cpp runs without `-np`, which would silence its library log including
+  these errors. Up to 20 error-looking stderr lines (`fail`, `error`, `abort`,
+  `out of memory`) are logged: as a warning when the run exits 0 anyway, and
+  with the rejection. A failed run's error carries those lines, or the last five
+  stderr lines, but never stdout (the transcript).
+- Successful whisper.cpp results record `media_duration_seconds` and
+  `covered_seconds` (raw segments, before sanitizing) in the job's
+  `result_metadata`, next to `duration_seconds` (the last segment's end, as
+  before). The control plane accepts both numbers from remote workers.
+
+The check is a heuristic for spoken-word media: a stretch of music or silence
+longer than the threshold also fails it, and losses shorter than the threshold
+stay undetected. It covers whisper.cpp only; MLX, WhisperKit, Parakeet and the
+transcription profiles are not measured.
+
 ## Transcript numeric validation
 
 Every cue must have finite start and end timestamps whose multiplication by
@@ -307,6 +348,10 @@ export VOXHELM_WHISPERCPP_PROCESSORS="4"
 # default. suppress-nst drops non-speech tokens to curb hallucinations over music/silence.
 export VOXHELM_WHISPERCPP_MAX_CONTEXT="0"
 export VOXHELM_WHISPERCPP_SUPPRESS_NST="true"
+# Largest stretch of the media a whisper.cpp transcript may leave without text
+# before the run fails as incomplete (see "Incomplete whisper.cpp transcripts");
+# 0 disables the rejection.
+export VOXHELM_WHISPERCPP_MAX_GAP_SECONDS="600"
 # Parakeet TDT through the parakeet-mlx CLI (defaults shown). The CLI runs as a
 # child process from its own Python 3.13 tool environment, offline, against a
 # model directory deployed at a pinned commit (config.json + model.safetensors);
