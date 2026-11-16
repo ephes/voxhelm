@@ -1001,3 +1001,24 @@ guest cases, or require a larger margin for a known speaker to win on an untied
 label (all five additional pp80 guest cues with a host name come from that
 relabel step), then re-measure with the same bundles (an `evals` `run` replay
 takes about 3 minutes per episode).
+
+### Offline input admission (round 110)
+
+Controls use strict UTF-8 object JSON: regular no-follow files, at most 64 MiB,
+128 levels, unique members and finite numbers. Errors identify schema locations,
+not control contents. Truth admits at most 1,000,000 null/nonempty-name frames,
+FPS in (0, 1000], and at most 5,000,000 cue/frame visits. Cues/turns/words admit
+50,000 entries, timestamps in [0, 7200] seconds with end >= start; booleans are
+not numbers. Manifests admit 128 references/guest names and references of at
+most 600 seconds. Malformed controls fail before embedding/model startup.
+
+Frozen members must be relative regular `.npy` files contained in the chosen
+bundle, with no `.`/`..`, backslashes, absolute paths or symlink components.
+All opened NumPy 1.0/2.0 headers and exact file lengths are checked before sample
+allocation: nonempty native float32 mono vectors, at most two hours at 16 kHz
+for audio, five seconds per reference window, 1000 windows and 512 MiB aggregate
+sample bytes (including repeated members). Samples must be finite before any
+embedding. After header admission fixed-count raw float32 reads avoid reparsing
+a potentially modified header; pickle is never enabled or used. Opened files
+must remain unchanged during reads. These are offline capacity limits, not
+changes to production inference admission.

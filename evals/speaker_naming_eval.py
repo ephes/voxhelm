@@ -17,6 +17,15 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from evals.speaker_inputs import (
+    load_arrays,
+    read_json,
+    validate_bundle,
+    validate_manifest,
+    validate_sidecar,
+    validate_truth,
+)
+
 BUCKETS = ((0.5, "<0.5"), (1, "0.5-1"), (1.5, "1-1.5"), (2.5, "1.5-2.5"), (5, "2.5-5"))
 
 
@@ -64,9 +73,11 @@ def score(
     guests: Sequence[str] = (),
     baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    frames, fps = validate_truth(truth) if truth is not None else ([], 10.0)
+    validate_sidecar(sidecar, frames, fps)
+    if baseline is not None:
+        validate_sidecar(baseline, frames, fps)
     names = published_names(sidecar, list(guests))
-    frames = truth["frames"] if truth else []
-    fps = float(truth["fps"]) if truth else 10.0
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("Truth fps must be finite and positive")
     frame_counts: Counter[str] = Counter()
@@ -198,10 +209,6 @@ def score(
     }
 
 
-def read_json(path: Path) -> Any:
-    return json.loads(path.read_text())
-
-
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
 
@@ -248,6 +255,7 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
     from transcriptions.service import TranscribeParams, transcribe_audio
 
     manifest = read_json(manifest_path)
+    validate_manifest(manifest)
     audio = (manifest_path.parent / manifest["audio"]).resolve()
     destination.mkdir(parents=True, exist_ok=False)
     result = transcribe_audio(
@@ -310,8 +318,6 @@ def run_bundle(
     diagnostics_path: Path | None = None,
 ) -> tuple[dict[str, Any], float]:
     """Only embeddings/postprocessing run here; wall time stays outside the sidecar."""
-    import numpy
-
     from transcriptions.diarization import SpeakerTurn
     from transcriptions.known_speaker import (
         ReferenceAudio,
@@ -323,8 +329,9 @@ def run_bundle(
     from transcriptions.service import TranscriptionResult, TranscriptionSegment, TranscriptionWord
 
     bundle = read_json(bundle_path / "bundle.json")
-    if bundle["version"] != 1:
-        raise ValueError("Unsupported bundle version")
+    members = validate_bundle(bundle)
+    arrays = iter(load_arrays(bundle_path, members))
+    audio = next(arrays)
     config = known_speaker_config_from_mapping(config_data)
     result_data = dict(bundle["result"])
     result_data["segments"] = [
@@ -340,14 +347,11 @@ def run_bundle(
         ReferenceAudio(
             speaker_id=reference["id"],
             name=reference["name"],
-            windows=[
-                numpy.load(bundle_path / name, allow_pickle=False) for name in reference["windows"]
-            ],
+            windows=[next(arrays) for name in reference["windows"]],
         )
         for reference in bundle["references"]
     ]
     backend = get_known_speaker_backend(config.embedding_model)
-    audio = numpy.load(bundle_path / bundle["audio"], allow_pickle=False)
     raw_turns = [SpeakerTurn(**turn) for turn in bundle["turns"]["regular"]]
     started = monotonic()
     outcome = run_known_speaker_postprocess(

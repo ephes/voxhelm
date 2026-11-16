@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Admit bounded strict offline controls and contained frozen NumPy members;
+  validate array geometry, aggregate work and finite samples before embeddings.
+
 - Count all clear truth frames in offline speaker scores, expose coverage, and
   treat conflicting overlapping names as unnamed independent of cue order.
 
