@@ -46,8 +46,8 @@ Uncertain retirement adds a fixed exception note and retains writable scratch
 and partial exports, without accepting their output or retrying in that scratch.
 Operators must stop/verify the remaining process group before removing retained
 `voxhelm-whispercpp-*`, `voxhelm-parakeet-*`, `voxhelm-window-*`,
-`voxhelm-chapter-windows-*` scratch or partial speech exports from the system temp
-directory. Restart the affected worker after recovery; never delete these while
+`voxhelm-chapter-windows-*` scratch or partial `voxhelm-speech-export-*` speech
+exports from the system temp directory. Restart the affected worker after recovery; never delete these while
 a native child may still be writing.
 Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,

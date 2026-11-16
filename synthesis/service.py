@@ -531,7 +531,11 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
             content_type=CONTENT_TYPES["wav"],
         )
 
-    target_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=f".{normalized}").name)
+    target_path = Path(
+        tempfile.NamedTemporaryFile(
+            delete=False, prefix="voxhelm-speech-export-", suffix=f".{normalized}"
+        ).name
+    )
     args = [
         settings.VOXHELM_FFMPEG_BIN,
         "-nostdin",

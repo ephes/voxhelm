@@ -34,6 +34,9 @@
   handling an unrelated exception still fails closed on cleanup errors and does
   not tag the caller's exception with the ownership note.
 
+- Name reserved speech export files `voxhelm-speech-export-*` so retained
+  partial exports can be identified during operator recovery.
+
 - Include untied pyannote-label episode profiles for guests without reference
   audio. Preserve original overlap labels on relabelled short cues and expose
   ranked episode candidates; add offline guest/profile sanity diagnostics.
