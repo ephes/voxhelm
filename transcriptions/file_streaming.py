@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from collections.abc import AsyncIterator
 from threading import Lock
 from typing import BinaryIO
@@ -34,13 +33,14 @@ class AsyncReaderStream:
         self.reading = False
         self.closed = False
 
-    def close(self) -> None:
+    def close(self, primary: BaseException | None = None) -> None:
+        """Close once; a close error must not replace ``primary``, this stream's own failure."""
         with self.lock:
             if self.closed:
                 return
             self.closed = True
             if not self.reading:
-                _close_reader(self.reader, preserve_error=sys.exception() is not None)
+                _close_reader(self.reader, preserve_error=primary is not None)
 
     def _read(self) -> bytes:
         with self.lock:
@@ -59,11 +59,17 @@ class AsyncReaderStream:
                     _close_reader(self.reader, preserve_error=True)
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        # Track this iterator's own failure explicitly: sys.exception() in a finally
+        # block would also report an unrelated exception a caller is handling.
+        primary: BaseException | None = None
         try:
             while chunk := await asyncio.to_thread(self._read):
                 yield chunk
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            self.close()
+            self.close(primary)
 
 
 def reader_response(
@@ -89,9 +95,9 @@ def reader_response(
             if header in file_response:
                 response[header] = file_response[header]
         return response
-    except BaseException:
+    except BaseException as exc:
         if owner is not None:
-            owner.close()
+            owner.close(exc)
         else:
             _close_reader(reader, preserve_error=True)
         raise

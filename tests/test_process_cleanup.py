@@ -251,3 +251,39 @@ def test_export_output_survives_uncertain_retirement(monkeypatch, tmp_path):
         service.export_audio(_result(tmp_path), output_format="mp3")
     assert caught.value is failure
     assert outputs[0].read_bytes() == b"partial synthetic"
+
+
+@pytest.mark.parametrize("kind", ["owned", "native"])
+def test_caller_handled_exception_is_not_mistaken_for_run_failure(fake_child, kind):
+    # A run that starts while its caller is handling an unrelated exception must
+    # still fail closed when cleanup cannot reap the child, and must not tag the
+    # caller's exception with the ownership note.
+    fake_child.selector.fail = False
+
+    def wait(*, timeout=None):
+        raise subprocess.TimeoutExpired(["synthetic"], timeout or 0)
+
+    fake_child.child.wait = wait
+    outer = ValueError("caller is handling this")
+    try:
+        raise outer
+    except ValueError:
+        with pytest.raises(RuntimeError, match="Process cleanup failed") as caught:
+            run(kind)
+    assert owned_process.process_ownership_uncertain(caught.value)
+    assert not owned_process.process_ownership_uncertain(outer)
+
+
+def test_output_directory_ignores_caller_handled_uncertain_exception(tmp_path):
+    from pathlib import Path
+
+    outer = OSError("caller is handling this")
+    outer.add_note(owned_process.PROCESS_OWNERSHIP_UNCERTAIN)
+    try:
+        raise outer
+    except OSError:
+        with owned_process.process_output_directory(prefix=str(tmp_path / "synthetic-")) as root:
+            output = Path(root) / "output.wav"
+            output.write_bytes(b"synthetic")
+    # This block succeeded, so its own scratch is cleaned up.
+    assert not output.exists()

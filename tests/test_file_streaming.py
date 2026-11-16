@@ -153,3 +153,20 @@ def test_cancelled_read_defers_failing_close_and_preserves_worker_error(caplog, 
     assert worker_errors == ([primary] if read_fails else [])
     assert "Reader cleanup failed" in caplog.text
     assert "private close diagnostic" not in caplog.text
+
+
+def test_close_inside_caller_handled_exception_still_reports_close_failure(caplog):
+    secondary = OSError("private close diagnostic")
+
+    class Reader(io.BytesIO):
+        def close(self):
+            super().close()
+            raise secondary
+
+    stream = file_streaming.AsyncReaderStream(Reader())
+    try:
+        raise ValueError("caller is handling this")
+    except ValueError:
+        with pytest.raises(OSError) as caught:
+            stream.close()
+    assert caught.value is secondary

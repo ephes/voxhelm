@@ -11,7 +11,6 @@ import os
 import selectors
 import signal
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -49,10 +48,16 @@ def process_output_directory(*, prefix: str) -> Iterator[str]:
     """Retain native writable scratch when retirement could not be confirmed."""
     temporary = tempfile.TemporaryDirectory(prefix=prefix, delete=False)
     with temporary as directory:
+        # Only this block's own failure counts; sys.exception() in finally would also
+        # see an unrelated exception a caller is handling.
+        primary: BaseException | None = None
         try:
             yield directory
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            if process_ownership_uncertain(sys.exception()):
+            if process_ownership_uncertain(primary):
                 _LOGGER.warning("Native writable scratch retained; operator recovery is required.")
             else:
                 # delete=False disables automatic cleanup, including on GC; explicit
@@ -78,9 +83,14 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _cleanup_process(process: subprocess.Popen[bytes], *, preserve_error: bool) -> None:
-    """Attempt every owned resource even when an earlier cleanup stage fails."""
-    primary = sys.exception()
+def _cleanup_process(process: subprocess.Popen[bytes], *, primary: BaseException | None) -> None:
+    """Attempt every owned resource even when an earlier cleanup stage fails.
+
+    ``primary`` is the run's own failure (None after a normal exit). It is passed
+    explicitly because sys.exception() in a finally block also reports exceptions
+    a caller is still handling, which would hide a cleanup failure after success.
+    """
+    preserve_error = primary is not None
     failed = False
     uncertain = False
     kill_denied = False
@@ -167,6 +177,7 @@ def run_owned_process(
         raise RuntimeError(messages.start) from exc
     diagnostic = bytearray()
     received = 0
+    primary: BaseException | None = None
     try:
         assert process.stderr is not None
         with selectors.DefaultSelector() as selector:
@@ -198,8 +209,11 @@ def run_owned_process(
             if monotonic() >= deadline:
                 raise RuntimeError(messages.deadline) from subprocess.TimeoutExpired(args, timeout)
             sleep(0.01)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        _cleanup_process(process, preserve_error=sys.exception() is not None)
+        _cleanup_process(process, primary=primary)
     if process.returncode != 0:
         _LOGGER.warning(
             "%s Exit status %s: %s",
@@ -247,6 +261,7 @@ def run_native_process(
         "stderr": _HeadTail(head=_STDERR_HEAD_BYTES, tail=_STDERR_TAIL_BYTES),
     }
     exited_drain_until: float | None = None
+    primary: BaseException | None = None
     try:
         assert process.stdout is not None and process.stderr is not None
         with selectors.DefaultSelector() as selector:
@@ -283,7 +298,8 @@ def run_native_process(
                     if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
                         break
                     sleep(max(0, wait))
-    except BaseException:
+    except BaseException as exc:
+        primary = exc
         # A secondary signal/probe error must not replace cancellation/read failure.
         try:
             try:
@@ -299,7 +315,7 @@ def run_native_process(
             _LOGGER.warning("Process cleanup failed at terminate; operator recovery may be needed.")
         raise
     finally:
-        _cleanup_process(process, preserve_error=sys.exception() is not None)
+        _cleanup_process(process, primary=primary)
     check_cancelled()
     return subprocess.CompletedProcess(
         args,

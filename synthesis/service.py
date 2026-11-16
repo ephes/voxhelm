@@ -5,7 +5,6 @@ import logging
 import math
 import os
 import stat
-import sys
 import tempfile
 import wave
 from collections import OrderedDict
@@ -557,9 +556,9 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
                 failure="Audio conversion failed.",
             ),
         )
-    except BaseException:
+    except BaseException as exc:
         # An unreaped converter may still be writing this reserved output.
-        if not process_ownership_uncertain(sys.exception()):
+        if not process_ownership_uncertain(exc):
             cleanup_failed_synthesis(target_path)
         raise
 

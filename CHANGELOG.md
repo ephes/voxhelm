@@ -16,6 +16,11 @@
   preserve read/cancellation errors if closure also fails, with bounded private
   cleanup diagnostics and no close/read race.
 
+- Decide cleanup outcomes from each run's own failure instead of
+  `sys.exception()`, so a native run or reader close started while a caller is
+  handling an unrelated exception still fails closed on cleanup errors and does
+  not tag the caller's exception with the ownership note.
+
 - Include untied pyannote-label episode profiles for guests without reference
   audio. Preserve original overlap labels on relabelled short cues and expose
   ranked episode candidates; add offline guest/profile sanity diagnostics.
