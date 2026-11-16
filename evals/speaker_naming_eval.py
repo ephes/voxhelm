@@ -70,7 +70,8 @@ def score(
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("Truth fps must be finite and positive")
     frame_counts: Counter[str] = Counter()
-    covered: set[int] = set()
+    events: dict[int, Counter[str | None]] = {}
+    covered_count = 0
     buckets: dict[str, Counter[str]] = {name: Counter() for _, name in BUCKETS}
     buckets[">=5"] = Counter()
     reasons: dict[str, Counter[str]] = {}
@@ -101,10 +102,9 @@ def score(
             raise ValueError("Invalid segment boundaries")
         indices = range(max(0, math.ceil(start * fps)), min(len(frames), math.ceil(end * fps)))
         golds = Counter(frames[i] for i in indices if frames[i] is not None)
-        for i in indices:
-            if i not in covered and frames[i] is not None:
-                frame_counts[outcome(name, frames[i])] += 1
-                covered.add(i)
+        if indices:
+            events.setdefault(indices.start, Counter())[name] += 1
+            events.setdefault(indices.stop, Counter())[name] -= 1
         gold = None
         if golds:
             top, count = golds.most_common(1)[0]
@@ -155,9 +155,23 @@ def score(
             "right_pct": 100 * counter["right"] / clear if clear else None,
         }
 
+    active: Counter[str | None] = Counter()
+    for i, gold_frame in enumerate(frames):
+        active.update(events.get(i, {}))
+        labels = {label for label, count in active.items() if count > 0}
+        if gold_frame is not None:
+            covered_count += bool(labels)
+            label = next(iter(labels)) if len(labels) == 1 else None
+            frame_counts[outcome(label, gold_frame)] += 1
     clear_changes = [c for c in changes if c["truth"] is not None]
     return {
-        "frames": rates(frame_counts),
+        "frames": {
+            **rates(frame_counts),
+            "covered": covered_count,
+            "coverage_pct": 100 * covered_count / sum(frame_counts.values())
+            if frame_counts
+            else None,
+        },
         "lines": line_metrics(lines),
         "duration_buckets": {key: line_metrics(value) for key, value in buckets.items()},
         "accept_reasons": {key: line_metrics(value) for key, value in reasons.items()},

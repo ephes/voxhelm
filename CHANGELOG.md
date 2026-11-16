@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Count all clear truth frames in offline speaker scores, expose coverage, and
+  treat conflicting overlapping names as unnamed independent of cue order.
+
 - Report incomplete whisper.cpp output as an error (archive item 408: with
   `-p 4`, whisper.cpp 1.9.5 merged three failed parts silently and exited 0).
   Each whisper.cpp run checks its raw segments against the normalized WAV's

@@ -720,7 +720,12 @@ has a reference; repeat it for multiple unreferenced contributors (the guest rul
 then stays off). `--baseline SIDECAR` lists changed names. Truth input is JSON
 `{"fps":10,"frames":["display name",null]}`: frame i samples i/fps, null excludes
 silence/overlap/unclear speech. Convert stored truth to these display names before
-scoring. Frames in overlapping transcript segments count once, first cue wins.
+scoring. Every non-null truth frame counts once, including uncovered speech (unnamed).
+`frames.covered` and `coverage_pct` measure transcript coverage separately.
+Overlapping cues agree only if all published labels agree, including null;
+conflicts count as unnamed. Intervals are half-open and cue order has no effect.
+Frame percentages from older reports omitted uncovered speech and used first-cue
+arbitration; they are not directly comparable. Line metrics remain cue-based.
 Clear-line precision includes unnamed clear lines in its denominator.
 The committed synthetic fixture scores 15/30 right, 5/30 wrong, 10/30 unnamed
 frames and 1/4 unnamed lines with `--guest Guest`; it is not a pilot measurement.

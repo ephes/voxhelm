@@ -249,3 +249,40 @@ def test_score_rejects_missing_baseline_lines():
     variant["segments"].pop()
     with pytest.raises(ValueError, match="Baseline segment boundaries differ"):
         score(variant, baseline=baseline)
+
+
+def simple_sidecar(*segments):
+    return {
+        "summary": {},
+        "segments": [
+            {"start": start, "end": end, "speaker": name, "speaker_uncertain": False}
+            for start, end, name in segments
+        ],
+    }
+
+
+def test_all_truth_frames_include_uncovered_speech():
+    report = score(simple_sidecar((0, 0.1, "Alice")), {"fps": 10, "frames": ["Alice"] * 10})
+    assert [report["frames"][k] for k in ("total", "right", "unnamed")] == [10, 1, 9]
+    assert report["frames"]["covered"] == 1
+    assert score(simple_sidecar(), {"fps": 10, "frames": ["Alice"]})["frames"]["unnamed"] == 1
+    assert score(simple_sidecar(), {"fps": 10, "frames": [None]})["frames"]["right_pct"] is None
+
+
+def test_overlap_votes_are_order_independent_and_boundaries_are_half_open():
+    from itertools import permutations
+
+    segments = [(0, 1, "Alice"), (0, 1, "Bob"), (1, 2, "Alice")]
+    reports = [
+        score(simple_sidecar(*p), {"fps": 1, "frames": ["Alice"] * 2})["frames"]
+        for p in permutations(segments)
+    ]
+    assert all(r == reports[0] for r in reports)
+    assert reports[0]["right"] == 1
+    assert reports[0]["unnamed"] == 1
+    assert (
+        score(simple_sidecar((0, 1, "Alice"), (0, 1, "Alice")), {"fps": 1, "frames": ["Alice"]})[
+            "frames"
+        ]["right"]
+        == 1
+    )
