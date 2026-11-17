@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.14 (2026-11-17)
+
+Published to PyPI for the remote transcription workers (`atlas`, `studio`),
+which run 0.1.13 from PyPI until now. It carries the changes merged since
+0.1.13, including WebVTT cue whitespace normalization for `remote_pull` jobs,
+short-segment speaker naming from episode voiceprints and bounded native
+process cleanup. The workers pick it up only after the ops-control worker pin
+moves to 0.1.14 and they are redeployed.
+
 - Gate migration drift locally: `just check` now runs `just check-migrations`
   (`makemigrations --check --dry-run` under `tests.settings`), so a model change
   without its committed migration fails before merge; a test keeps the recipe
