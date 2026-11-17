@@ -37,6 +37,7 @@ from typing import Any
 
 HINT_KEYS = {"num": "num_speakers", "min": "min_speakers", "max": "max_speakers"}
 PACKAGES = ("voxhelm", "pyannote.audio", "torch", "mlx-whisper")
+MAX_PROBE_INFERENCES = 10_000
 STT_SETTINGS = (
     "VOXHELM_STT_BACKEND",
     "VOXHELM_STT_FALLBACK_BACKEND",
@@ -121,6 +122,45 @@ def parse_reference(value: str) -> tuple[str, float, float]:
 def admit_source_interval(start: float, end: float, duration: float) -> None:
     if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= duration):
         raise ValueError("Invalid speaker probe source interval.")
+
+
+def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[float, float]]]]:
+    """Bound the entire expansion before decoding or acquiring a backend."""
+    plans = []
+    total = len(args.segment)
+    if total > MAX_PROBE_INFERENCES or len(args.target) * len(args.window) > MAX_PROBE_INFERENCES:
+        raise ValueError("Invalid speaker probe window expansion.")
+    for start, end in args.target:
+        for size, hop in args.window:
+            if not (math.isfinite(size) and math.isfinite(hop) and size > 0 and hop > 0):
+                raise ValueError("Invalid speaker probe window expansion.")
+            span = end - size - start + 1e-9
+            count = 0
+            if span >= 0:
+                quotient = span / hop
+                if (
+                    start + hop <= start
+                    or not math.isfinite(quotient)
+                    or quotient >= MAX_PROBE_INFERENCES - total
+                ):
+                    raise ValueError("Invalid speaker probe window expansion.")
+                count = math.floor(quotient) + 1
+            total += count
+            bounds = []
+            previous = None
+            for index in range(count):
+                cursor = start + index * hop
+                stop = min(cursor + size, end)
+                if not (
+                    math.isfinite(cursor)
+                    and cursor < stop
+                    and (previous is None or cursor > previous)
+                ):
+                    raise ValueError("Invalid speaker probe window expansion.")
+                bounds.append((cursor, stop))
+                previous = cursor
+            plans.append((f"{start}-{end} {size}s/{hop}s", bounds))
+    return plans
 
 
 def write_report(report: dict[str, Any], out: Path | None) -> None:
@@ -212,6 +252,7 @@ def run_subwindow(args: argparse.Namespace) -> None:
         slice_samples,
     )
 
+    plans = prepare_subwindows(args)
     reference_samples = decode_mono_16k(args.reference_audio)
     samples = decode_mono_16k(args.audio)
     for _name, start, end in args.reference:
@@ -219,14 +260,18 @@ def run_subwindow(args: argparse.Namespace) -> None:
     for start, end in [*args.segment, *args.target]:
         admit_source_interval(start, end, len(samples) / SAMPLE_RATE)
 
-    config = KnownSpeakerConfig()
-    backend = get_known_speaker_backend(config.embedding_model)
     references = []
     for name, start, end in args.reference:
         clip = slice_samples(reference_samples, SAMPLE_RATE, start, end)
         windows = extract_reference_windows(clip, SAMPLE_RATE)
         references.append(ReferenceAudio(speaker_id=name.lower(), name=name, windows=windows))
         print(f"reference {name}: {start}-{end}s -> {len(windows)} windows")
+    total = len(args.segment) + sum(len(bounds) for _key, bounds in plans)
+    total += sum(len(reference.windows) for reference in references)
+    if total > MAX_PROBE_INFERENCES:
+        raise ValueError("Invalid speaker probe window expansion.")
+    config = KnownSpeakerConfig()
+    backend = get_known_speaker_backend(config.embedding_model)
     centroids = build_speaker_centroids(references, backend)
     names = sorted(centroids)
 
@@ -266,16 +311,10 @@ def run_subwindow(args: argparse.Namespace) -> None:
         "whole_segments": whole,
         "windows": {},
     }
-    for target_start, target_end in args.target:
-        for size, hop in args.window:
-            rows = []
-            cursor = target_start
-            while cursor + size <= target_end + 1e-9:
-                rows.append(classify(cursor, cursor + size))
-                cursor += hop
-            key = f"{target_start}-{target_end} {size}s/{hop}s"
-            report["windows"][key] = rows
-            show(f"windows {key}:", rows)
+    for key, bounds in plans:
+        rows = [classify(start, end) for start, end in bounds]
+        report["windows"][key] = rows
+        show(f"windows {key}:", rows)
     if embed_seconds:
         # The first call includes the lazy model load, so keep it out of the median.
         steady = sorted(embed_seconds[1:]) or embed_seconds

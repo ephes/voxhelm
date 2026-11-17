@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preflight mixed-speaker subwindow expansion with a 10,000-inference budget
+  and representable integer-index progress before acquiring a model.
+
 - Validate mixed-speaker probe intervals and decoded source extents before
   reference embedding; retain exact endpoints and short valid segment padding.
 

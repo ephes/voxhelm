@@ -15,3 +15,11 @@ source intervals produce an argparse error (exit 2).
 
 Window size and hop are independently finite and positive; a hop smaller than
 the size is valid.
+
+Subwindow runs preflight the full target/window cross-product, allowing at most
+10,000 plan entries and 10,000 embeddings in total (whole segments, subwindows
+and reference windows). Unrepresentable hops or endpoints are refused before
+backend acquisition; the target expansion is checked even before decoding.
+Windows run in target order, then setting order, then integer index order.
+The existing 1 ns end-inclusion tolerance is retained, clipping that rounding
+sliver to the admitted target endpoint. No repeated float addition is used.
