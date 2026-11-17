@@ -53,6 +53,11 @@ Standalone WhisperCpp transcript output must be a regular file opened without
 following links, at most 64 MiB, and strict UTF-8 object JSON (128 nesting levels,
 unique members, finite numbers). Invalid output fails before normalization or
 artifact publication. No models are needed for the synthetic admission tests.
+All shared native JSON reads (standalone, window and chapter-window inference,
+including remote workers) require unchanged descriptor identity, size, nanosecond
+mtime and ctime across the bounded read, with exactly the initially admitted byte
+length. A rewrite, truncation or growth during reading fails through the native
+output error boundary before parsing or transcript publication.
 
 ## Transcript Sanitization
 

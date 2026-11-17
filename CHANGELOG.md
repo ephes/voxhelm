@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuse changing or incomplete native JSON file generations before parsing or
+  publishing local, window, chapter-window or remote transcript output.
+
 - Reject nonfinite or negative coverage policies before native work and invalid
   measured durations at the shared coverage boundary; zero still disables gap rejection.
 
