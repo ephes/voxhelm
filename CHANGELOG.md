@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Reuse unchanged offline speaker source/model/code fingerprints within each
+  suite run. Shared model roles and episodes hash once; preflight and pre/post
+  replay identity checks still run, but for an unchanged file generation they
+  now compare device, inode, size, mtime and ctime of the opened file and its
+  name, and rehash only when that generation changes.
+
+- Keep offline speaker publisher locks bound to owned, single-link named files
+  and held parent directories; refuse detected replacement before bundle or
+  suite publication, preserving the previous completed tag. A bundle
+  destination's parent or a suite `results/` directory that is itself a symlink
+  is now refused; point the paths at the real directory instead.
+
 - Refuse changing or incomplete native JSON file generations before parsing or
   publishing local, window, chapter-window or remote transcript output.
 

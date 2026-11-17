@@ -1,5 +1,8 @@
 """Frozen bundle and complete suite publication, using synthetic backends."""
 
+import os
+import time
+
 import numpy as np
 import pytest
 
@@ -301,3 +304,347 @@ def test_sealed_manifest_must_fit_control_limit_before_publication(capture, monk
     with pytest.raises(ValueError, match="control"):
         ev.create_bundle(manifest, other)
     assert not other.exists()
+
+
+@pytest.mark.parametrize("entry", ["symlink", "hardlink", "fifo", "directory", "foreign-owner"])
+def test_publisher_refuses_unowned_or_aliased_lock(tmp_path, monkeypatch, entry):
+    import os
+
+    from evals.speaker_generations import publisher
+
+    lock = tmp_path / ".baseline.lock"
+    other = tmp_path / "other"
+    other.write_bytes(b"unchanged")
+    if entry == "symlink":
+        lock.symlink_to(other)
+    elif entry == "hardlink":
+        os.link(other, lock)
+    elif entry == "fifo":
+        os.mkfifo(lock)
+    elif entry == "directory":
+        lock.mkdir()
+    else:
+        lock.touch()
+        monkeypatch.setattr(os, "getuid", lambda: lock.stat().st_uid + 1)
+    with pytest.raises(ValueError, match="publisher"):
+        with publisher(tmp_path, "baseline"):
+            pytest.fail("inadmissible lock acquired")
+    assert other.read_bytes() == b"unchanged"
+
+
+def test_publisher_rechecks_name_after_flock(tmp_path, monkeypatch):
+    import fcntl
+
+    from evals.speaker_generations import publisher
+
+    flock = fcntl.flock
+
+    def acquire_and_replace(fd, operation):
+        flock(fd, operation)
+        lock = tmp_path / ".baseline.lock"
+        lock.unlink()
+        lock.touch()
+
+    monkeypatch.setattr(fcntl, "flock", acquire_and_replace)
+    with pytest.raises(ValueError, match="publisher"):
+        with publisher(tmp_path, "baseline"):
+            pytest.fail("replaced lock admitted after flock")
+
+
+def test_publisher_holds_and_checks_parent(tmp_path):
+    from evals.speaker_generations import publisher
+
+    parent = tmp_path / "results"
+    with publisher(parent, "baseline") as verify:
+        parent.rename(tmp_path / "old-results")
+        parent.mkdir()
+        (parent / ".baseline.lock").touch()
+        with pytest.raises(ValueError, match="publisher"):
+            verify()
+
+
+def test_publisher_refuses_symlinked_parent_with_clear_message(tmp_path):
+    from evals.speaker_generations import publisher
+
+    (tmp_path / "real-results").mkdir()
+    (tmp_path / "results").symlink_to("real-results", target_is_directory=True)
+    with pytest.raises(ValueError, match="real directory, not a symlink"):
+        with publisher(tmp_path / "results", "baseline"):
+            raise AssertionError("must not admit a symlinked parent")
+    assert not (tmp_path / "real-results" / ".baseline.lock").exists()
+
+
+def test_bundle_refuses_replaced_lock_before_publication(capture, monkeypatch):
+    manifest, destination = capture
+    original = ev._capture_bundle
+
+    def capture_and_replace(*args):
+        original(*args)
+        lock = destination.parent / f".{destination.name}.lock"
+        lock.unlink()
+        lock.touch()
+
+    monkeypatch.setattr(ev, "_capture_bundle", capture_and_replace)
+    with pytest.raises(ValueError, match="publisher"):
+        ev.create_bundle(manifest, destination)
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".bundle.stage-*"))
+
+
+def test_suite_rechecks_lock_immediately_before_pointer_publication(suite_root, monkeypatch):
+    from pathlib import Path
+
+    root, _ = suite_root
+    ev.run_suite(root, {}, "baseline")
+    output = root / "results" / "baseline"
+    previous = output.readlink()
+    before = contents(output)
+    symlink_to = Path.symlink_to
+
+    def link_and_replace(self, *args, **kwargs):
+        symlink_to(self, *args, **kwargs)
+        if self.name.startswith(".baseline.pointer-"):
+            lock = self.parent / ".baseline.lock"
+            lock.unlink()
+            lock.touch()
+
+    monkeypatch.setattr(Path, "symlink_to", link_and_replace)
+    with pytest.raises(ValueError, match="publisher"):
+        ev.run_suite(root, {}, "baseline")
+    assert output.readlink() == previous
+    assert contents(output) == before
+    assert not list(output.parent.glob(".baseline.pointer-*"))
+
+
+def test_two_process_publishers_detect_replaced_lock_and_preserve_previous(suite_root):
+    import selectors
+    import subprocess
+    import sys
+    from pathlib import Path
+    from textwrap import dedent
+
+    from evals.speaker_generations import publisher
+
+    root, _ = suite_root
+    ev.run_suite(root, {}, "baseline")
+    output = root / "results" / "baseline"
+    previous = output.readlink()
+    before = contents(output)
+    script = dedent("""\
+        import os
+        import sys
+        from pathlib import Path
+        import django
+        os.environ["DJANGO_SETTINGS_MODULE"] = "tests.settings"
+        django.setup()
+        from evals import speaker_naming_eval as ev
+        waiting = True
+        def run(bundle, config, **kwargs):
+            global waiting
+            if waiting:
+                waiting = False
+                print("ready", flush=True)
+                assert input() == "continue"
+            if kwargs.get("diagnostics_path"):
+                ev.write_json(kwargs["diagnostics_path"], {})
+            return {
+                "summary": {},
+                "segments": [{"start": 0, "end": 1,
+                              "speaker": "Alice", "speaker_uncertain": False}],
+            }, 1
+        ev.run_bundle = run
+        try:
+            ev.run_suite(Path(sys.argv[1]), {}, "baseline")
+        except ValueError as exc:
+            print(str(exc), flush=True)
+        else:
+            print("published", flush=True)
+    """)
+
+    processes = []
+
+    def receive(process):
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=15), "publisher did not reach barrier"
+        return process.stdout.readline().strip()
+
+    def release(process):
+        process.stdin.write("continue\n")
+        process.stdin.flush()
+
+    def start():
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(root)],
+            cwd=Path(ev.__file__).resolve().parent.parent,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(process)
+        assert receive(process) == "ready"
+        return process
+
+    try:
+        first = start()
+        with pytest.raises(ValueError, match="publisher already active"):
+            with publisher(output.parent, "baseline"):
+                pytest.fail("same inode acquired twice")
+        lock = output.parent / ".baseline.lock"
+        lock.unlink()
+        lock.touch()
+        second = start()
+        release(first)
+        assert "publisher" in receive(first)
+        assert output.readlink() == previous
+        assert contents(output) == before
+        release(second)
+        assert receive(second) == "published"
+        assert output.readlink() != previous
+        ev.complete_generation(output.resolve())
+        for process in processes:
+            assert process.wait(timeout=15) == 0
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+
+def test_suite_hashes_shared_unchanged_generations_once_per_run(suite_root, monkeypatch):
+    import hashlib
+    from collections import Counter
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from evals import speaker_generations as generations
+
+    root, _ = suite_root
+    reads: Counter[bytes] = Counter()
+    sha256 = hashlib.sha256
+
+    class CountedDigest:
+        def __init__(self):
+            self.digest = sha256()
+
+        def update(self, data):
+            reads[data] += 1
+            self.digest.update(data)
+
+        def hexdigest(self):
+            return self.digest.hexdigest()
+
+    monkeypatch.setattr(
+        generations,
+        "hashlib",
+        SimpleNamespace(sha256=lambda *a: sha256(*a) if a else CountedDigest()),
+    )
+    code = Path(ev.__file__).resolve().parent.parent / "transcriptions"
+    shared = [root / "model.bin", root / "audio.wav", *(code / n for n in generations.CAPTURE_CODE)]
+    ev.run_suite(root, {}, "baseline")
+    assert {path.name: reads[path.read_bytes()] for path in shared} == {
+        path.name: 1 for path in shared
+    }
+    # A subsequent invocation starts with a fresh cache, even in the same process.
+    ev.run_suite(root, {}, "baseline")
+    assert all(reads[path.read_bytes()] == 2 for path in shared)
+
+
+@pytest.mark.parametrize("filename", ["model.bin", "audio.wav"])
+@pytest.mark.parametrize("change", ["rewrite", "replace"])
+def test_suite_rechecks_cached_generations_after_replay(suite_root, monkeypatch, filename, change):
+    root, replay = suite_root
+    ev.run_suite(root, {}, "baseline")
+    output = root / "results" / "baseline"
+    previous = output.readlink()
+    before = contents(output)
+    changed = False
+
+    def run(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            path = root / filename
+            data = b"X" * path.stat().st_size  # Same-size rewrites must invalidate too.
+            if change == "rewrite":
+                path.write_bytes(data)
+            else:
+                replacement = path.with_suffix(".new")
+                replacement.write_bytes(data)
+                replacement.replace(path)
+        return replay(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "run_bundle", run)
+    with pytest.raises(ValueError, match="identity"):
+        ev.run_suite(root, {}, "baseline")
+    assert output.readlink() == previous
+    assert contents(output) == before
+
+
+def test_suite_rechecks_cached_generation_before_replay(suite_root, monkeypatch):
+    root, _ = suite_root
+    verify = ev.verify_bundle_identity
+    calls = 0
+
+    def verify_and_change(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 7:  # All six preflight checks have already warmed the cache.
+            (root / "model.bin").write_bytes(b"changed model")
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "verify_bundle_identity", verify_and_change)
+    monkeypatch.setattr(ev, "run_bundle", lambda *a, **k: pytest.fail("stale model replayed"))
+    with pytest.raises(ValueError, match="identity"):
+        ev.run_suite(root, {}, "baseline")
+    assert not (root / "results" / "baseline").exists()
+
+
+@pytest.mark.parametrize("change", ["rewrite", "replace", "symlink"])
+def test_fingerprint_cache_refuses_change_during_reuse(tmp_path, monkeypatch, change):
+    import hashlib
+    from pathlib import Path
+
+    from evals.speaker_generations import FingerprintCache, file_digest
+
+    path = tmp_path / "model.bin"
+    path.write_bytes(b"old model")
+    fingerprints: FingerprintCache = {}
+    assert file_digest(path, fingerprints) == hashlib.sha256(b"old model").hexdigest()
+    original_stat = Path.stat
+    cached_ctime = os.stat(path).st_ctime_ns
+
+    def stat_and_change(self, *args, **kwargs):
+        if self == path:
+            if change == "rewrite":
+                # Same size, same inode: keep rewriting until ctime visibly
+                # advances, so the test does not depend on timestamp granularity.
+                deadline = time.monotonic() + 2
+                while True:
+                    path.write_bytes(b"new model")
+                    if os.stat(path).st_ctime_ns != cached_ctime:
+                        break
+                    if time.monotonic() > deadline:
+                        raise AssertionError("ctime did not advance")
+                    time.sleep(0.001)
+            elif change == "replace":
+                replacement = tmp_path / "replacement.bin"
+                replacement.write_bytes(b"new model")
+                replacement.replace(path)
+            else:
+                # Even a link back to the opened inode loses named authority.
+                path.rename(tmp_path / "original.bin")
+                path.symlink_to("original.bin")
+        return original_stat(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "stat", stat_and_change)
+        with pytest.raises(ValueError, match="identity.changed"):
+            file_digest(path, fingerprints)
+    if change == "symlink":
+        with pytest.raises(ValueError, match="identity file"):
+            file_digest(path, fingerprints)
+    else:
+        # A changed generation is rehashed rather than permanently poisoned.
+        assert file_digest(path, fingerprints) == hashlib.sha256(b"new model").hexdigest()

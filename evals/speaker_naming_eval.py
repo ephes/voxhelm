@@ -23,6 +23,7 @@ from time import monotonic
 from typing import Any
 
 from evals.speaker_generations import (
+    FingerprintCache,
     file_digest,
     json_digest,
     publisher,
@@ -258,7 +259,7 @@ def manifest_diarization_params(manifest: dict[str, Any]) -> Any:
 
 def create_bundle(manifest_path: Path, destination: Path) -> None:
     """Publish a complete absent bundle; remove only this attempt's failed stage."""
-    with publisher(destination.parent, destination.name):
+    with publisher(destination.parent, destination.name) as verify_publisher:
         if os.path.lexists(destination):
             raise ValueError("Bundle destination already exists; choose a new directory")
         stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.stage-", dir=destination.parent))
@@ -272,6 +273,7 @@ def create_bundle(manifest_path: Path, destination: Path) -> None:
             read_json(stage / "bundle.json")  # Admit the final sealed manifest byte size too.
             if os.path.lexists(destination):
                 raise ValueError("Bundle destination already exists; choose a new directory")
+            verify_publisher()
             stage.rename(destination)
         finally:
             if stage.exists():
@@ -534,8 +536,9 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
 
     validate_tag(tag)
     config = asdict(known_speaker_config_from_mapping(config_data))
+    fingerprints: FingerprintCache = {}
     parent = root / "results"
-    with publisher(parent, tag):
+    with publisher(parent, tag) as verify_publisher:
         output = parent / tag
         # A legacy real directory cannot be atomically replaced by a pointer.
         require(
@@ -578,7 +581,7 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
                     "suite.baseline.input.identity",
                 )
             if os.path.lexists(bundle):
-                verify_bundle_identity(manifest_path, bundle)
+                verify_bundle_identity(manifest_path, bundle, fingerprints)
             inputs.append((episode, manifest_path, manifest, truth, baseline, bundle))
         stage = Path(tempfile.mkdtemp(prefix=f".{tag}.stage-", dir=parent))
         try:
@@ -587,7 +590,7 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
                 require(read_json(manifest_path) == manifest, "suite.manifest.identity")
                 if not os.path.lexists(bundle):
                     create_bundle(manifest_path, bundle)
-                identity = verify_bundle_identity(manifest_path, bundle)
+                identity = verify_bundle_identity(manifest_path, bundle, fingerprints)
                 bundle_digest = file_digest(bundle / "bundle.json")
                 first, elapsed = run_bundle(
                     bundle, config_data, diagnostics_path=stage / f"{episode}.profiles.json"
@@ -597,7 +600,7 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
                     raise ValueError(f"Nondeterministic replay: {episode}")
                 require(
                     file_digest(bundle / "bundle.json") == bundle_digest
-                    and verify_bundle_identity(manifest_path, bundle) == identity,
+                    and verify_bundle_identity(manifest_path, bundle, fingerprints) == identity,
                     "suite.bundle.identity",
                 )
                 write_json(stage / f"{episode}.json", first)
@@ -622,11 +625,13 @@ def run_suite(root: Path, config_data: dict[str, Any], tag: str) -> None:
                 {"version": 1, "config": config, "episodes": identities, "members": members},
             )
             complete_generation(stage)
+            verify_publisher()
             generation = parent / f".{tag}.generation-{uuid.uuid4().hex}"
             stage.rename(generation)
             pointer = parent / f".{tag}.pointer-{uuid.uuid4().hex}"
             try:
                 pointer.symlink_to(generation.name, target_is_directory=True)
+                verify_publisher()
                 pointer.replace(output)
             finally:
                 pointer.unlink(missing_ok=True)

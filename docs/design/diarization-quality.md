@@ -1036,6 +1036,14 @@ including incomplete legacy directories. A failed attempt removes only its own
 stage and can be retried. Process death may retain a stage; after verifying no
 publisher is running, archive or remove that exact stage and retry. Lock files
 remain; advisory ownership is released automatically, so do not unlink locks.
+The sidecar must be a regular file owned by the current user with exactly one
+link; symlinks, hardlinks and special files are refused. The parent directory
+(a bundle destination's parent or the suite `results/` directory) must be a real
+directory: if that final path component is a symlink, the publisher refuses to
+start, so point the path at the real directory. The publisher holds the opened
+parent directory and checks the named lock identity after acquiring the lock and
+immediately before publication. Detected unlink/replacement, ownership
+or link-count changes, or parent replacement abort publication.
 
 Version 2 binds the canonical manifest, actual source/reference bytes, explicit
 local model artifacts, backend settings, installed package versions and the
@@ -1060,11 +1068,24 @@ used by that role, including all possible configured fallback backends. These
 are explicit local generation inputs: the harness does not download or guess
 model cache identities. Use an immutable local snapshot and offline inference;
 a mutable remote-only model cannot qualify as exact frozen suite evidence.
-Hashes are checked before and after capture. The suite recomputes identities
-before replay and refuses a changed manifest, source, reference, model, code or
-backend configuration. Choose a new bundle/root on mismatch; historical evidence
-is never overwritten automatically. Postprocessing options are deliberately
-outside the bundle identity so variants reuse the same frozen inputs.
+Hashes are checked before and after capture. The suite rechecks identities in
+preflight and before and after each episode's replay, refusing a changed manifest,
+source, reference, model, code or backend configuration. Choose a new bundle/root
+on mismatch; historical evidence is never overwritten automatically.
+Postprocessing options are deliberately outside the bundle identity so variants
+reuse the same frozen inputs.
+
+Within one suite invocation, unchanged source/model/code file generations share
+their SHA-256, including files listed in multiple roles or episodes. Every use
+still opens the regular file without following its final symlink and checks its
+device, inode, size, nanosecond mtime and ctime against both the descriptor and
+current name. A changed generation is hashed again and must match the frozen
+identity; a change during a read or cache lookup is refused. Hash reads cover
+only the initially admitted size. The cache is discarded after the invocation;
+it never replaces the pre/post replay evidence checks or persists across runs.
+This relies on reliable filesystem generation metadata: stop publishers and
+use immutable local input snapshots on filesystems that cannot provide it.
+
 Version-1 bundles remain readable by standalone `run`; suite reuse requires
 version 2 and an explicit rebuild in a new directory. Old reports are historical
 measurements, not proof of the new input/scoring contract.
@@ -1091,6 +1112,13 @@ profiles and scores under `results/.TAG.stage-*`, then writes `complete.json`
 with exact generated-member hashes, full effective configuration and per-episode
 bundle/truth/baseline identities. Only deterministic, complete generations may
 publish. A nonblocking `.TAG.lock` excludes cooperating same-tag publishers.
+It uses the same stable sidecar checks as bundle publication, including a final
+check before replacing the canonical tag pointer. A detected lock change retains
+the previous completed tag. These are advisory locks for cooperating local
+publishers, not protection against arbitrary hostile namespace mutation between
+the final check and rename. Keep result directories and lock names stable while
+any publisher is running. If a lock has been replaced, stop all publishers and
+inspect retained stages/generations before retrying; do not delete live sidecars.
 
 A completed generation lives in `results/.TAG.generation-*`; `results/TAG` is an
 atomically replaced relative symlink. Readers that need a multi-file snapshot

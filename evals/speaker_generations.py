@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import os
 import stat
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,8 @@ CAPTURE_CODE = (
     "service.py",
 )
 
+type FingerprintCache = dict[tuple[int, ...], str]
+
 
 def json_digest(value: Any) -> str:
     return hashlib.sha256(
@@ -70,27 +73,39 @@ def json_digest(value: Any) -> str:
     ).hexdigest()
 
 
-def file_digest(path: Path) -> str:
-    """Hash a stable opened regular file without following the final symlink."""
+def file_digest(path: Path, fingerprints: FingerprintCache | None = None) -> str:
+    """Hash or reuse an opened generation, checking descriptor and name each time."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             before = os.fstat(fd)
             require(stat.S_ISREG(before.st_mode), "identity.file")
-            digest = hashlib.sha256()
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
+            generation = file_generation(before)
+            result = fingerprints.get(generation) if fingerprints is not None else None
+            if result is None:
+                digest = hashlib.sha256()
+                remaining = before.st_size
+                while remaining:
+                    chunk = stream.read(min(remaining, 1024 * 1024))
+                    require(bool(chunk), "identity.changed")
+                    remaining -= len(chunk)
+                    digest.update(chunk)
+                result = digest.hexdigest()
             require(
-                file_generation(os.fstat(fd)) == file_generation(before)
-                and file_generation(path.stat()) == file_generation(before),
+                file_generation(os.fstat(fd)) == generation
+                and file_generation(path.stat(follow_symlinks=False)) == generation,
                 "identity.changed",
             )
-            return digest.hexdigest()
+            if fingerprints is not None:
+                fingerprints[generation] = result
+            return result
     except OSError as exc:
         raise ValueError("Invalid evaluation identity file") from exc
 
 
-def source_identity(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+def source_identity(
+    manifest_path: Path, manifest: dict[str, Any], fingerprints: FingerprintCache | None = None
+) -> dict[str, Any]:
     """Explicit local model artifacts are required; never resolve/download models."""
     from django.conf import settings
 
@@ -107,12 +122,16 @@ def source_identity(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, 
         require(bool(files), "identity.generation_files." + role)
         for name in files:
             text(name, "identity.generation_files[]")
-        models[role] = {name: file_digest(manifest_path.parent / name) for name in files}
+        models[role] = {
+            name: file_digest(manifest_path.parent / name, fingerprints) for name in files
+        }
     names = {
         manifest["audio"],
         *(ref.get("audio", manifest["audio"]) for ref in manifest["references"]),
     }
-    sources = {name: file_digest(manifest_path.parent / name) for name in sorted(names)}
+    sources = {
+        name: file_digest(manifest_path.parent / name, fingerprints) for name in sorted(names)
+    }
     packages: dict[str, str | None] = {}
     for name in ("numpy", "torch", "pyannote.audio", "mlx-whisper", "transformers"):
         try:
@@ -128,35 +147,79 @@ def source_identity(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, 
             {name: str(getattr(settings, name, "")) for name in GENERATION_SETTINGS}
         ),
         "packages": packages,
-        "code": {name: file_digest(code / name) for name in CAPTURE_CODE},
+        "code": {name: file_digest(code / name, fingerprints) for name in CAPTURE_CODE},
     }
 
 
-def verify_bundle_identity(manifest_path: Path, bundle: Path) -> dict[str, Any]:
+def verify_bundle_identity(
+    manifest_path: Path, bundle: Path, fingerprints: FingerprintCache | None = None
+) -> dict[str, Any]:
     manifest = read_json(manifest_path)
     frozen = read_json(bundle / "bundle.json")
     require(
         frozen.get("version") == 2
         and frozen.get("manifest") == manifest
-        and frozen.get("identity") == source_identity(manifest_path, manifest),
+        and frozen.get("identity") == source_identity(manifest_path, manifest, fingerprints),
         "bundle.identity (use a new bundle directory on mismatch)",
     )
     return frozen["identity"]
 
 
 @contextmanager
-def publisher(parent: Path, name: str):
-    """One nonblocking publisher per name; OS releases ownership on process death."""
+def publisher(parent: Path, name: str) -> Iterator[Callable[[], None]]:
+    """Hold a stable sidecar and parent; recheck authority before publication."""
     parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(
-        parent / f".{name}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
-    )
     try:
-        require(stat.S_ISREG(os.fstat(fd).st_mode), "publisher.lock")
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if parent.is_symlink():
+            raise ValueError(
+                "Invalid evaluation publisher parent (must be a real directory, not a symlink)"
+            ) from exc
+        raise ValueError("Invalid evaluation publisher parent") from exc
+    try:
+        lock_name = f".{name}.lock"
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Evaluation publisher already active") from None
-        yield
+            fd = os.open(
+                lock_name,
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ValueError("Invalid evaluation publisher lock") from exc
+        try:
+
+            def verify() -> None:
+                try:
+                    opened = os.fstat(fd)
+                    named = os.stat(lock_name, dir_fd=parent_fd, follow_symlinks=False)
+                    directory = os.fstat(parent_fd)
+                    named_directory = parent.stat(follow_symlinks=False)
+                    require(
+                        all(
+                            stat.S_ISREG(entry.st_mode)
+                            and entry.st_uid == os.getuid()
+                            and entry.st_nlink == 1
+                            for entry in (opened, named)
+                        )
+                        and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+                        and stat.S_ISDIR(named_directory.st_mode)
+                        and (directory.st_dev, directory.st_ino)
+                        == (named_directory.st_dev, named_directory.st_ino),
+                        "publisher.lock.identity",
+                    )
+                except OSError as exc:
+                    raise ValueError("Invalid evaluation publisher identity") from exc
+
+            verify()
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("Evaluation publisher already active") from None
+            verify()
+            yield verify
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(parent_fd)
