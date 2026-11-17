@@ -132,6 +132,26 @@ def build_curated_subset(gold: list[dict]) -> dict[str, list[int]]:
     return subset
 
 
+def passage_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Union of evaluated target-speaker evidence within the required passage."""
+    start, end = JOHANNES_PASSAGE
+    cursor = start
+    seconds = 0.0
+    target_rows = [row for row in rows if row["gold"] == "Johannes"]
+    for row in sorted(target_rows, key=lambda row: row["start"]):
+        left, right = max(start, row["start"]), min(end, row["end"])
+        seconds += max(0.0, right - max(cursor, left))
+        cursor = max(cursor, right)
+    required = end - start
+    return {
+        "status": "complete" if seconds >= required else "partial" if seconds else "absent",
+        "evaluated_segments": len(target_rows),
+        "evaluated_seconds": seconds,
+        "required_seconds": required,
+        "fraction": round(seconds / required, 4),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--production-audio", type=Path, default=DEFAULT_PRODUCTION_AUDIO)
@@ -213,6 +233,7 @@ def main() -> None:
         }
         for gold_speaker, seg in passage
     ]
+    coverage = passage_coverage(passage_report)
 
     # Curated gold subset per the goal: Johannes passage + per-speaker reps +
     # short + speaker-boundary/crosstalk cases.
@@ -263,11 +284,14 @@ def main() -> None:
         "predicted_distribution_top1": dict(Counter(top1)),
         "gold_distribution": dict(Counter(gold_speakers)),
         "johannes_passage": passage_report,
+        "johannes_passage_coverage": coverage,
         "johannes_passage_correct": all(
             row["predicted_top1"] == row["gold"]
             for row in passage_report
             if row["gold"] == "Johannes"
-        ),
+        )
+        if coverage["status"] == "complete"
+        else None,
     }
     args.out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     skip = {"confusion_matrix_top1", "johannes_passage"}

@@ -38,3 +38,13 @@ Invalid gold produces an argparse error (exit 2) before model work.
 `--limit 0` selects all rows; positive integers select the first N rows; negative
 limits are refused. Top-1 accuracy remains segment based, with separate time and
 word weighted error rates; these are single-speaker approximations, not full DER.
+
+The fixed Johannes passage metric includes rows starting in 2295–2312.5 s, as
+before. `johannes_passage_coverage` reports the union of evaluated, gold-labeled
+Johannes intervals clipped to that range (overlaps count once): segment count,
+evaluated/required seconds, fraction and `absent`/`partial`/`complete` status.
+`johannes_passage_correct` is `null` unless that evidence covers the whole 17.5 s;
+with complete coverage it is the existing all-target-rows top-1 correctness.
+A missing passage, a passage with only another gold speaker, or a prefix selected
+by `--limit` therefore cannot silently pass an unassessed target. Consumers must
+handle `null` separately from `false` and `true`.

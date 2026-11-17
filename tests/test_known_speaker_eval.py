@@ -122,3 +122,48 @@ def test_synthetic_accuracy_and_weighted_errors(monkeypatch, tmp_path):
     assert report["wder_word_weighted"] == 0.3333
     assert report["auto_accept_policy"]["coverage"] == 1
     assert report["auto_accept_policy"]["accepted_accuracy"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "case,expected_status,expected_correct,seconds",
+    [
+        ("absent", "absent", None, 0),
+        ("other", "absent", None, 0),
+        ("partial", "partial", None, 5),
+        ("limited", "partial", None, 5),
+        ("correct", "complete", True, 17.5),
+        ("incorrect", "complete", False, 17.5),
+    ],
+)
+def test_passage_assessment_is_serialized(
+    monkeypatch, tmp_path, case, expected_status, expected_correct, seconds
+):
+    gold = [segment(2295, 2300, "Johannes"), segment(2300, 2312.5, "Johannes")]
+    limit = "0"
+    if case == "absent":
+        gold = [segment()]
+    elif case == "other":
+        gold = [segment(2295, 2312.5)]
+    elif case == "partial":
+        gold = gold[:1]
+    elif case == "limited":
+        limit = "1"
+    predicted = [g["speaker"] for g in gold[: int(limit) or None]]
+    if case == "incorrect":
+        predicted[-1] = "Alice"
+    report = inert_run(monkeypatch, tmp_path, gold, predicted, limit)
+    assert report["johannes_passage_correct"] is expected_correct
+    coverage = report["johannes_passage_coverage"]
+    assert coverage["status"] == expected_status
+    assert coverage["evaluated_seconds"] == seconds
+    assert coverage["required_seconds"] == 17.5
+
+
+def test_passage_coverage_counts_overlaps_once(monkeypatch, tmp_path):
+    report = inert_run(
+        monkeypatch,
+        tmp_path,
+        [segment(2295, 2310, "Johannes"), segment(2300, 2312.5, "Johannes")],
+        ["Johannes", "Johannes"],
+    )
+    assert report["johannes_passage_coverage"]["evaluated_seconds"] == 17.5

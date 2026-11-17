@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Report explicit target-passage coverage in known-speaker evaluations; absent
+  or partial target evidence is unassessed (`null`), never an automatic pass.
+
 - Admit bounded stable known-speaker gold JSON, exact finite segment records
   and nonnegative limits before backend construction or reference inference.
 
