@@ -55,7 +55,7 @@ def test_exact_end_and_short_segment_keep_padding(monkeypatch):
     monkeypatch.setattr(ks, "decode_mono_16k", lambda path: np.ones(32000))
     monkeypatch.setattr(ks, "get_known_speaker_backend", lambda *a: Backend())
     reports = []
-    monkeypatch.setattr(probe, "write_report", lambda report, out: reports.append(report))
+    monkeypatch.setattr(probe, "write_report", lambda report, out, **kw: reports.append(report))
     probe.run_subwindow(args)
     assert reports[0]["whole_segments"][0]["end"] == 0.1
     assert calls[1] >= int(ks.KnownSpeakerConfig().min_segment_duration * 16000)

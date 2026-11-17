@@ -28,12 +28,13 @@ so the installed package versions are the ones under test:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+
+from evals.speaker_reports import admit_report_output, publish_report
 
 HINT_KEYS = {"num": "num_speakers", "min": "min_speakers", "max": "max_speakers"}
 PACKAGES = ("voxhelm", "pyannote.audio", "torch", "mlx-whisper")
@@ -163,9 +164,17 @@ def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[f
     return plans
 
 
-def write_report(report: dict[str, Any], out: Path | None) -> None:
+def source_inputs(args: argparse.Namespace) -> list[Path]:
+    sources = [args.audio]
+    for key in ("reference_audio", "env_file"):
+        if (path := getattr(args, key, None)) is not None:
+            sources.append(path)
+    return sources
+
+
+def write_report(report: dict[str, Any], out: Path | None, *, sources: list[Path]) -> None:
     if out is not None:
-        out.write_text(json.dumps(report, indent=1) + "\n")
+        publish_report(report, out, sources, indent=1)
         print(f"wrote {out}")
 
 
@@ -181,6 +190,9 @@ def serialize_turns(annotation: Any) -> list[dict[str, Any]]:
 
 
 def run_turns(args: argparse.Namespace) -> None:
+    sources = source_inputs(args)
+    admit_report_output(args.out, sources)
+
     from django.conf import settings
 
     from transcriptions.diarization import (
@@ -234,10 +246,13 @@ def run_turns(args: argparse.Namespace) -> None:
                         f"    {turn['start']:8.3f}-{turn['end']:8.3f} ({duration:5.2f}s) "
                         f"{turn['speaker']}"
                     )
-    write_report(report, args.out)
+    write_report(report, args.out, sources=sources)
 
 
 def run_subwindow(args: argparse.Namespace) -> None:
+    sources = source_inputs(args)
+    admit_report_output(args.out, sources)
+
     from transcriptions.known_speaker import (
         SAMPLE_RATE,
         KnownSpeakerConfig,
@@ -326,10 +341,13 @@ def run_subwindow(args: argparse.Namespace) -> None:
         print("embed cost:", report["embed_cost"])
     else:
         print("no window fits the given targets; nothing was embedded")
-    write_report(report, args.out)
+    write_report(report, args.out, sources=sources)
 
 
 def run_stt(args: argparse.Namespace) -> None:
+    sources = source_inputs(args)
+    admit_report_output(args.out, sources)
+
     from django.conf import settings
 
     from transcriptions.sanitizer import sanitize_result
@@ -375,7 +393,7 @@ def run_stt(args: argparse.Namespace) -> None:
         print(f"{backend_name}: backend={result.backend_name} model={result.model_name}")
         for segment in segments:
             print(f"  {segment['start']:7.2f}-{segment['end']:7.2f}  {segment['text']}")
-    write_report(report, args.out)
+    write_report(report, args.out, sources=sources)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -438,8 +456,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "subwindow" and args.window is None:
         args.window = [(1.5, 0.75)]
-    setup(args.env_file)
     try:
+        admit_report_output(args.out, source_inputs(args))
+        setup(args.env_file)
         args.run(args)
     except ValueError:
         parser.error("Invalid speaker probe input.")

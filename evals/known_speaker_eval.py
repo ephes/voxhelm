@@ -29,6 +29,7 @@ import django
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 
+from evals.speaker_reports import admit_report_output, publish_report  # noqa: E402
 from transcriptions.known_speaker import (  # noqa: E402
     KnownSpeakerConfig,
     PyannoteEmbeddingBackend,
@@ -159,6 +160,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("/tmp/known_speaker_eval.json"))
     parser.add_argument("--limit", type=int, default=0, help="evaluate first N segments only")
     args = parser.parse_args()
+
+    sources = [args.gold, args.production_audio, *DEFAULT_REFERENCES.values()]
+    try:
+        admit_report_output(args.out, sources)
+    except ValueError:
+        parser.error("Invalid speaker report output.")
 
     if args.limit < 0:
         parser.error("Limit must be zero (all segments) or a positive integer.")
@@ -293,7 +300,10 @@ def main() -> None:
         if coverage["status"] == "complete"
         else None,
     }
-    args.out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    try:
+        publish_report(report, args.out, sources)
+    except ValueError:
+        parser.error("Invalid speaker report output.")
     skip = {"confusion_matrix_top1", "johannes_passage"}
     summary = {k: v for k, v in report.items() if k not in skip}
     print(json.dumps(summary, indent=2, ensure_ascii=False))

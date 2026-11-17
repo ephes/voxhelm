@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Protect standalone speaker-evaluation source/control files from report output,
+  including resolved-path, symlink and hardlink aliases; recheck at publication.
+
 - Report explicit target-passage coverage in known-speaker evaluations; absent
   or partial target evidence is unassessed (`null`), never an automatic pass.
 

@@ -48,3 +48,13 @@ with complete coverage it is the existing all-target-rows top-1 correctness.
 A missing passage, a passage with only another gold speaker, or a prefix selected
 by `--limit` therefore cannot silently pass an unassessed target. Consumers must
 handle `null` separately from `false` and `true`.
+
+## Report destinations
+
+Both CLIs reject `--out` if its resolved path or existing-file identity matches
+any input, including symlink and hardlink aliases. The mixed probe protects audio,
+reference audio and `--env-file` for all its subcommands. Known-speaker evaluation
+protects gold, production audio and every configured reference. Admission runs
+before setup/model work and is repeated immediately before publication. Separate
+report paths remain supported. These checks do not lock source files or defend
+against a hostile process swapping filesystem entries during the final syscall.
