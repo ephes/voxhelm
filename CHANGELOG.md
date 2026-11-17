@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Gate migration drift locally: `just check` now runs `just check-migrations`
+  (`makemigrations --check --dry-run` under `tests.settings`), so a model change
+  without its committed migration fails before merge; a test keeps the recipe
+  wired into `just check` and asserts no migrations are pending.
+
 - Preserve speech responses and primary errors when temporary-file cleanup fails;
   attempt both removals independently and close readers on response setup failure.
   Fixed warnings identify cleanup recovery without exposing file/error details.

@@ -1,6 +1,7 @@
 name: CI
 
-# Same checks as `just check` (lint, format check, typecheck, test), run through uv directly.
+# Same checks as `just check` (lint, format check, typecheck, migration drift, test),
+# run through uv directly.
 # Tests use SQLite and fake backends; model-dependent tests (requires_models)
 # skip when the models are absent, so no secrets or services are needed.
 # Runs on macOS arm64 like production (macmini): mlx-whisper and piper-tts are
@@ -55,6 +56,10 @@ jobs:
         run: uv run ruff format --check .
       - name: Typecheck (just typecheck)
         run: uv run mypy .
+      - name: Migration drift check (just check-migrations)
+        run: uv run python manage.py makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: tests.settings
       - name: Ensure ffmpeg for synthetic codec regressions
         run: command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Tests (just test)

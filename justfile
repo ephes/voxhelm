@@ -18,10 +18,15 @@ format-check:
 typecheck:
 	uv run mypy .
 
+# Fail when models and committed migrations disagree (no files are written).
+check-migrations:
+	DJANGO_SETTINGS_MODULE=tests.settings uv run python manage.py makemigrations --check --dry-run
+
 check:
 	just lint
 	just format-check
 	just typecheck
+	just check-migrations
 	just test
 
 run:

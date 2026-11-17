@@ -337,9 +337,14 @@ and synthetic filesystem artifacts (`tests/test_remote_process_contracts.py`),
 including capacity, lock-wait lease timing, and completion/failure races.
 
 `just check` runs Ruff lint, a Ruff format check (`just format-check`; fix with
-`uv run ruff format .`), mypy and pytest. GitHub Actions
-(`.github/workflows/ci.yml`) runs the same steps on macOS arm64 on every push and pull
-request; tests that need the real Kokoro models are skipped there, and no
+`uv run ruff format .`), mypy, the migration drift gate and pytest. The drift gate
+(`just check-migrations`) runs `makemigrations --check --dry-run` under
+`tests.settings` and fails when a model change has no committed migration; it never
+writes migration files. Create a missing migration with
+`DJANGO_SETTINGS_MODULE=tests.settings uv run python manage.py makemigrations`, review
+it and commit it with the model change. GitHub Actions
+(`.github/workflows/ci.yml`) runs the same steps on macOS arm64 when dispatched
+manually; tests that need the real Kokoro models are skipped there, and no
 secrets or services are needed. A separate CI job runs `pip-audit` over the locked
 dependencies, including the optional extras (`diarization`, `kokoro`, `routing`), and
 fails on any known vulnerability. It runs on macOS arm64 because
