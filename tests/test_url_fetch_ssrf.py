@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import io
+import json
 import socket
 import tempfile
 import threading
 from collections.abc import Iterator
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 from urllib.request import Request
 
 import pytest
@@ -41,6 +45,46 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(AUDIO_BYTES)))
             self.end_headers()
             self.wfile.write(AUDIO_BYTES)
+            return
+        if self.path in {
+            "/partial",
+            "/partial-no-range",
+            "/range-200",
+            "/empty-range",
+            "/empty",
+            "/empty-no-length",
+            "/no-content",
+            "/reset-content",
+            "/no-length",
+        }:
+            status = {
+                "/partial": 206,
+                "/partial-no-range": 206,
+                "/no-content": 204,
+                "/reset-content": 205,
+            }.get(self.path, 200)
+            body = (
+                b""
+                if self.path
+                in {
+                    "/empty",
+                    "/empty-no-length",
+                    "/no-content",
+                    "/reset-content",
+                }
+                else AUDIO_BYTES
+            )
+            self.send_response(status)
+            self.send_header("Content-Type", "audio/mpeg")
+            if self.path in {"/partial", "/range-200", "/empty-range"}:
+                self.send_header(
+                    "Content-Range",
+                    "" if self.path == "/empty-range" else f"bytes 0-{len(body) - 1}/10000",
+                )
+            if self.path not in {"/empty-no-length", "/no-length"}:
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         targets = {
             "/same-host": f"http://127.0.0.1:{port}/file.mp3",
@@ -114,6 +158,212 @@ ENTRY_POINTS = [
     pytest.param(_fetch_media, id="jobs.media.download_allowed_media"),
     pytest.param(_fetch_input, id="transcriptions.download_allowed_url_to_tempfile"),
 ]
+
+
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/partial",
+        "/partial-no-range",
+        "/range-200",
+        "/empty-range",
+        "/empty",
+        "/empty-no-length",
+        "/no-content",
+        "/reset-content",
+    ],
+)
+def test_incomplete_media_is_refused_before_allocating_a_file(
+    fetch,
+    path,
+    media_server,
+    local_allowlist,
+    isolated_tempdir,
+    monkeypatch,
+    settings,
+    retry_sleeps,
+):
+    allocations = []
+    reserve = media.reserve_temp_media_path
+
+    def track_reserve(**kwargs):
+        allocations.append(kwargs)
+        return reserve(**kwargs)
+
+    monkeypatch.setattr(media, "reserve_temp_media_path", track_reserve)
+    settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    with pytest.raises(ApiError, match="complete response|empty media") as excinfo:
+        fetch(f"{media_server}{path}")
+    assert not isinstance(excinfo.value, media.TransientFetchError)
+    assert allocations == []
+    assert list(isolated_tempdir.iterdir()) == []
+    assert len(_Handler.requests_seen) == 1
+    assert retry_sleeps == []
+
+
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
+@pytest.mark.parametrize("path", ["/file.mp3", "/no-length"])
+def test_complete_nonempty_media_is_accepted(
+    fetch,
+    path,
+    media_server,
+    local_allowlist,
+    isolated_tempdir,
+):
+    result = fetch(f"{media_server}{path}")
+    try:
+        assert result.read_bytes() == AUDIO_BYTES
+    finally:
+        result.unlink(missing_ok=True)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entry_point", ["sync", "batch"])
+@pytest.mark.parametrize("path", ["/partial", "/range-200", "/empty"])
+def test_incomplete_media_never_reaches_inference(
+    entry_point,
+    path,
+    client,
+    media_server,
+    local_allowlist,
+    isolated_tempdir,
+    monkeypatch,
+    settings,
+):
+    calls = []
+
+    def forbidden_inference(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("Incomplete media reached inference")
+
+    monkeypatch.setattr("transcriptions.views.transcribe_audio", forbidden_inference)
+    monkeypatch.setattr("jobs.services.transcribe_audio", forbidden_inference)
+    url = f"{media_server}{path}"
+    payload: dict[str, Any]
+    if entry_point == "sync":
+        endpoint = "/v1/audio/transcriptions"
+        payload = {"url": url, "model": "whisper-1"}
+    else:
+        settings.TASKS = {
+            "default": {"BACKEND": "django_tasks.backends.immediate.ImmediateBackend"}
+        }
+        endpoint = "/v1/jobs"
+        payload = {
+            "job_type": "transcribe",
+            "backend": "auto",
+            "model": "auto",
+            "input": {"kind": "url", "url": url},
+            "output": {"formats": ["text"]},
+        }
+    response = client.post(
+        endpoint,
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    if entry_point == "sync":
+        assert response.status_code == 400
+    else:
+        assert response.status_code == 201
+        assert response.json()["state"] == "failed"
+    assert "complete response" in response.json()["error"]["message"] or (
+        "empty media" in response.json()["error"]["message"]
+    )
+    assert calls == []
+    assert list(isolated_tempdir.iterdir()) == []
+
+
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
+@pytest.mark.parametrize("failure", ["api", "read", "cancel", None])
+@pytest.mark.parametrize("nested", [False, True])
+def test_cleanup_attempts_all_closes_and_restores_the_callers_deadline(
+    fetch,
+    failure,
+    nested,
+    local_allowlist,
+    isolated_tempdir,
+    monkeypatch,
+    caplog,
+    settings,
+    retry_sleeps,
+):
+    if failure is None:
+        settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+    original_deadline = media._FetchDeadline
+    previous = original_deadline(30) if nested else None
+    marker = media._FETCH_DEADLINE.set(previous)
+    duplicates = [Mock(spec=socket.socket) for _ in range(3)]
+    duplicates[0].close.side_effect = OSError("synthetic-private-close-detail")
+    duplicates[1].close.side_effect = OSError("synthetic-private-second-detail")
+    deadlines = []
+    primary = {
+        "api": ApiError("primary input failure"),
+        "read": OSError("primary read failure"),
+        "cancel": KeyboardInterrupt("primary cancellation"),
+        None: None,
+    }[failure]
+
+    def make_deadline(seconds):
+        deadline = original_deadline(seconds)
+        deadline.sockets.extend(duplicates)
+        deadlines.append(deadline)
+        return deadline
+
+    class Response(io.BytesIO):
+        status = 200
+        headers = Message()
+        headers["Content-Type"] = "audio/mpeg"
+
+        def geturl(self):
+            return "http://127.0.0.1/file.mp3"
+
+        def read1(self, size=-1):
+            if primary is not None and self.tell():
+                # A leaked deadline would poison the next resolve in this context.
+                deadlines[-1].ends_at = 0
+                raise primary
+            return super().read1(size)
+
+    monkeypatch.setattr(media, "_FetchDeadline", make_deadline)
+    monkeypatch.setattr(media, "open_allowed_url", lambda *a, **kw: Response(AUDIO_BYTES))
+    try:
+        expected_error = KeyboardInterrupt if failure == "cancel" else ApiError
+        try:
+            raise LookupError("An unrelated error handled by the caller")
+        except LookupError:
+            with pytest.raises(expected_error) as excinfo:
+                fetch("http://127.0.0.1/file.mp3")
+        if failure in {"api", "cancel"}:
+            assert excinfo.value is primary
+        elif failure == "read":
+            assert isinstance(excinfo.value, media.TransientFetchError)
+            assert excinfo.value.__cause__ is primary
+        else:
+            assert isinstance(excinfo.value, ApiError)
+            assert excinfo.value.message == "URL fetch cleanup failed."
+            assert excinfo.value.status == 500
+            assert not isinstance(excinfo.value, media.TransientFetchError)
+        for duplicate in duplicates:
+            duplicate.close.assert_called_once_with()
+        assert media._FETCH_DEADLINE.get() is previous
+        assert deadlines[0].timer.finished.is_set()
+        assert list(isolated_tempdir.iterdir()) == []
+        assert "synthetic-private" not in caplog.text
+        assert "URL fetch cleanup failed: socket close." in caplog.text
+        assert retry_sleeps == []
+
+        # Exercise the resolver and a complete follow-up fetch in the same context.
+        primary = None
+        monkeypatch.setattr(media, "_FetchDeadline", original_deadline)
+        monkeypatch.setattr(media, "resolve_host_addresses", lambda *a: [])
+        assert media._resolve_with_deadline("synthetic.example", 80) == []
+        result = fetch("http://127.0.0.1/file.mp3")
+        assert result.read_bytes() == AUDIO_BYTES
+        result.unlink()
+        assert media._FETCH_DEADLINE.get() is previous
+    finally:
+        media._FETCH_DEADLINE.reset(marker)
 
 
 @pytest.mark.parametrize("fetch", ENTRY_POINTS)

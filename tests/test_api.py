@@ -396,7 +396,11 @@ def test_url_download_cleanup_on_size_limit(monkeypatch, settings, tmp_path):
         def get_content_type(self) -> str:
             return "audio/mpeg"
 
+        def get(self, name: str):
+            return None
+
     class DummyResponse:
+        status = 200
         headers = DummyHeaders()
 
         def __enter__(self):
@@ -1274,6 +1278,7 @@ def test_signed_url_generic_mime_download(monkeypatch, settings):
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
 
     class Response(io.BytesIO):
+        status = 200
         headers = Message()
         headers["Content-Type"] = "application/octet-stream"
 

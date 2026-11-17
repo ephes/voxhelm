@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Attempt every URL-fetch watchdog socket close and always restore the caller's
+  deadline context. Preserve primary failures and cancellation; otherwise refuse
+  the downloaded media with a fixed cleanup error and value-free diagnostics.
+
+- Require complete, nonempty HTTP 200 URL media for sync and batch inputs;
+  reject unsolicited ranges and empty responses before allocating media files.
+  Preserve redirect guards and retries for bodies shorter than Content-Length.
+
 - Reuse unchanged offline speaker source/model/code fingerprints within each
   suite run. Shared model roles and episodes hash once; preflight and pre/post
   replay identity checks still run, but for an unchanged file generation they

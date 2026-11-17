@@ -1657,6 +1657,22 @@ file. Sync URL inputs are limited to `VOXHELM_MAX_URL_DOWNLOAD_BYTES`
 (default 128 MiB) and are fetched once. Any URL fetch whose body ends before
 its announced `Content-Length` fails instead of passing a truncated file on.
 
+Both sync and batch URL media require a nonempty HTTP 200 response without a
+`Content-Range` header. Unsolicited partial responses (including HTTP 206), other
+successful statuses and empty bodies are refused before allocating a temporary
+media file or starting inference. A complete nonempty response without
+`Content-Length` remains supported; redirects retain the same allowlist and
+resolved-address checks.
+
+Fetch cleanup attempts every watchdog socket close and always restores the
+caller's previous deadline context. A cleanup failure preserves an existing
+fetch error or cancellation. If the transfer otherwise succeeded, it refuses
+the media, attempts to remove the temporary file and reports
+`URL fetch cleanup failed.` (HTTP 500 for sync callers) instead of starting
+inference. Cleanup logs contain fixed failure categories, never the socket
+error's details. A failure caused only by cleanup is not retried within a
+batch fetch.
+
 Batch media, meaning the URL input of a batch job and known-speaker reference
 audio, whether fetched by the Django Tasks worker or by a remote worker,
 uses `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (default `600`, positive
@@ -1669,7 +1685,8 @@ job attempt, up to `VOXHELM_BATCH_URL_FETCH_ATTEMPTS`
 tries in total (default `3`, positive integer), after 5 s, then 10 s, doubling
 up to 30 s. Each retry is logged at warning level with the host, never the
 full URL. Allowlist and resolved-address rejections, too many redirects,
-an unsupported media type, the size limit, a certificate verification failure
+an incomplete response status/range, empty media, an unsupported media type,
+the size limit, a certificate verification failure
 and other HTTP statuses fail at once. Only a download that fails on every try
 fails the job attempt; a remote worker reports it as retryable as before. A
 remote worker keeps heartbeating its lease while it fetches and retries, so a

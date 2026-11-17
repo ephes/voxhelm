@@ -420,39 +420,51 @@ def fetch_allowed_url_to_tempfile(
         timeout_seconds = settings.VOXHELM_URL_FETCH_TIMEOUT_SECONDS
     deadline = _FetchDeadline(timeout_seconds)
     marker = _FETCH_DEADLINE.set(deadline)
-    deadline.timer.start()
+    completed = False
     try:
+        deadline.timer.start()
         with open_allowed_url(request, timeout=deadline.remaining()) as response:
             deadline.remaining()
             final_url = response.geturl() or source_url
             # Redundant with the per-hop check; keeps the final URL honest.
             validate_allowed_media_url(final_url)
+            if response.status != 200 or response.headers.get("Content-Range") is not None:
+                raise ApiError("URL fetch requires a complete response (HTTP 200 without a range).")
             content_type = (response.headers.get_content_type() or "").lower()
             suffix = detect_suffix(final_url, content_type)
             if not suffix:
                 raise ApiError(unsupported_message)
+            expected = response.headers.get("Content-Length")
+            # Read once before reserving a file so empty media owns no temp path.
+            # read1 performs at most one underlying read, so slow progress cannot
+            # hide inside a read(size) loop until the chunk fills.
+            read = getattr(response, "read1", response.read)
+            chunk = read(_FETCH_CHUNK_BYTES)
+            deadline.remaining()
+            if not chunk:
+                if expected is not None and expected.isdigit() and int(expected) > 0:
+                    raise TransientFetchError(
+                        "URL fetch ended before the announced content length."
+                    )
+                raise ApiError("URL fetch returned empty media.")
             temp_path = reserve_temp_media_path(suffix=suffix)
             total = 0
             with temp_path.open("wb") as handle:
-                while True:
-                    deadline.remaining()
-                    # read1 performs at most one underlying read, so slow progress
-                    # cannot hide inside a read(size) loop until the chunk fills.
-                    read = getattr(response, "read1", response.read)
-                    chunk = read(_FETCH_CHUNK_BYTES)
-                    deadline.remaining()
-                    if not chunk:
-                        break
+                while chunk:
                     total += len(chunk)
                     if total > max_bytes:
                         raise ApiError(limit_message)
                     handle.write(chunk)
+                    deadline.remaining()
+                    chunk = read(_FETCH_CHUNK_BYTES)
+                    deadline.remaining()
             # http.client's read1 reports a connection closed before Content-Length
             # as a normal end of body; a truncated file must not pass as the media.
-            expected = response.headers.get("Content-Length")
             if expected is not None and expected.isdigit() and total < int(expected):
                 raise TransientFetchError("URL fetch ended before the announced content length.")
-            return FetchedUrl(path=temp_path, content_type=content_type, final_url=final_url)
+            fetched = FetchedUrl(path=temp_path, content_type=content_type, final_url=final_url)
+        completed = True
+        return fetched
     except HTTPError as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -483,11 +495,28 @@ def fetch_allowed_url_to_tempfile(
             temp_path.unlink(missing_ok=True)
         raise
     finally:
-        deadline.timer.cancel()
-        with deadline.lock:
-            for sock in deadline.sockets:
-                sock.close()
-        _FETCH_DEADLINE.reset(marker)
+        cleanup_failed = False
+        try:
+            deadline.timer.cancel()
+            with deadline.lock:
+                for sock in deadline.sockets:
+                    try:
+                        sock.close()
+                    except OSError:
+                        cleanup_failed = True
+        finally:
+            _FETCH_DEADLINE.reset(marker)
+        if cleanup_failed:
+            LOGGER.warning("URL fetch cleanup failed: socket close.")
+            # Keep an active fetch failure/cancellation. A successful transfer
+            # cannot be returned as clean when owned descriptors failed to close.
+            if completed:
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except OSError:
+                        LOGGER.warning("URL fetch cleanup failed: temporary media removal.")
+                raise ApiError("URL fetch cleanup failed.", status=500, error_type="server_error")
 
 
 def _retry_sleep(seconds: float) -> None:
