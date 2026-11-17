@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from typing import Any
 
 import pytest
 
@@ -107,3 +108,127 @@ def test_late_output_alias_rechecked_before_publication(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="output"):
         probe.run_subwindow(args)
     assert audio.read_bytes() == b"synthetic input"
+
+
+@pytest.mark.parametrize("failure", ["serialization", "write", "replace"])
+def test_failed_publication_preserves_complete_report(monkeypatch, tmp_path, failure):
+    import tempfile
+    from pathlib import Path
+
+    from evals import speaker_reports as reports
+
+    out = tmp_path / "report.json"
+    old = b'{"generation":"old"}\n'
+    out.write_bytes(old)
+    report: dict[str, Any] = {"generation": "new"}
+    error: type[Exception] = OSError
+    if failure == "serialization":
+        report["generation"] = object()
+        error = TypeError
+    elif failure == "write":
+        real_temporary = tempfile.NamedTemporaryFile
+        real_write = Path.write_text
+
+        class FailingWriter:
+            def __init__(self, *args, **kwargs):
+                self.file = real_temporary(*args, **kwargs)
+                self.name = self.file.name
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.file.__exit__(*args)
+
+            def write(self, data):
+                self.file.write(data[:3])
+                self.file.flush()
+                raise OSError("injected write failure")
+
+        def fail_in_place(path, text, *args, **kwargs):
+            real_write(path, text[:3], *args, **kwargs)
+            raise OSError("injected write failure")
+
+        monkeypatch.setattr(tempfile, "NamedTemporaryFile", FailingWriter)
+        monkeypatch.setattr(Path, "write_text", fail_in_place)
+    else:
+
+        def fail_replace(*args):
+            raise OSError("injected replace failure")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(error):
+        reports.publish_report(report, out, [])
+    assert out.read_bytes() == old
+    assert list(tmp_path.iterdir()) == [out]
+
+
+def test_successful_publication_is_complete_and_removes_owned_temporary(tmp_path):
+    from evals.speaker_reports import publish_report
+
+    out = tmp_path / "report.json"
+    out.write_text('{"generation":"old"}')
+    report = {"generation": "new", "text": "synthetic umlaut ü"}
+    publish_report(report, out, [])
+    assert json.loads(out.read_text(encoding="utf-8")) == report
+    assert list(tmp_path.iterdir()) == [out]
+
+
+@pytest.mark.parametrize("boundary", ["before", "after"])
+def test_process_death_at_replace_keeps_old_or_new_report(tmp_path, boundary):
+    import subprocess
+    from pathlib import Path
+
+    out = tmp_path / "report.json"
+    out.write_text('{"generation":"old"}')
+    code = """
+import os
+import sys
+from pathlib import Path
+from evals.speaker_reports import publish_report
+real_replace = os.replace
+def stop_at_boundary(source, dest):
+    if sys.argv[2] == "before":
+        os._exit(73)
+    real_replace(source, dest)
+    os._exit(73)
+os.replace = stop_at_boundary
+publish_report({"generation": "new"}, Path(sys.argv[1]), [])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(out), boundary],
+        cwd=Path(__file__).resolve().parents[1],
+        timeout=10,
+    )
+    assert result.returncode == 73
+    assert json.loads(out.read_text()) == {"generation": "old" if boundary == "before" else "new"}
+    # An abrupt exit can leave an owned sibling temporary; the final path is complete.
+    assert all(path.name.startswith(".report.json.") for path in tmp_path.iterdir() if path != out)
+
+
+def test_destination_revalidated_after_temporary_is_closed(monkeypatch, tmp_path):
+    import tempfile
+
+    from evals.speaker_reports import publish_report
+
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"synthetic source")
+    out = tmp_path / "report.json"
+    real_temporary = tempfile.NamedTemporaryFile
+
+    class SwapOnClose:
+        def __init__(self, *args, **kwargs):
+            self.file = real_temporary(*args, **kwargs)
+
+        def __enter__(self):
+            return self.file
+
+        def __exit__(self, *args):
+            self.file.__exit__(*args)
+            os.link(source, out)
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", SwapOnClose)
+    with pytest.raises(ValueError, match="output"):
+        publish_report({"complete": True}, out, [source])
+    assert source.read_bytes() == b"synthetic source"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["report.json", "source.wav"]

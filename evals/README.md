@@ -58,3 +58,13 @@ protects gold, production audio and every configured reference. Admission runs
 before setup/model work and is repeated immediately before publication. Separate
 report paths remain supported. These checks do not lock source files or defend
 against a hostile process swapping filesystem entries during the final syscall.
+
+Reports are serialized completely as finite UTF-8 JSON, written to an owned
+sibling temporary, closed, checked again for input aliases, then published with
+`os.replace`. A normal serialization/write/replace failure preserves the old
+report and removes only the owned temporary. An abrupt process exit before the
+replace may leave a `.<report-name>.*.tmp` sibling for manual cleanup; the final
+report is always the complete old or new generation. This is atomic visibility,
+not a crash-durability guarantee (no fsync). Publication replaces the destination
+name itself, including an admitted symlink, without writing through that link.
+Concurrent writers of the same separate report path are last-replace-wins.

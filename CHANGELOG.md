@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Atomically publish standalone speaker reports through owned sibling temporary
+  files; failed writes/replaces preserve the previous complete report.
+
 - Protect standalone speaker-evaluation source/control files from report output,
   including resolved-path, symlink and hardlink aliases; recheck at publication.
 
