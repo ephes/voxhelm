@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Admit bounded stable known-speaker gold JSON, exact finite segment records
+  and nonnegative limits before backend construction or reference inference.
+
 - Preflight mixed-speaker subwindow expansion with a 10,000-inference budget
   and representable integer-index progress before acquiring a model.
 

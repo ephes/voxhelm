@@ -54,7 +54,9 @@ JOHANNES_PASSAGE = (2295.0, 2312.5)
 
 
 def load_gold(path: Path) -> list[dict[str, Any]]:
-    return json.loads(path.read_text())
+    from evals.speaker_inputs import read_known_speaker_gold
+
+    return read_known_speaker_gold(path)
 
 
 def build_references(
@@ -138,6 +140,15 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="evaluate first N segments only")
     args = parser.parse_args()
 
+    if args.limit < 0:
+        parser.error("Limit must be zero (all segments) or a positive integer.")
+    try:
+        gold = load_gold(args.gold)
+    except ValueError:
+        parser.error("Invalid known-speaker gold input.")
+    if args.limit:
+        gold = gold[: args.limit]
+
     config = KnownSpeakerConfig()
     backend = PyannoteEmbeddingBackend(
         model_name=config.embedding_model,
@@ -147,9 +158,6 @@ def main() -> None:
 
     references = build_references(DEFAULT_REFERENCES, backend)
 
-    gold = load_gold(args.gold)
-    if args.limit:
-        gold = gold[: args.limit]
     print(f"decoding production audio: {args.production_audio}", flush=True)
     job_audio = decode_mono_16k(args.production_audio)
 

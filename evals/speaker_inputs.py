@@ -6,6 +6,7 @@ Errors identify schema locations, never input values or transcript contents.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import stat
@@ -13,10 +14,17 @@ from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from transcriptions.json_input import decode_json_object
+from transcriptions.json_input import (
+    check_json_depth,
+    decode_json_object,
+    finite_json_float,
+    reject_json_constant,
+    unique_json_object,
+)
 from transcriptions.native_output import read_native_json
 
 JSON_MAX_BYTES = 64 * 1024 * 1024
+GOLD_MAX_BYTES = 8 * 1024 * 1024
 MAX_FRAMES = 1_000_000
 MAX_ITEMS = 50_000
 MAX_FRAME_VISITS = 5_000_000
@@ -49,6 +57,31 @@ def read_json(path: Path) -> dict[str, Any]:
         return decode_json_object(read_native_json(path, limit=JSON_MAX_BYTES))
     except (OSError, RuntimeError, ValueError, RecursionError) as exc:
         raise ValueError("Invalid evaluation control file") from exc
+
+
+def read_known_speaker_gold(path: Path) -> list[dict[str, Any]]:
+    """Admit the whole corpus before selecting a prefix or starting model work."""
+    try:
+        raw = read_native_json(path, limit=GOLD_MAX_BYTES)
+        check_json_depth(raw)
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=unique_json_object,
+            parse_constant=reject_json_constant,
+            parse_float=finite_json_float,
+        )
+        rows = items(value, "gold")
+        require(bool(rows), "gold")
+        for row in rows:
+            start, end = interval(row, "gold[]")
+            require(set(row) == {"start", "end", "speaker", "text"}, "gold[].fields")
+            require(start < end, "gold[].range")
+            text(row["speaker"], "gold[].speaker")
+            require(bool(row["speaker"].strip()), "gold[].speaker")
+            require(isinstance(row["text"], str) and len(row["text"]) <= 4096, "gold[].text")
+        return rows
+    except (OSError, RuntimeError, ValueError, RecursionError) as exc:
+        raise ValueError("Invalid known-speaker gold input.") from exc
 
 
 def text(value: Any, location: str, *, nullable: bool = False) -> None:
