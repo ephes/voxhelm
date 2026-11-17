@@ -113,7 +113,11 @@ start, between segments or at the end, must not exceed
 `VOXHELM_WHISPERCPP_MAX_GAP_SECONDS` (default `600`; `0` disables the rejection,
 a gap exactly at the threshold passes). Coverage is the sorted union of the
 segment intervals clamped to the media, so overlapping segments count once. An
-unreadable normalized WAV fails the run.
+unreadable normalized WAV fails the run. Gap policies, including backend constructor
+overrides, must be finite and nonnegative; invalid overrides raise `ValueError`
+before native work. Measured media durations must also be finite and nonnegative,
+even with rejection disabled. Invalid durations fail rather than becoming zero;
+an actual zero-duration recording remains valid.
 
 - A longer gap raises `IncompleteTranscriptError` with the gap and the covered
   seconds. It is not a backend-unavailable error, so no fallback backend runs:

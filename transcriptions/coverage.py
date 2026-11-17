@@ -70,10 +70,12 @@ def measure_transcript_coverage(
     Segments with non-finite times are ignored. A zero-length segment covers no
     time but still splits a gap, since it shows text at that point. The largest
     gap includes the stretch before the first and after the last segment; an
-    empty transcript has one gap over the whole media.
+    empty transcript has one gap over the whole media. The measured duration
+    must be finite and nonnegative, otherwise ``ValueError`` is raised.
     """
-    duration = media_duration_seconds if math.isfinite(media_duration_seconds) else 0.0
-    duration = max(duration, 0.0)
+    if not math.isfinite(media_duration_seconds) or media_duration_seconds < 0:
+        raise ValueError("media_duration_seconds must be finite and nonnegative.")
+    duration = media_duration_seconds
     intervals: list[tuple[float, float]] = []
     for segment in segments:
         start, end = float(segment.start), float(segment.end)
@@ -103,6 +105,12 @@ def measure_transcript_coverage(
     )
 
 
+def validate_max_gap_seconds(max_gap_seconds: float) -> None:
+    """Admit a finite nonnegative gap policy; only zero disables rejection."""
+    if not math.isfinite(max_gap_seconds) or max_gap_seconds < 0:
+        raise ValueError("max_gap_seconds must be finite and nonnegative.")
+
+
 def check_transcript_coverage(
     segments: Iterable[_Timed],
     *,
@@ -113,8 +121,10 @@ def check_transcript_coverage(
     """Measure coverage; raise ``IncompleteTranscriptError`` on a gap above the threshold.
 
     ``max_gap_seconds`` 0 disables the rejection (coverage is still measured).
-    A gap exactly at the threshold passes.
+    A gap exactly at the threshold passes. Invalid policy or duration values
+    raise ``ValueError``, including when rejection is disabled.
     """
+    validate_max_gap_seconds(max_gap_seconds)
     coverage = measure_transcript_coverage(segments, media_duration_seconds=media_duration_seconds)
     if max_gap_seconds > 0 and coverage.largest_gap_seconds > max_gap_seconds:
         raise IncompleteTranscriptError(

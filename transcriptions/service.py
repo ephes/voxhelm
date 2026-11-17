@@ -29,6 +29,7 @@ from transcriptions.coverage import (
     IncompleteTranscriptError,
     TranscriptCoverage,
     check_transcript_coverage,
+    validate_max_gap_seconds,
     wav_duration_seconds,
 )
 from transcriptions.json_input import decode_json_object
@@ -227,6 +228,7 @@ class WhisperCppBackend:
         suppress_nst: bool = True,
         max_gap_seconds: float = 600.0,
     ) -> None:
+        validate_max_gap_seconds(max_gap_seconds)
         self.binary_path = binary_path
         self.model_name = model_name
         self.processors = processors

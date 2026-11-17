@@ -166,6 +166,41 @@ def test_threshold_zero_measures_without_rejecting() -> None:
     assert coverage.largest_gap_seconds == 5000
 
 
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -1.0])
+def test_invalid_gap_policy_is_refused(value: float) -> None:
+    with pytest.raises(ValueError, match="max_gap_seconds must be finite and nonnegative"):
+        check_transcript_coverage(
+            [], media_duration_seconds=100, max_gap_seconds=value, backend_name="x"
+        )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -1.0])
+def test_invalid_gap_override_is_refused_before_native_work(value: float) -> None:
+    with pytest.raises(ValueError, match="max_gap_seconds must be finite and nonnegative"):
+        WhisperCppBackend(
+            binary_path="unused-cli", model_name="unused-model", processors=1, max_gap_seconds=value
+        )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -1.0])
+def test_invalid_media_duration_is_refused_even_with_rejection_disabled(value: float) -> None:
+    message = "media_duration_seconds must be finite and nonnegative"
+    with pytest.raises(ValueError, match=message):
+        measure_transcript_coverage([], media_duration_seconds=value)
+    with pytest.raises(ValueError, match=message):
+        check_transcript_coverage(
+            [], media_duration_seconds=value, max_gap_seconds=0, backend_name="x"
+        )
+
+
+def test_zero_duration_is_valid() -> None:
+    coverage = check_transcript_coverage(
+        [], media_duration_seconds=0, max_gap_seconds=600, backend_name="x"
+    )
+    assert coverage.media_duration_seconds == coverage.covered_seconds == 0
+    assert coverage.largest_gap_seconds == 0
+
+
 def test_short_silent_media_passes() -> None:
     # Legitimate silence shorter than the threshold, e.g. a 5 min clip without speech.
     check_transcript_coverage([], media_duration_seconds=300, max_gap_seconds=600, backend_name="x")

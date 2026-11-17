@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject nonfinite or negative coverage policies before native work and invalid
+  measured durations at the shared coverage boundary; zero still disables gap rejection.
+
 - Hold and verify chapter model generations around successful inference; require JSON output after zero exit without DTW retries.
 
 - Detect sync URL media suffixes from the path and reject ambiguous, deeply nested or oversized sync transcription JSON before fetching.
