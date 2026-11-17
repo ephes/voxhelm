@@ -221,6 +221,9 @@ breaks inside a segment collapse to one space, so transcript text can neither
 inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
+Whitespace normalization scans each cue once, including long space runs without
+line breaks. Ordinary interior whitespace is preserved; a whitespace run containing
+CR or LF becomes one space, and surrounding whitespace is trimmed.
 
 The German drift check retains the original window words when a retry has no
 usable in-window words, even with strong matching language evidence. Nonblank,
@@ -283,7 +286,8 @@ If synthesis, cancellation or conversion fails and removing an owned temporary
 WAV/export also fails, the original failure propagates. Each cleanup is attempted,
 and a fixed warning reports recovery is needed without paths, text or filesystem
 diagnostics. The orphan remains for operator recovery and no successful result
-is returned. Cleanup after a successful result retains its existing behavior.
+is returned. The sync endpoint's cleanup after successful response setup follows
+the speech API policy below.
 
 ## Historical fingerprint upgrades
 
@@ -1758,8 +1762,14 @@ does not invoke ffmpeg or use this deadline.
   The Wyoming sidecar passes the same messages through in `synthesis_failed`.
 - Audio is streamed in bounded reads from an open file handle with
   `Content-Length`, using worker-thread reads under ASGI (uvicorn) so Django never
-  materializes the file in memory. The temporary WAV/export files are removed
-  before the response is returned; the handle is closed with the response.
+  materializes the file in memory. Before returning, cleanup attempts the temporary
+  WAV and export independently (once for WAV passthrough). Removal failures keep
+  the successful streaming response or primary error unchanged and log at most
+  one fixed warning per file, without paths or exception details. Retained files
+  need operator recovery; on platforms that refuse unlinking open files the export
+  may remain until removed after the response closes. A returned response owns its
+  handle until closure. If response construction or header assignment fails, the
+  endpoint closes the reader; a secondary close failure adds only a fixed warning.
 - A Piper voice whose `.onnx.json` config cannot be read or parsed is skipped
   with a logged warning; other installed voices stay available.
 

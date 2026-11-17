@@ -48,6 +48,8 @@ class ParsedSpeechRequest:
 def audio_speech(request: HttpRequest) -> HttpResponseBase:
     result = None
     exported = None
+    handle = None
+    response_owns_handle = False
     try:
         require_bearer_token(request)
         parsed_request = parse_speech_request(request)
@@ -62,8 +64,8 @@ def audio_speech(request: HttpRequest) -> HttpResponseBase:
             ),
         )
         exported = export_audio(result, output_format=parsed_request.response_format)
-        # Stream from an open handle. The files are unlinked in ``finally`` below; on
-        # POSIX the open handle keeps the data readable until the response closes it.
+        # Stream from an open handle. Cleanup below attempts to unlink the files;
+        # on POSIX the handle keeps the data readable until the response closes it.
         handle = exported.path.open("rb")
         response = reader_response(request, handle, content_type=exported.content_type)
         response["Content-Disposition"] = f'inline; filename="speech.{exported.format_name}"'
@@ -72,6 +74,7 @@ def audio_speech(request: HttpRequest) -> HttpResponseBase:
         response["X-Voxhelm-Backend"] = result.backend_name
         response["X-Voxhelm-Voice"] = result.voice_name
         response["X-Voxhelm-Language"] = result.language or ""
+        response_owns_handle = True
         return response
     except ApiError as exc:
         return openai_error_response(exc.message, status=exc.status, error_type=exc.error_type)
@@ -84,10 +87,28 @@ def audio_speech(request: HttpRequest) -> HttpResponseBase:
             "Speech synthesis failed.", status=500, error_type="server_error"
         )
     finally:
+        # Transfer ownership only after construction and all headers succeed.
+        # reader_response may already have closed the reader on its own failure.
+        if handle is not None and not response_owns_handle:
+            try:
+                if not handle.closed:
+                    handle.close()
+            except BaseException:
+                _LOGGER.warning("Speech response reader cleanup failed; recovery may be needed.")
+        paths = []
         if exported is not None and result is not None and exported.path != result.audio_path:
-            exported.path.unlink(missing_ok=True)
+            paths.append(exported.path)
         if result is not None:
-            result.audio_path.unlink(missing_ok=True)
+            paths.append(result.audio_path)
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Keep both successful response ownership and the primary error.
+                # Log at most one fixed warning per owned file, without details.
+                _LOGGER.warning(
+                    "Speech response audio cleanup failed; temporary file needs recovery."
+                )
 
 
 def parse_speech_request(request: HttpRequest) -> ParsedSpeechRequest:

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Preserve speech responses and primary errors when temporary-file cleanup fails;
+  attempt both removals independently and close readers on response setup failure.
+  Fixed warnings identify cleanup recovery without exposing file/error details.
+
+- Normalize WebVTT cue whitespace in linear work, preserving ordinary interior
+  spacing and existing escaping while collapsing CR/LF whitespace runs.
+
 - Atomically publish standalone speaker reports through owned sibling temporary
   files; failed writes/replaces preserve the previous complete report. Reports
   keep an existing file's mode (new ones use the umask default), and only

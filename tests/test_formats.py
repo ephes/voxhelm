@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+import pytest
+
 from transcriptions.formats import escape_vtt_cue_text, render_vtt
 from transcriptions.service import TranscriptionResult, TranscriptionSegment
 
@@ -79,6 +83,25 @@ def test_render_vtt_falls_back_to_single_cue_without_segments() -> None:
 
 def test_render_vtt_empty_result_has_only_header() -> None:
     assert render_vtt(_result()) == "WEBVTT\n"
+
+
+@pytest.mark.parametrize("size", [1000, 2000, 4000, 8000])
+@pytest.mark.parametrize("line_break", ["", "\r\n \n\t"])
+def test_render_vtt_whitespace_is_scanned_once(size: int, line_break: str) -> None:
+    class CountedText(str):
+        visits = 0
+
+        def __iter__(self) -> Iterator[str]:
+            for char in super().__iter__():
+                self.visits += 1
+                yield char
+
+    # Require the explicit linear scan rather than timing a backtracking regex.
+    text = CountedText(" \tA &amp;<" + " " * size + line_break + "\u2003B --> C\t ")
+    vtt = render_vtt(_result(TranscriptionSegment(id=0, start=0, end=1, text=text)))
+    gap = " " if line_break else " " * size + "\u2003"
+    assert _cue_payloads(vtt) == ["A &amp;amp;&lt;" + gap + "B -&gt; C"]
+    assert text.visits == len(text)
 
 
 def test_all_timed_exports_have_positive_quantized_duration():

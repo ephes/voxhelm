@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import re
 from typing import TYPE_CHECKING, Any, Protocol
 
 from transcriptions.errors import TranscriptionError
@@ -72,9 +71,6 @@ def render_vtt(result: TranscriptionResult) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-_LINE_BREAKS = re.compile(r"\s*[\r\n]+\s*")
-
-
 def escape_vtt_cue_text(text: str) -> str:
     """Return ``text`` as a single, safe WebVTT cue payload line.
 
@@ -83,7 +79,24 @@ def escape_vtt_cue_text(text: str) -> str:
     collapsed to one space, ``-->`` becomes ``->``, and ``&``, ``<`` and ``>``
     are written as character references.
     """
-    single_line = _LINE_BREAKS.sub(" ", text).strip()
+    # Scan each character once. An unanchored whitespace/newline regex retries
+    # long interior space runs at every position when no newline follows.
+    parts: list[str] = []
+    whitespace_start: int | None = None
+    has_line_break = False
+    for index, char in enumerate(text):
+        if char.isspace():
+            if whitespace_start is None:
+                whitespace_start = index
+            has_line_break = has_line_break or char in "\r\n"
+        else:
+            if whitespace_start is not None:
+                parts.append(" " if has_line_break else text[whitespace_start:index])
+                whitespace_start = None
+                has_line_break = False
+            parts.append(char)
+    # Pending trailing whitespace is trimmed; ordinary interior spacing survives.
+    single_line = "".join(parts).strip()
     single_line = single_line.replace("-->", "->")
     return single_line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
