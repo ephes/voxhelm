@@ -1,6 +1,7 @@
 """Pause a native JSON read while a separate writer changes the admitted file."""
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -52,12 +53,22 @@ def install_native_read_barrier(monkeypatch, change):
                         raise AssertionError(change)
                     native_path.write_bytes(raw)
                     if change == "rewrite":
-                        # Restoring mtime must not hide an in-place rewrite.
-                        os.utime(native_path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                        # Restoring mtime must not hide an in-place rewrite. Keep
+                        # restoring until ctime has visibly advanced, so the test
+                        # does not depend on the filesystem's timestamp granularity.
+                        deadline = time.monotonic() + 2
+                        while True:
+                            os.utime(native_path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                            if os.stat(native_path).st_ctime_ns != metadata.st_ctime_ns:
+                                break
+                            if time.monotonic() > deadline:
+                                raise AssertionError("ctime did not advance")
+                            time.sleep(0.001)
                     changed.append(native_path)
 
-                # The first bytes have been consumed; the rest cannot be read
-                # until the writer completes. No timing-dependent sleeps.
+                # The writer finishes before the remaining read call returns. The
+                # first read may already have buffered the whole small file, so a
+                # same-size rewrite is caught by the changed descriptor metadata.
                 with ThreadPoolExecutor(max_workers=1) as writer:
                     writer.submit(write).result(timeout=5)
                 return first + handle.read(size - len(first))
