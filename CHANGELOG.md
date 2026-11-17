@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Validate mixed-speaker probe intervals and decoded source extents before
+  reference embedding; retain exact endpoints and short valid segment padding.
+
 - Attempt every URL-fetch watchdog socket close and always restore the caller's
   deadline context. Preserve primary failures and cancellation; otherwise refuse
   the downloaded media with a fixed cleanup error and value-free diagnostics.

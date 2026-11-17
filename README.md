@@ -1011,6 +1011,9 @@ gate G2 of the whole drift check on the 22 German research episodes
 
 ## Batch Speaker Diarization
 
+See [offline speaker CLI contracts](evals/README.md) for evaluation admission,
+coverage and output policies.
+
 Batch `job_type=transcribe` requests can opt into speaker labels:
 
 ```bash

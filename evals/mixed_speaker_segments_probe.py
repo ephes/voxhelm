@@ -86,12 +86,22 @@ def parse_hint(hint: str) -> dict[str, int]:
 
 
 def parse_range(value: str) -> tuple[float, float]:
-    start, _, end = value.partition("-")
-    return float(start), float(end)
+    try:
+        start_text, _, end_text = value.partition("-")
+        start, end = float(start_text), float(end_text)
+        if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+            return start, end
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("Range must have finite 0 <= start < end.")
 
 
 def parse_window(value: str) -> tuple[float, float]:
-    size, hop = parse_range(value)
+    try:
+        size_text, _, hop_text = value.partition("-")
+        size, hop = float(size_text), float(hop_text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Window must be size-hop.") from None
     # A zero or negative hop would never advance past the target range.
     if not (math.isfinite(size) and math.isfinite(hop) and size > 0 and hop > 0):
         raise argparse.ArgumentTypeError(
@@ -106,6 +116,11 @@ def parse_reference(value: str) -> tuple[str, float, float]:
         raise SystemExit(f"Reference '{value}' must look like Name=start-end.")
     start, end = parse_range(bounds)
     return name, start, end
+
+
+def admit_source_interval(start: float, end: float, duration: float) -> None:
+    if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= duration):
+        raise ValueError("Invalid speaker probe source interval.")
 
 
 def write_report(report: dict[str, Any], out: Path | None) -> None:
@@ -197,10 +212,15 @@ def run_subwindow(args: argparse.Namespace) -> None:
         slice_samples,
     )
 
+    reference_samples = decode_mono_16k(args.reference_audio)
+    samples = decode_mono_16k(args.audio)
+    for _name, start, end in args.reference:
+        admit_source_interval(start, end, len(reference_samples) / SAMPLE_RATE)
+    for start, end in [*args.segment, *args.target]:
+        admit_source_interval(start, end, len(samples) / SAMPLE_RATE)
+
     config = KnownSpeakerConfig()
     backend = get_known_speaker_backend(config.embedding_model)
-
-    reference_samples = decode_mono_16k(args.reference_audio)
     references = []
     for name, start, end in args.reference:
         clip = slice_samples(reference_samples, SAMPLE_RATE, start, end)
@@ -210,7 +230,6 @@ def run_subwindow(args: argparse.Namespace) -> None:
     centroids = build_speaker_centroids(references, backend)
     names = sorted(centroids)
 
-    samples = decode_mono_16k(args.audio)
     embed_seconds: list[float] = []
 
     def classify(start: float, end: float) -> dict[str, Any]:
@@ -376,11 +395,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     if args.command == "subwindow" and args.window is None:
         args.window = [(1.5, 0.75)]
     setup(args.env_file)
-    args.run(args)
+    try:
+        args.run(args)
+    except ValueError:
+        parser.error("Invalid speaker probe input.")
 
 
 if __name__ == "__main__":
