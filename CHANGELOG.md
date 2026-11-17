@@ -3,7 +3,9 @@
 ## Unreleased
 
 - Atomically publish standalone speaker reports through owned sibling temporary
-  files; failed writes/replaces preserve the previous complete report.
+  files; failed writes/replaces preserve the previous complete report. Reports
+  keep an existing file's mode (new ones use the umask default), and only
+  refused admission becomes an argparse error; runtime failures keep tracebacks.
 
 - Protect standalone speaker-evaluation source/control files from report output,
   including resolved-path, symlink and hardlink aliases; recheck at publication.

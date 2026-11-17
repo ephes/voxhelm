@@ -29,7 +29,11 @@ import django
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 
-from evals.speaker_reports import admit_report_output, publish_report  # noqa: E402
+from evals.speaker_reports import (  # noqa: E402
+    SpeakerInputError,
+    admit_report_output,
+    publish_report,
+)
 from transcriptions.known_speaker import (  # noqa: E402
     KnownSpeakerConfig,
     PyannoteEmbeddingBackend,
@@ -164,7 +168,7 @@ def main() -> None:
     sources = [args.gold, args.production_audio, *DEFAULT_REFERENCES.values()]
     try:
         admit_report_output(args.out, sources)
-    except ValueError:
+    except SpeakerInputError:
         parser.error("Invalid speaker report output.")
 
     if args.limit < 0:
@@ -302,7 +306,7 @@ def main() -> None:
     }
     try:
         publish_report(report, args.out, sources)
-    except ValueError:
+    except SpeakerInputError:
         parser.error("Invalid speaker report output.")
     skip = {"confusion_matrix_top1", "johannes_passage"}
     summary = {k: v for k, v in report.items() if k not in skip}

@@ -68,3 +68,9 @@ report is always the complete old or new generation. This is atomic visibility,
 not a crash-durability guarantee (no fsync). Publication replaces the destination
 name itself, including an admitted symlink, without writing through that link.
 Concurrent writers of the same separate report path are last-replace-wins.
+A replaced report keeps its previous file mode; a new report gets the ordinary
+umask default, as a direct write would.
+
+Only refused input/output admission (intervals, window expansion, report
+aliases) becomes the generic argparse error. Other runtime failures, such as
+backend or model errors and non-finite report values, keep their traceback.

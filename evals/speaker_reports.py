@@ -2,10 +2,25 @@
 
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+
+class SpeakerInputError(ValueError):
+    """Refused CLI input or output admission; other ValueErrors keep their traceback."""
+
+
+def _report_mode(out: Path) -> int:
+    """Keep an existing report's mode, otherwise use the ordinary umask default."""
+    try:
+        return stat.S_IMODE(out.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
 
 
 def admit_report_output(out: Path | None, sources: Sequence[Path]) -> None:
@@ -17,9 +32,9 @@ def admit_report_output(out: Path | None, sources: Sequence[Path]) -> None:
             if resolved == source.resolve() or (
                 out.exists() and source.exists() and out.samefile(source)
             ):
-                raise ValueError("Speaker report output aliases an input.")
+                raise SpeakerInputError("Speaker report output aliases an input.")
     except (OSError, RuntimeError) as exc:
-        raise ValueError("Invalid speaker report output.") from exc
+        raise SpeakerInputError("Invalid speaker report output.") from exc
 
 
 def publish_report(
@@ -39,6 +54,8 @@ def publish_report(
         ) as handle:
             temporary = Path(handle.name)
             handle.write(serialized)
+            # NamedTemporaryFile is owner-only; publish with the mode write_text gave.
+            os.chmod(handle.fileno(), _report_mode(out))
         # Inference and staging may take time: repeat source-identity admission
         # directly before replacing the final name, after the owned file closes.
         admit_report_output(out, sources)

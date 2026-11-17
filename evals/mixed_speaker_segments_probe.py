@@ -34,7 +34,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from evals.speaker_reports import admit_report_output, publish_report
+from evals.speaker_reports import SpeakerInputError, admit_report_output, publish_report
 
 HINT_KEYS = {"num": "num_speakers", "min": "min_speakers", "max": "max_speakers"}
 PACKAGES = ("voxhelm", "pyannote.audio", "torch", "mlx-whisper")
@@ -122,7 +122,7 @@ def parse_reference(value: str) -> tuple[str, float, float]:
 
 def admit_source_interval(start: float, end: float, duration: float) -> None:
     if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= duration):
-        raise ValueError("Invalid speaker probe source interval.")
+        raise SpeakerInputError("Invalid speaker probe source interval.")
 
 
 def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[float, float]]]]:
@@ -130,11 +130,11 @@ def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[f
     plans = []
     total = len(args.segment)
     if total > MAX_PROBE_INFERENCES or len(args.target) * len(args.window) > MAX_PROBE_INFERENCES:
-        raise ValueError("Invalid speaker probe window expansion.")
+        raise SpeakerInputError("Invalid speaker probe window expansion.")
     for start, end in args.target:
         for size, hop in args.window:
             if not (math.isfinite(size) and math.isfinite(hop) and size > 0 and hop > 0):
-                raise ValueError("Invalid speaker probe window expansion.")
+                raise SpeakerInputError("Invalid speaker probe window expansion.")
             span = end - size - start + 1e-9
             count = 0
             if span >= 0:
@@ -144,7 +144,7 @@ def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[f
                     or not math.isfinite(quotient)
                     or quotient >= MAX_PROBE_INFERENCES - total
                 ):
-                    raise ValueError("Invalid speaker probe window expansion.")
+                    raise SpeakerInputError("Invalid speaker probe window expansion.")
                 count = math.floor(quotient) + 1
             total += count
             bounds = []
@@ -157,7 +157,7 @@ def prepare_subwindows(args: argparse.Namespace) -> list[tuple[str, list[tuple[f
                     and cursor < stop
                     and (previous is None or cursor > previous)
                 ):
-                    raise ValueError("Invalid speaker probe window expansion.")
+                    raise SpeakerInputError("Invalid speaker probe window expansion.")
                 bounds.append((cursor, stop))
                 previous = cursor
             plans.append((f"{start}-{end} {size}s/{hop}s", bounds))
@@ -284,7 +284,7 @@ def run_subwindow(args: argparse.Namespace) -> None:
     total = len(args.segment) + sum(len(bounds) for _key, bounds in plans)
     total += sum(len(reference.windows) for reference in references)
     if total > MAX_PROBE_INFERENCES:
-        raise ValueError("Invalid speaker probe window expansion.")
+        raise SpeakerInputError("Invalid speaker probe window expansion.")
     config = KnownSpeakerConfig()
     backend = get_known_speaker_backend(config.embedding_model)
     centroids = build_speaker_centroids(references, backend)
@@ -460,7 +460,7 @@ def main() -> None:
         admit_report_output(args.out, source_inputs(args))
         setup(args.env_file)
         args.run(args)
-    except ValueError:
+    except SpeakerInputError:
         parser.error("Invalid speaker probe input.")
 
 

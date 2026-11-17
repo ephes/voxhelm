@@ -232,3 +232,49 @@ def test_destination_revalidated_after_temporary_is_closed(monkeypatch, tmp_path
         publish_report({"complete": True}, out, [source])
     assert source.read_bytes() == b"synthetic source"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["report.json", "source.wav"]
+
+
+def test_published_report_keeps_ordinary_file_mode(tmp_path):
+    import stat
+
+    from evals.speaker_reports import publish_report
+
+    fresh = tmp_path / "fresh.json"
+    umask = os.umask(0o022)
+    try:
+        publish_report({"generation": "new"}, fresh, [])
+    finally:
+        os.umask(umask)
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o644
+
+    existing = tmp_path / "existing.json"
+    existing.write_text('{"generation":"old"}')
+    existing.chmod(0o640)
+    publish_report({"generation": "new"}, existing, [])
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o640
+    assert json.loads(existing.read_text()) == {"generation": "new"}
+
+
+def test_runtime_value_error_is_not_reported_as_probe_input(monkeypatch, tmp_path):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"synthetic input")
+    monkeypatch.setattr(probe, "setup", lambda *a: None)
+
+    def failing_run(args):
+        raise ValueError("synthetic backend failure")
+
+    monkeypatch.setattr(probe, "run_turns", failing_run)
+    monkeypatch.setattr(
+        sys, "argv", ["probe", "turns", str(audio), "--out", str(tmp_path / "report.json")]
+    )
+    with pytest.raises(ValueError, match="synthetic backend failure"):
+        probe.main()
+
+
+def test_known_eval_serialization_error_is_not_reported_as_output(monkeypatch, tmp_path):
+    from evals import speaker_reports as reports
+
+    with pytest.raises(ValueError) as error:
+        reports.publish_report({"score": float("nan")}, tmp_path / "report.json", [])
+    assert not isinstance(error.value, reports.SpeakerInputError)
+    assert not (tmp_path / "report.json").exists()
