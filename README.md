@@ -546,8 +546,9 @@ ingress, which forwards `X-Forwarded-Proto: https`.
   directly at `http://<host>:8787` stops working. Use the HTTPS ingress, or set
   `VOXHELM_SECURE_COOKIES=false` deliberately if plain-HTTP LAN login is needed.
 - **Framing:** every response sends `X-Frame-Options: DENY`, including on the
-  direct backend port. The ops-library Traefik headers middleware sets
-  `customFrameOptionsValue: SAMEORIGIN`, which may replace it at the edge.
+  direct backend port. The ops-library Traefik headers middleware replaces it
+  with its own `customFrameOptionsValue`, which is `DENY` as well (ops-library
+  2.31.18 or later).
 - **Login throttle:** `VOXHELM_LOGIN_MAX_FAILURES` (default 5) bounds completed
   failures plus in-flight password checks for each client address and username.
   Admission reserves both budgets before authentication; exhausted budgets return
@@ -1809,8 +1810,32 @@ Batch submission and every worker-control JSON request require an object, at mos
 level, nonfinite numbers, integer conversion limits and decoder resource failures
 return a fixed HTTP 400 invalid-JSON error before job, worker or lease writes;
 oversized bodies return 413. Authentication runs before reading/decoding the body.
-The endpoint reads at most the byte ceiling plus one; the HTTP server may already
-have buffered/spooled the transport body.
+The endpoint reads at most the byte ceiling plus one. Below that, the ASGI entry
+point bounds what the transport may deliver at all (see "Request body ceilings").
+
+### Request body ceilings
+
+Django's ASGI handler copies the whole request body into a temporary file before
+routing, CSRF, authentication or any view runs. `config.asgi.application` therefore
+wraps Django in `config.body_limit.RequestBodyLimitMiddleware`, which caps each body
+by route before Django sees it:
+
+- `POST /v1/uploads` with a valid producer bearer token:
+  `VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES` plus 1 MiB for multipart framing.
+- `POST /v1/audio/transcriptions` with a valid producer bearer token, and the
+  operator form at `/`: `VOXHELM_MAX_UPLOAD_BYTES` plus 1 MiB (never below 3 MiB).
+- Everything else, including those upload routes without a valid token: 3 MiB, so
+  the JSON endpoints still answer their own 2 MiB 413 and an unauthenticated
+  request still gets its 401.
+
+A declared `Content-Length` above the ceiling is refused before any body byte is
+read; a chunked or undeclared body is cut off at the first chunk past it. The
+refusal is a JSON 413 (`invalid_request_error`) with `Connection: close`,
+`X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`. An
+unauthenticated client can therefore make the server spool at most 26 MiB per
+request (the operator form ceiling), instead of an unbounded body. The ceiling
+applies to the ASGI entry point that production runs (`uvicorn
+config.asgi:application`); `config.wsgi` is not wrapped.
 
 Unexpected batch upload/submission backend `RuntimeError` returns HTTP 500
 `Batch processing failed.` and logs only a fixed operation category, without

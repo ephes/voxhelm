@@ -146,17 +146,27 @@ def require_bearer_token(request: HttpRequest) -> str:
             error_type="authentication_error",
         )
 
-    presented = header.removeprefix("Bearer ").strip()
-    for label, token in settings.VOXHELM_BEARER_TOKENS.items():
-        # Compare bytes: compare_digest raises TypeError on non-ASCII str.
-        if hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
-            return label
+    label = producer_for_authorization(header)
+    if label is not None:
+        return label
 
     raise ApiError(
         "Invalid bearer token.",
         status=401,
         error_type="authentication_error",
     )
+
+
+def producer_for_authorization(header: str) -> str | None:
+    """Return the producer label of a valid ``Bearer`` header, else ``None``."""
+    if not header.startswith("Bearer "):
+        return None
+    presented = header.removeprefix("Bearer ").strip()
+    for label, token in settings.VOXHELM_BEARER_TOKENS.items():
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+        if hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+            return label
+    return None
 
 
 def parse_transcription_request(request: HttpRequest) -> ParsedRequest:

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Bound request bodies at the ASGI entry point before Django spools them: Django
+  copied every body to a temporary file before routing or authentication, so any
+  client reaching the port could stream an unbounded body to disk without
+  credentials. Large bodies are now admitted only on the upload routes (staged
+  uploads and sync transcription with a valid producer token, the operator form);
+  everything else is capped at 3 MiB. Oversized bodies get a JSON 413 with
+  `Connection: close` (and the app's `X-Frame-Options: DENY` and `nosniff`), a
+  declared oversized `Content-Length` before any byte is read.
+
+- Docs: the README no longer claims the Traefik edge replaces `X-Frame-Options`
+  with `SAMEORIGIN`; the ops-library edge sends `DENY` since 2.31.18.
+
 ## 0.1.14 (2026-11-17)
 
 Published to PyPI for the remote transcription workers (`atlas`, `studio`),
