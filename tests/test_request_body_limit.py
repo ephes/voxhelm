@@ -157,7 +157,7 @@ def test_declared_oversized_length_is_refused_without_reading_the_body():
         path="/v1/uploads",
         chunks=64,
         headers=[
-            (b"content-length", str(600 * MIB).encode()),
+            (b"content-length", str(17 * 1024 * MIB).encode()),
             (b"authorization", b"Bearer test-token"),
         ],
     )
@@ -225,6 +225,7 @@ def test_body_deadline_closes_django_spool_before_408(settings, monkeypatch, bod
     from config.asgi import application
 
     settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 1024 * MIB  # the base budget applies
 
     async def scenario():
         loop = asyncio.get_running_loop()
@@ -299,6 +300,7 @@ def test_completed_upload_can_run_past_receipt_deadline(settings, monkeypatch, b
     from config.asgi import application
 
     settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 1024 * MIB  # the base budget applies
 
     async def scenario():
         loop = asyncio.get_running_loop()
@@ -339,6 +341,7 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
 
     settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS = 2
     settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 1024 * MIB  # the base budget applies
     application = RequestBodyLimitMiddleware(django_application)
 
     async def scenario():
@@ -575,3 +578,393 @@ def test_sync_ceiling_never_drops_below_the_json_limit(settings):
     }
 
     assert request_body_limit(scope) >= DEFAULT_BODY_LIMIT_BYTES
+
+
+def test_idle_timeout_cuts_off_a_stalled_body_before_the_total_budget(
+    settings, monkeypatch, body_spools
+):
+    from config.asgi import application
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 600
+    settings.VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS = 5
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        connection = BodyConnection()
+        connection.chunk()
+        scope = asgi_scope(
+            "POST",
+            "/v1/uploads",
+            [(b"authorization", b"Bearer test-token"), (b"content-length", b"1000")],
+        )
+        task = asyncio.create_task(application(scope, connection.receive, connection.send))
+        await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+        elapsed = 6  # far below the 600 s total budget, past the idle timeout
+        await asyncio.wait_for(task, timeout=1)
+        assert connection.sent[0]["status"] == 408
+        assert len(body_spools) == 1 and body_spools[0].closed
+
+    asyncio.run(scenario())
+
+
+def test_producer_upload_may_take_longer_than_the_base_budget(settings, monkeypatch, body_spools):
+    """A slow but steady producer upload gets a budget scaled to its size."""
+    from config.asgi import application
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+    settings.VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS = 5
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = MIB
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 512 * MIB
+    chunks = 30
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        received = 0
+        finished = asyncio.Event()
+
+        async def receive():
+            nonlocal received, elapsed
+            if received >= chunks:
+                await finished.wait()
+                return {"type": "http.disconnect"}
+            received += 1
+            elapsed += 4  # each chunk within the idle timeout; 120 s in total
+            return {"type": "http.request", "body": b"data", "more_body": received < chunks}
+
+        sent: list[Mapping[str, Any]] = []
+
+        async def send(message):
+            sent.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                finished.set()
+
+        @csrf_exempt
+        async def view(request):
+            return HttpResponse(str(len(request.read())).encode())
+
+        urls = ModuleType("slow_upload_urls")
+        urls.urlpatterns = [path("v1/uploads", view)]  # type: ignore[attr-defined]
+        settings.ROOT_URLCONF = urls
+        # 200 MiB declared at 1 MiB/s allows 200 s, far above the 10 s base.
+        scope = asgi_scope(
+            "POST",
+            "/v1/uploads",
+            [
+                (b"authorization", b"Bearer test-token"),
+                (b"content-length", str(200 * MIB).encode()),
+            ],
+        )
+        # The patched loop clock also drives wait_for, so allow more than 120 s.
+        await asyncio.wait_for(application(scope, receive, send), timeout=3600)
+        assert sent[0]["status"] == 200
+        assert sent[1]["body"] == str(4 * chunks).encode()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("path", "authorization", "content_length", "expected_seconds"),
+    [
+        # Anonymous and JSON routes keep the base budget whatever they declare.
+        ("/v1/health", b"", None, 600),
+        ("/", b"", None, 600),
+        ("/v1/uploads", b"", str(10 * 1024 * MIB).encode(), 600),
+        # Producer uploads scale with their declared size at the minimum rate.
+        ("/v1/uploads", b"Bearer test-token", str(8 * 1024 * MIB).encode(), 8 * 1024 * 8),
+        ("/v1/uploads", b"Bearer test-token", str(10 * MIB).encode(), 600),
+        # Without a declared length the base budget applies.
+        ("/v1/uploads", b"Bearer test-token", None, 600),
+        # A declared length above the ceiling is capped at it (and refused anyway).
+        ("/v1/uploads", b"Bearer test-token", str(32 * 1024 * MIB).encode(), (16 * 1024 + 1) * 8),
+    ],
+)
+def test_receipt_budget(settings, path, authorization, content_length, expected_seconds):
+    from config.body_limit import receipt_budget_seconds, request_body_limit
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 600
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 128 * 1024
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 16 * 1024 * MIB
+    headers = [(b"authorization", authorization)] if authorization else []
+    if content_length is not None:
+        headers.append((b"content-length", content_length))
+    scope = {"path": path, "root_path": "", "headers": headers}
+
+    assert receipt_budget_seconds(scope, request_body_limit(scope)) == expected_seconds
+
+
+def test_default_limits_admit_multi_gigabyte_producer_uploads():
+    from django.conf import settings as django_settings
+
+    # Hours of uncompressed multichannel audio must fit into the defaults.
+    assert django_settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES >= 16 * 1024 * MIB
+    assert django_settings.VOXHELM_BATCH_MAX_DOWNLOAD_BYTES >= 16 * 1024 * MIB
+
+
+def test_multi_gigabyte_producer_upload_streams_through_the_asgi_entry_point(settings, monkeypatch):
+    """Stream 4 GiB of synthetic bytes through the real ASGI path into Django.
+
+    The spool is replaced by a counting sink, so the test needs neither disk
+    space nor memory for the body; only one shared 1 MiB chunk exists.
+    """
+    from config.asgi import application
+
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 16 * 1024 * MIB
+    total = 4 * 1024 * MIB
+    chunk = bytes(range(256)) * (MIB // 256)  # audio-like noise, generated
+
+    class CountingSpool:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.written = 0
+            self.closed = False
+
+        def write(self, data: bytes) -> int:
+            self.written += len(data)
+            return len(data)
+
+        def seek(self, *args: Any) -> int:
+            return 0
+
+        def read(self, *args: Any) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    spools: list[CountingSpool] = []
+
+    def open_spool(*args: Any, **kwargs: Any) -> CountingSpool:
+        spool = CountingSpool()
+        spools.append(spool)
+        return spool
+
+    monkeypatch.setattr("django.core.handlers.asgi.tempfile.SpooledTemporaryFile", open_spool)
+
+    @csrf_exempt
+    async def view(request):
+        return HttpResponse(str(spools[0].written).encode())
+
+    urls = ModuleType("large_upload_urls")
+    urls.urlpatterns = [path("v1/uploads", view)]  # type: ignore[attr-defined]
+    settings.ROOT_URLCONF = urls
+
+    def synthetic_body():
+        sent = 0
+        while sent < total:
+            sent += len(chunk)
+            yield {"type": "http.request", "body": chunk, "more_body": sent < total}
+
+    body = synthetic_body()
+    finished = asyncio.Event()
+    sent_messages: list[Mapping[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        message = next(body, None)
+        if message is not None:
+            return message
+        await finished.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, Any]) -> None:
+        sent_messages.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            finished.set()
+
+    scope = asgi_scope(
+        "POST",
+        "/v1/uploads",
+        [
+            (b"authorization", b"Bearer test-token"),
+            (b"content-type", b"application/octet-stream"),
+            (b"content-length", str(total).encode()),
+        ],
+    )
+
+    async def main() -> None:
+        await asyncio.wait_for(application(scope, receive, send), timeout=120)
+
+    asyncio.run(main())
+
+    assert sent_messages[0]["status"] == 200
+    assert sent_messages[1]["body"] == str(total).encode()
+    assert len(spools) == 1 and spools[0].written == total and spools[0].closed
+
+
+def test_chunk_that_resumes_after_the_idle_deadline_is_late(settings, monkeypatch, body_spools):
+    """A receive that returns past the idle deadline before the timer fires is refused."""
+    from config.asgi import application
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 600
+    settings.VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS = 5
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        received = 0
+        sent: list[Mapping[str, Any]] = []
+
+        async def receive():
+            nonlocal received, elapsed
+            received += 1
+            if received > 2:
+                return {"type": "http.disconnect"}
+            elapsed += 6  # the gap passes without a suspension, so no timer fires
+            return {"type": "http.request", "body": b"data", "more_body": received < 2}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = asgi_scope(
+            "POST",
+            "/v1/uploads",
+            [(b"authorization", b"Bearer test-token"), (b"content-length", b"8")],
+        )
+        await asyncio.wait_for(application(scope, receive, send), timeout=3600)
+        assert sent[0]["status"] == 408
+        assert len(body_spools) == 1 and body_spools[0].closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_status"),
+    [
+        ([(b"transfer-encoding", b"chunked")], 411),
+        ([(b"content-length", b"abc")], 411),
+        # Transfer-Encoding wins over a Content-Length sent beside it.
+        ([(b"transfer-encoding", b"chunked"), (b"content-length", b"100")], 411),
+        ([], 400),  # no body framing at all: the view answers for the empty body
+    ],
+)
+def test_staged_upload_without_a_declared_length_is_refused_before_spooling(
+    headers, expected_status
+):
+    status, response_headers, body, pulled = run_asgi(
+        method="POST",
+        path="/v1/uploads",
+        chunks=0 if not headers else 8,
+        headers=[
+            (b"authorization", b"Bearer test-token"),
+            (b"content-type", b"multipart/form-data; boundary=x"),
+            *headers,
+        ],
+    )
+
+    assert status == expected_status
+    if expected_status == 411:
+        assert pulled == 0
+        assert response_headers[b"connection"] == b"close"
+        assert "Content-Length" in json.loads(body)["error"]["message"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_staged_multipart_upload_with_a_length_reaches_the_staging_view():
+    """The real staging view accepts a length-framed multipart upload via ASGI."""
+    from config.asgi import application
+
+    boundary = "voxhelmtest"
+    audio = b"ID3" + bytes(range(256)) * 64  # synthetic, not real media
+    payload = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="synthetic.mp3"\r\n'
+            "Content-Type: audio/mpeg\r\n\r\n"
+        ).encode()
+        + audio
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    sent: list[Mapping[str, Any]] = []
+    delivered = False
+    finished = asyncio.Event()
+
+    async def receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": payload, "more_body": False}
+        await finished.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            finished.set()
+
+    scope = asgi_scope(
+        "POST",
+        "/v1/uploads",
+        [
+            (b"authorization", b"Bearer test-token"),
+            (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
+            (b"content-length", str(len(payload)).encode()),
+        ],
+    )
+
+    async def main():
+        await asyncio.wait_for(application(scope, receive, send), timeout=60)
+
+    asyncio.run(main())
+
+    assert sent[0]["status"] == 201, b"".join(m.get("body", b"") for m in sent[1:])
+
+
+def test_length_guard_does_not_depend_on_the_staged_ceiling(settings):
+    """A valid producer's unframed staged upload gets 411 even under a tiny ceiling."""
+    settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 1024
+
+    status, _headers, _body, pulled = run_asgi(
+        method="POST",
+        path="/v1/uploads",
+        chunks=4,
+        headers=[
+            (b"authorization", b"Bearer test-token"),
+            (b"content-type", b"multipart/form-data; boundary=x"),
+            (b"transfer-encoding", b"chunked"),
+        ],
+    )
+
+    assert status == 411
+    assert pulled == 0
+
+
+def test_transfer_encoding_voids_a_declared_length_for_the_budget(settings):
+    from config.body_limit import receipt_budget_seconds, request_body_limit
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 600
+    settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 128 * 1024
+    scope = {
+        "path": "/v1/uploads",
+        "root_path": "",
+        "headers": [
+            (b"authorization", b"Bearer test-token"),
+            (b"transfer-encoding", b"chunked"),
+            (b"content-length", str(8 * 1024 * MIB).encode()),
+        ],
+    }
+
+    assert receipt_budget_seconds(scope, request_body_limit(scope)) == 600
+
+
+@pytest.mark.parametrize("path", ["/v1/health", "/", "/v1/audio/transcriptions"])
+def test_oversized_length_beside_transfer_encoding_is_still_refused_early(path):
+    status, headers, _body, pulled = run_asgi(
+        method="POST",
+        path=path,
+        chunks=8,
+        headers=[
+            (b"authorization", b"Bearer test-token"),
+            (b"transfer-encoding", b"chunked"),
+            (b"content-length", str(64 * 1024 * MIB).encode()),
+        ],
+    )
+
+    assert status == 413
+    assert pulled == 0
+    assert headers[b"connection"] == b"close"

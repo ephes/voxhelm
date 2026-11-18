@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Let long recordings through. Staged uploads
+  (`VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES`) and batch URL downloads
+  (`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES`) now default to 16 GiB instead of
+  512 MiB, and a batch URL download try may take
+  `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` = 3600 seconds by default instead
+  of 600 (remote workers pick both up with their next release).
+
+- Time ASGI request-body receipt before routing. Each chunk must arrive within
+  `VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS` (default 120), and the whole body
+  within the larger of `VOXHELM_ASGI_BODY_TIMEOUT_SECONDS` (default 600) and its
+  declared `Content-Length` at `VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND`
+  (default 128 KiB/s), so a multi-gigabyte producer upload over a slow link
+  completes while anonymous and JSON routes keep the 600-second total. Stalled
+  and drip-fed uploads get a JSON 408 after spool cleanup. Only a
+  `Content-Length` that frames the body counts: beside `Transfer-Encoding` it
+  does not extend the budget (an oversized one still gets the early 413). A
+  producer's staged upload that announces a body without a usable length gets
+  a JSON 411 before any body is read, since Django cannot parse its multipart
+  form. Inference after a completed upload has its own lifetime.
+
 - Bound concurrent large-upload spools per ASGI process, including cleanup
   after disconnect or cancellation. Body-carrying requests to the operator form,
   to synchronous transcription and to staged uploads each use their own pool of
@@ -9,11 +29,6 @@
   Django request lifetime, and get a JSON 503 without a body read when their
   pool is full. Health, the job API and the remote worker control plane are
   never counted.
-
-- Apply a single ASGI request-body receipt deadline before routing. Stalled and
-  drip-fed uploads get a JSON 408 after spool cleanup. The default is 600
-  seconds, configurable with `VOXHELM_ASGI_BODY_TIMEOUT_SECONDS`. Inference
-  after a completed upload has its own lifetime.
 
 - Bound request bodies at the ASGI entry point before Django spools them: Django
   copied every body to a temporary file before routing or authentication, so any

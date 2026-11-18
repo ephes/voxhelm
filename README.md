@@ -490,7 +490,7 @@ export VOXHELM_TTS_LANGUAGE_VOICES="de=kokoro-martin,en=kokoro-af_heart"
 export VOXHELM_ALLOWED_URL_HOSTS="media.example.com"
 export VOXHELM_TRUSTED_HTTP_HOSTS="internal.example.lan"
 export VOXHELM_PRIVATE_URL_HOSTS="s3.internal.example.lan"
-export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="536870912"
+export VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES="17179869184"  # 16 GiB
 export VOXHELM_STAGED_INPUT_RETENTION_SECONDS="86400"
 export VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS="86400"
 export VOXHELM_JOB_METADATA_RETENTION_SECONDS="7776000"
@@ -1688,9 +1688,11 @@ batch fetch.
 
 Batch media, meaning the URL input of a batch job and known-speaker reference
 audio, whether fetched by the Django Tasks worker or by a remote worker,
-uses `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (default `600`, positive
+uses `VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS` (default `3600`, positive
 integer) as the same kind of elapsed budget per try, and is limited to
-`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES` (default 512 MiB). The sync size limit does
+`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES` (default 16 GiB, so multi-hour recordings and
+videos fit). One hour per try fetches about 1.7 GiB at 4 Mbit/s and 16 GiB at
+40 Mbit/s; raise the budget for larger media from slower sources. The sync size limit does
 not apply to it. A try that fails transiently (the elapsed budget, a DNS,
 connection or read error, or HTTP 408, 425, 429, 500, 502, 503 or 504) is
 retried (as is a body shorter than its `Content-Length`) inside the same
@@ -1704,7 +1706,8 @@ and other HTTP statuses fail at once. Only a download that fails on every try
 fails the job attempt; a remote worker reports it as retryable as before. A
 remote worker keeps heartbeating its lease while it fetches and retries, so a
 batch fetch can hold a claim for up to about
-`attempts × budget` plus the backoff (about 30 minutes with the defaults).
+`attempts × budget` plus the backoff (about three hours with the defaults:
+three one-hour tries).
 
 `VOXHELM_AUDIO_DECODE_TIMEOUT_SECONDS` (default `900`, positive integer) bounds
 each ffmpeg decode for whisper.cpp normalization, pyannote diarization and
@@ -1821,9 +1824,23 @@ wraps Django in `config.body_limit.RequestBodyLimitMiddleware`, which caps each 
 by route before Django sees it:
 
 - `POST /v1/uploads` with a valid producer bearer token:
-  `VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES` plus 1 MiB for multipart framing.
+  `VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES` (default 16 GiB) plus 1 MiB for
+  multipart framing. This is the route for long recordings: 16 GiB hold about
+  25 hours of uncompressed 48 kHz 16-bit stereo PCM (in a large-file container
+  such as RF64; a classic WAV file ends at 4 GiB, about 6 hours), far more as
+  MP3 or AAC. The request must declare its `Content-Length` (Django parses
+  multipart only with one); a producer's staged upload without it, or with
+  `Transfer-Encoding`, which overrides a length, gets a JSON 411 before any
+  body byte is read. A `Content-Length` above the ceiling is checked first and
+  gets the 413 below, with or without `Transfer-Encoding`. While it is processed, a staged upload briefly
+  occupies up to three times its size in temporary space (Django's body spool,
+  the multipart file and the staging copy) before it moves to the artifact
+  store, four times with the filesystem artifact backend on the same volume;
+  size the limit and `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` to the free disk space.
 - `POST /v1/audio/transcriptions` with a valid producer bearer token, and the
   operator form at `/`: `VOXHELM_MAX_UPLOAD_BYTES` plus 1 MiB (never below 3 MiB).
+  These routes answer synchronously, so larger media goes through a staged
+  upload or a batch URL job instead.
 - Everything else, including those upload routes without a valid token: 3 MiB, so
   the JSON endpoints still answer their own 2 MiB 413 and an unauthenticated
   request still gets its 401.
@@ -1837,15 +1854,27 @@ request (the operator form ceiling), instead of an unbounded body. The ceiling
 applies to the ASGI entry point that production runs (`uvicorn
 config.asgi:application`); `config.wsgi` is not wrapped.
 
-The ASGI entry point gives the complete request body one receipt deadline
-(`VOXHELM_ASGI_BODY_TIMEOUT_SECONDS`, a positive integer, default 600 seconds).
-It starts before the first body event and applies across all chunks, including
-the last one. When it expires, the server closes the incomplete Django spool
-and returns a fixed JSON 408 with `Connection: close`. Multipart parsing,
-inference and response delivery after receipt use their own lifetimes.
-Set the budget for the largest legitimate upload at the slowest supported
-upload rate. At the default 512 MiB staged file limit, 600 seconds requires
-roughly 7.2 Mbit/s of sustained upload throughput, plus framing and overhead.
+The ASGI entry point times body receipt with two budgets, both positive
+integers read from the environment:
+
+- `VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS` (default 120): the longest wait for
+  the next body chunk. A stalled client is cut off after this, whatever the size.
+- A total budget for the whole body: `VOXHELM_ASGI_BODY_TIMEOUT_SECONDS`
+  (default 600 seconds), or the expected body size divided by
+  `VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND` (default 131072, 128 KiB/s, about
+  1 Mbit/s) if that is longer. The size is the declared `Content-Length`,
+  capped at the route ceiling; a body without one keeps the 600 seconds.
+
+The JSON routes (3 MiB) and the operator form (26 MiB) therefore keep the
+600-second total, since their ceilings arrive within it at the minimum rate,
+while a producer's staged upload gets time in proportion to its size: a
+declared 2 GiB upload may take up to about 4.5 hours, a 16 GiB one about 36
+hours, as long as no gap between chunks exceeds the idle timeout. On the LAN
+(about 800 Mbit/s between macmini and studio) 2 GiB arrive in about 20 seconds.
+The budgets start before the first body event and apply across all chunks,
+including the last one. When one expires, the server closes the incomplete
+Django spool and returns a fixed JSON 408 with `Connection: close`. Multipart
+parsing, inference and response delivery after receipt use their own lifetimes.
 
 Each ASGI server process also bounds concurrent large uploads. Only requests to
 a route whose ceiling exceeds the JSON ceiling (the operator form at `/`, and

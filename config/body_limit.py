@@ -13,7 +13,11 @@ views still answer their own precise 413/401 for small bodies. A declared
 ``Content-Length`` above the ceiling is refused before any body byte is read; a
 streamed body is cut off at the first chunk past it. The refusal is a JSON 413
 with ``Connection: close``, so the server stops reading the rest.
-An absolute deadline also bounds receipt of the body, without timing the view.
+Receipt of the body is also timed, without timing the view: each chunk must
+arrive within an idle timeout, and the whole body within a total budget that
+starts at a fixed base and grows with the declared size at a minimum rate, so a
+multi-gigabyte producer upload over a slow link still completes while a
+stalled or trickling client is cut off.
 
 Each process also bounds how many large-body requests (a route ceiling above the
 JSON ceiling, with a body announced) own a Django spool at once. Each large-body
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
 from threading import BoundedSemaphore
@@ -118,15 +123,50 @@ def _admission_pool(scope: Scope, limit: int) -> str | None:
     return _route_path(scope)
 
 
-def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
+def _declared_length(scope: Scope) -> int | None:
+    """Return the largest parsable ``Content-Length``, or None without one."""
+    declared = None
     for key, value in scope.get("headers") or ():
         if key.lower() != b"content-length":
             continue
         text = bytes(value).decode("latin-1").strip()
         # isdigit() also accepts non-ASCII digits that int() refuses.
-        if text.isascii() and text.isdigit() and int(text) > limit:
-            return True
-    return False
+        if text.isascii() and text.isdigit():
+            declared = max(declared or 0, int(text))
+    return declared
+
+
+def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
+    # Any oversized length is refused early, whatever else frames the body.
+    declared = _declared_length(scope)
+    return declared is not None and declared > limit
+
+
+def _framed_length(scope: Scope) -> int | None:
+    """Return the length that frames the body, or None for chunked framing.
+
+    ``Transfer-Encoding`` takes precedence over ``Content-Length`` in HTTP/1.1
+    (h11 reads such a body as chunked), so a length sent beside it frames
+    nothing and must not extend the receipt budget.
+    """
+    if any(key.lower() == b"transfer-encoding" for key, _value in scope.get("headers") or ()):
+        return None
+    return _declared_length(scope)
+
+
+def receipt_budget_seconds(scope: Scope, limit: int) -> float:
+    """Return the total time this request's body may take to arrive.
+
+    The budget is the configured base, or the declared body length (capped at
+    the route ceiling) at the minimum upload rate if that takes longer. A body
+    without a declared length keeps the base budget, and small ceilings
+    (anonymous and JSON routes) never exceed it.
+    """
+    declared = _framed_length(scope)
+    if declared is None:
+        return float(settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS)
+    scaled = math.ceil(min(declared, limit) / settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND)
+    return float(max(settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS, scaled))
 
 
 async def _send_error(
@@ -149,6 +189,20 @@ async def _send_error(
         }
     )
     await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+def _staged_upload_without_length(scope: Scope) -> bool:
+    """Whether an admitted staged upload announces a body without a length.
+
+    Django parses multipart only with a ``Content-Length``; without one the
+    staging view would refuse the upload only after spooling all of it.
+    """
+    return (
+        _route_path(scope) == STAGED_UPLOAD_PATH
+        and _announces_body(scope)
+        and _framed_length(scope) is None
+        and _has_producer_token(scope)
+    )
 
 
 async def _send_too_large(send: Send, limit: int) -> None:
@@ -175,6 +229,13 @@ class RequestBodyLimitMiddleware:
         if _declared_length_exceeds(scope, limit):
             await _send_too_large(send, limit)
             return
+        if _staged_upload_without_length(scope):
+            await _send_error(
+                send,
+                HTTPStatus.LENGTH_REQUIRED,
+                "Staged uploads require a Content-Length header.",
+            )
+            return
         pool = _admission_pool(scope, limit)
         admission = None if pool is None else self._admission[pool]
         if admission is not None and not admission.acquire(blocking=False):
@@ -197,7 +258,8 @@ class RequestBodyLimitMiddleware:
         self, scope: Scope, receive: Receive, send: Send, limit: int
     ) -> HTTPStatus | None:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS
+        deadline = loop.time() + receipt_budget_seconds(scope, limit)
+        idle_timeout = settings.VOXHELM_ASGI_BODY_IDLE_TIMEOUT_SECONDS
         received = 0
         body_complete = False
         rejection: HTTPStatus | None = None
@@ -234,10 +296,13 @@ class RequestBodyLimitMiddleware:
             if body_complete:
                 return await receive_after_body()
 
-            timer = asyncio.timeout_at(deadline)
+            now = loop.time()
+            # The next chunk must arrive within the idle timeout and the total budget.
+            chunk_deadline = min(deadline, now + idle_timeout)
+            timer = asyncio.timeout_at(chunk_deadline)
             message = None
             try:
-                if loop.time() < deadline:
+                if now < deadline:
                     async with timer:
                         message = await receive()
             except (Exception, asyncio.CancelledError) as exc:
@@ -246,8 +311,10 @@ class RequestBodyLimitMiddleware:
                     return {"type": "http.disconnect"}
 
             # Django closes the spool on disconnect and returns without a response.
+            # A chunk that resumes after either deadline, before the timer
+            # callback ran, is late too.
             if message is None or (
-                message.get("type") != "http.disconnect" and loop.time() >= deadline
+                message.get("type") != "http.disconnect" and loop.time() >= chunk_deadline
             ):
                 rejection = HTTPStatus.REQUEST_TIMEOUT
                 return {"type": "http.disconnect"}
