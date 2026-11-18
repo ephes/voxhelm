@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.15 (2026-11-18)
+
+Published to PyPI for the remote transcription workers (`atlas`, `studio`),
+which run 0.1.14 at most until now. It carries the changes merged since 0.1.14,
+above all the long-recording defaults: a batch URL download may now be up to
+16 GiB (`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES`, was 512 MiB) and each try may take
+3600 s (`VOXHELM_BATCH_URL_FETCH_TIMEOUT_SECONDS`, was 600). The workers pick
+it up only after the ops-control worker pin moves to 0.1.15 and they are
+redeployed; a host or env override of either setting still wins.
+
 - Let long recordings through. Staged uploads
   (`VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES`) and batch URL downloads
   (`VOXHELM_BATCH_MAX_DOWNLOAD_BYTES`) now default to 16 GiB instead of
