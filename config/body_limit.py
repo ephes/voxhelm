@@ -14,6 +14,7 @@ views still answer their own precise 413/401 for small bodies. A declared
 streamed body is cut off at the first chunk past it. The refusal is a JSON 413
 with ``Connection: close``, so the server stops reading the rest.
 An absolute deadline also bounds receipt of the body, without timing the view.
+Each process admits a bounded number of HTTP requests into Django at once.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from http import HTTPStatus
+from threading import BoundedSemaphore
 from typing import Any, Final
 
 from django.conf import settings
@@ -92,8 +94,10 @@ def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
     return False
 
 
-async def _send_error(send: Send, status: HTTPStatus, message: str) -> None:
-    body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}}).encode()
+async def _send_error(
+    send: Send, status: HTTPStatus, message: str, *, error_type: str = "invalid_request_error"
+) -> None:
+    body = json.dumps({"error": {"message": message, "type": error_type}}).encode()
     await send(
         {
             "type": "http.response.start",
@@ -121,10 +125,11 @@ async def _send_too_large(send: Send, limit: int) -> None:
 
 
 class RequestBodyLimitMiddleware:
-    """ASGI wrapper that bounds the bytes and time spent receiving a body."""
+    """Bound request-body bytes, receipt time and concurrent Django spools."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        self._admission = BoundedSemaphore(settings.VOXHELM_ASGI_MAX_ACTIVE_REQUESTS)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -134,7 +139,24 @@ class RequestBodyLimitMiddleware:
         if _declared_length_exceeds(scope, limit):
             await _send_too_large(send, limit)
             return
+        if not self._admission.acquire(blocking=False):
+            await _send_error(
+                send, HTTPStatus.SERVICE_UNAVAILABLE, "Server is busy.", error_type="server_error"
+            )
+            return
 
+        try:
+            rejection = await self._serve(scope, receive, send, limit)
+        finally:
+            self._admission.release()
+        if rejection == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+            await _send_too_large(send, limit)
+        elif rejection == HTTPStatus.REQUEST_TIMEOUT:
+            await _send_error(send, rejection, "Request body receipt timed out.")
+
+    async def _serve(
+        self, scope: Scope, receive: Receive, send: Send, limit: int
+    ) -> HTTPStatus | None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS
         received = 0
@@ -142,13 +164,36 @@ class RequestBodyLimitMiddleware:
         rejection: HTTPStatus | None = None
         receive_error: Exception | asyncio.CancelledError | None = None
         response_started = False
+        disconnect_requested = False
+        disconnect_receive: asyncio.Future[Message] | None = None
+
+        async def receive_after_body() -> Message:
+            nonlocal disconnect_receive
+            if disconnect_requested:
+                return {"type": "http.disconnect"}
+            # Interrupt the transport wait independently of Django's listener.
+            # Django may itself cancel the listener when the response finishes.
+            listener = asyncio.current_task()
+            assert listener is not None
+            disconnect_receive = asyncio.ensure_future(receive())
+            try:
+                message = await disconnect_receive
+            except asyncio.CancelledError:
+                if not disconnect_requested or listener.cancelling():
+                    raise
+            else:
+                if not disconnect_requested:
+                    return message
+            finally:
+                disconnect_receive = None
+            return {"type": "http.disconnect"}
 
         async def limited_receive() -> Message:
             nonlocal received, body_complete, rejection, receive_error
             if rejection is not None or receive_error is not None:
                 return {"type": "http.disconnect"}
             if body_complete:
-                return await receive()
+                return await receive_after_body()
 
             timer = asyncio.timeout_at(deadline)
             message = None
@@ -177,15 +222,36 @@ class RequestBodyLimitMiddleware:
 
         async def tracking_send(message: Message) -> None:
             nonlocal response_started
+            if disconnect_requested:
+                return
             if message.get("type") == "http.response.start":
                 response_started = True
             await send(message)
 
-        await self.app(scope, limited_receive, tracking_send)
+        app_task = asyncio.ensure_future(self.app(scope, limited_receive, tracking_send))
+        try:
+            await asyncio.shield(app_task)
+        except asyncio.CancelledError as cancelled:
+            if not app_task.done():
+                if body_complete:
+                    # Let Django cancel its view and close the spool via its
+                    # normal disconnect path. Cancelling its handler directly
+                    # after receipt can leave both running beyond admission.
+                    disconnect_requested = True
+                    if disconnect_receive is not None:
+                        disconnect_receive.cancel()
+                else:
+                    # limited_receive converts receipt cancellation to a
+                    # disconnect before re-raising it once the spool is closed.
+                    app_task.cancel()
+                while not app_task.done():
+                    try:
+                        await asyncio.wait((app_task,))
+                    except asyncio.CancelledError:
+                        continue
+            if not app_task.cancelled() and (error := app_task.exception()) is not None:
+                raise cancelled from error
+            raise
         if receive_error is not None:
             raise receive_error
-        if not response_started:
-            if rejection == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
-                await _send_too_large(send, limit)
-            elif rejection == HTTPStatus.REQUEST_TIMEOUT:
-                await _send_error(send, rejection, "Request body receipt timed out.")
+        return None if response_started else rejection

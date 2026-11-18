@@ -61,11 +61,13 @@ class BodyConnection:
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.waiting = asyncio.Event()
         self.sent: list[Mapping[str, Any]] = []
+        self.pulls = 0
 
     def chunk(self, *, more: bool = True) -> None:
         self.events.put_nowait({"type": "http.request", "body": b"data", "more_body": more})
 
     async def receive(self) -> dict[str, Any]:
+        self.pulls += 1
         if self.events.empty():
             self.waiting.set()
         return await self.events.get()
@@ -255,7 +257,7 @@ def test_body_deadline_closes_django_spool_before_408(settings, monkeypatch, bod
             await asyncio.wait_for(connection.waiting.wait(), timeout=1)
             assert len(body_spools) == 1 and not body_spools[0].closed
             elapsed = 11
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(task, timeout=20 if drip else 1)
         start, body = connection.sent
         assert start["status"] == 408
         headers = dict(start["headers"])
@@ -322,6 +324,134 @@ def test_completed_upload_can_run_past_receipt_deadline(settings, monkeypatch, b
         assert connection.sent[0]["status"] == 200
         assert connection.sent[1]["body"] == b"done"
         assert len(body_spools) == 1 and body_spools[0].closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "finish", ["complete", "timeout", "disconnect", "cancel", "parse-error", "cancel-after-body"]
+)
+def test_spool_admission_rejects_excess_and_reuses_one_slot(
+    settings, monkeypatch, body_spools, finish
+):
+    from config.asgi import django_application
+    from config.body_limit import RequestBodyLimitMiddleware
+
+    settings.VOXHELM_ASGI_MAX_ACTIVE_REQUESTS = 2
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+    application = RequestBodyLimitMiddleware(django_application)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        view_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+
+        @csrf_exempt
+        async def view(request):
+            if finish == "parse-error":
+                return HttpResponse(str(len(request.POST)))
+            if finish == "complete":
+                return HttpResponse()
+            view_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleanup_started.set()
+                await allow_cleanup.wait()
+            return HttpResponse()
+
+        if finish in {"complete", "parse-error", "cancel-after-body"}:
+            urls = ModuleType("body_admission_urls")
+            urls.urlpatterns = [path("", view)]  # type: ignore[attr-defined]
+            settings.ROOT_URLCONF = urls
+
+        producer_headers = [(b"authorization", b"Bearer test-token")]
+        producer = asgi_scope("POST", "/v1/uploads", producer_headers)
+        headers = [(b"content-type", b"multipart/form-data")] if finish == "parse-error" else []
+        operator = asgi_scope("POST", "/", headers)
+
+        def start(scope):
+            connection = BodyConnection()
+            connection.chunk()
+            task = asyncio.create_task(application(scope, connection.receive, connection.send))
+            return task, connection
+
+        async def assert_busy(scope):
+            excess = BodyConnection()
+            excess.chunk(more=False)
+            spools_before = len(body_spools)
+            await asyncio.wait_for(application(scope, excess.receive, excess.send), timeout=2)
+            assert excess.sent[0]["status"] == 503
+            assert dict(excess.sent[0]["headers"])[b"connection"] == b"close"
+            assert json.loads(excess.sent[1]["body"])["error"] == {
+                "message": "Server is busy.",
+                "type": "server_error",
+            }
+            assert excess.pulls == 0
+            assert len(body_spools) == spools_before
+
+        task, connection = start(operator)
+        await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+        try:
+            if finish == "timeout":
+                elapsed = 5  # The second holder starts with its own later deadline.
+            other, held = start(producer)
+            await asyncio.wait_for(held.waiting.wait(), timeout=1)
+            assert len(body_spools) == 2
+            assert all(not spool.closed for spool in body_spools)
+            await assert_busy(operator)
+            await assert_busy(producer)
+
+            if finish == "cancel-after-body":
+                connection.chunk(more=False)
+                await asyncio.wait_for(view_started.wait(), timeout=1)
+                task.cancel()
+                await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+                assert not body_spools[0].closed
+                await assert_busy(producer)
+                task.cancel()
+                await assert_busy(producer)
+                allow_cleanup.set()
+            elif finish == "cancel":
+                task.cancel()
+            elif finish == "disconnect":
+                connection.events.put_nowait({"type": "http.disconnect"})
+            elif finish == "timeout":
+                elapsed = 11
+            else:
+                # A normal form response or Django's malformed multipart response.
+                connection.chunk(more=False)
+
+            if finish.startswith("cancel"):
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                await asyncio.wait_for(task, timeout=2)
+            if finish == "parse-error":
+                assert connection.sent[0]["status"] == 400
+            elif finish == "timeout":
+                assert connection.sent[0]["status"] == 408
+            elif finish == "complete":
+                assert connection.sent[0]["status"] == 200
+            else:
+                assert connection.sent == []
+            assert body_spools[0].closed
+            assert not body_spools[1].closed
+
+            replacement, fresh = start(producer)
+            await asyncio.wait_for(fresh.waiting.wait(), timeout=1)
+            assert len(body_spools) == 3 and not body_spools[2].closed
+            await assert_busy(operator)
+            for remaining in (fresh, held):
+                remaining.events.put_nowait({"type": "http.disconnect"})
+            await asyncio.wait_for(asyncio.gather(replacement, other), timeout=2)
+            assert all(spool.closed for spool in body_spools)
+        finally:
+            allow_cleanup.set()
 
     asyncio.run(scenario())
 

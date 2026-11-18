@@ -1847,6 +1847,18 @@ Set the budget for the largest legitimate upload at the slowest supported
 upload rate. At the default 512 MiB staged file limit, 600 seconds requires
 roughly 7.2 Mbit/s of sustained upload throughput, plus framing and overhead.
 
+Each ASGI server process admits up to `VOXHELM_ASGI_MAX_ACTIVE_REQUESTS` HTTP
+requests into Django at once (a positive integer, default 4, read at startup).
+A slot covers body receipt, parsing, view and response handling through Django's
+spool cleanup. This includes bodyless requests because Django opens a spool for
+them too. When all slots are occupied, further requests receive a fixed JSON
+503 with `Connection: close` before any body read or spool allocation. A declared
+oversized body still gets 413 first. Clients with legitimate uploads can wait
+for capacity to free up before retrying a 503.
+Long-running inference and downloads can keep slots occupied. Size the limit
+and worker count for expected concurrency and available spool space. Worker
+processes each have their own slots and capacities add up across workers.
+
 Unexpected batch upload/submission backend `RuntimeError` returns HTTP 500
 `Batch processing failed.` and logs only a fixed operation category, without
 exception text or traceback. Existing staging compensation still removes owned
