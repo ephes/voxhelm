@@ -2,10 +2,13 @@
 
 ## Unreleased
 
-- Bound concurrent Django spool ownership per ASGI process, including cleanup
-  after disconnect or cancellation. Requests receive a JSON 503 without a body
-  read when the process is at capacity. `VOXHELM_ASGI_MAX_ACTIVE_REQUESTS`
-  defaults to four and covers the full Django request lifetime.
+- Bound concurrent large-upload spools per ASGI process, including cleanup
+  after disconnect or cancellation. Body-carrying requests to the operator form
+  and to the producer-token upload routes use two separate pools of
+  `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots (default four each) for the full
+  Django request lifetime, and get a JSON 503 without a body read when their
+  pool is full. Health, the job API and the remote worker control plane are
+  never counted.
 
 - Apply a single ASGI request-body receipt deadline before routing. Stalled and
   drip-fed uploads get a JSON 408 after spool cleanup. The default is 600

@@ -1847,17 +1847,25 @@ Set the budget for the largest legitimate upload at the slowest supported
 upload rate. At the default 512 MiB staged file limit, 600 seconds requires
 roughly 7.2 Mbit/s of sustained upload throughput, plus framing and overhead.
 
-Each ASGI server process admits up to `VOXHELM_ASGI_MAX_ACTIVE_REQUESTS` HTTP
-requests into Django at once (a positive integer, default 4, read at startup).
-A slot covers body receipt, parsing, view and response handling through Django's
-spool cleanup. This includes bodyless requests because Django opens a spool for
-them too. When all slots are occupied, further requests receive a fixed JSON
-503 with `Connection: close` before any body read or spool allocation. A declared
-oversized body still gets 413 first. Clients with legitimate uploads can wait
-for capacity to free up before retrying a 503.
-Long-running inference and downloads can keep slots occupied. Size the limit
-and worker count for expected concurrency and available spool space. Worker
-processes each have their own slots and capacities add up across workers.
+Each ASGI server process also bounds concurrent large uploads. Only requests to
+a route whose ceiling exceeds the JSON ceiling (the operator form at `/`, and
+`/v1/audio/transcriptions` or `/v1/uploads` with a valid producer token) that
+announce a body (`Content-Length` other than 0, or `Transfer-Encoding`) take a
+slot. There are two pools of `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots each (a
+positive integer, default 4, read at startup): one for the operator form and one
+for the producer-token routes. Anonymous clients can therefore only occupy
+operator form slots, never producer upload slots. A slot covers body receipt,
+parsing, view and response handling through Django's spool cleanup, so a
+synchronous transcription keeps its slot during inference. When a pool is full,
+further requests for it receive a fixed JSON 503 with `Connection: close` before
+any body read or spool allocation. A declared oversized body still gets 413
+first. Clients with legitimate uploads can wait for capacity to free up before
+retrying a 503. Bodyless requests and every route with the JSON ceiling (health,
+job API, the remote worker's heartbeat, claim, complete and fail calls) are
+never counted, so busy uploads or inference cannot refuse them. Their spools
+stay bounded by the 3 MiB JSON ceiling. Size the limit for expected upload
+concurrency and available spool space; worker processes each have their own
+pools and capacities add up across workers.
 
 Unexpected batch upload/submission backend `RuntimeError` returns HTTP 500
 `Batch processing failed.` and logs only a fixed operation category, without

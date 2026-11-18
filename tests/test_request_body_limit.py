@@ -337,7 +337,7 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
     from config.asgi import django_application
     from config.body_limit import RequestBodyLimitMiddleware
 
-    settings.VOXHELM_ASGI_MAX_ACTIVE_REQUESTS = 2
+    settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS = 2
     settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
     application = RequestBodyLimitMiddleware(django_application)
 
@@ -369,10 +369,11 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
             urls.urlpatterns = [path("", view)]  # type: ignore[attr-defined]
             settings.ROOT_URLCONF = urls
 
-        producer_headers = [(b"authorization", b"Bearer test-token")]
-        producer = asgi_scope("POST", "/v1/uploads", producer_headers)
+        chunked = [(b"transfer-encoding", b"chunked")]
+        # Both holders share the operator pool; the producer pool is separate.
+        other_operator = asgi_scope("POST", "/", chunked)
         headers = [(b"content-type", b"multipart/form-data")] if finish == "parse-error" else []
-        operator = asgi_scope("POST", "/", headers)
+        operator = asgi_scope("POST", "/", [*chunked, *headers])
 
         def start(scope):
             connection = BodyConnection()
@@ -399,12 +400,11 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
         try:
             if finish == "timeout":
                 elapsed = 5  # The second holder starts with its own later deadline.
-            other, held = start(producer)
+            other, held = start(other_operator)
             await asyncio.wait_for(held.waiting.wait(), timeout=1)
             assert len(body_spools) == 2
             assert all(not spool.closed for spool in body_spools)
             await assert_busy(operator)
-            await assert_busy(producer)
 
             if finish == "cancel-after-body":
                 connection.chunk(more=False)
@@ -412,9 +412,9 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
                 task.cancel()
                 await asyncio.wait_for(cleanup_started.wait(), timeout=1)
                 assert not body_spools[0].closed
-                await assert_busy(producer)
+                await assert_busy(other_operator)
                 task.cancel()
-                await assert_busy(producer)
+                await assert_busy(other_operator)
                 allow_cleanup.set()
             elif finish == "cancel":
                 task.cancel()
@@ -442,7 +442,7 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
             assert body_spools[0].closed
             assert not body_spools[1].closed
 
-            replacement, fresh = start(producer)
+            replacement, fresh = start(other_operator)
             await asyncio.wait_for(fresh.waiting.wait(), timeout=1)
             assert len(body_spools) == 3 and not body_spools[2].closed
             await assert_busy(operator)
@@ -452,6 +452,56 @@ def test_spool_admission_rejects_excess_and_reuses_one_slot(
             assert all(spool.closed for spool in body_spools)
         finally:
             allow_cleanup.set()
+
+    asyncio.run(scenario())
+
+
+def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spools):
+    from config.asgi import django_application
+    from config.body_limit import RequestBodyLimitMiddleware
+
+    settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS = 1
+    application = RequestBodyLimitMiddleware(django_application)
+    token = (b"authorization", b"Bearer test-token")
+    length = (b"content-length", b"1000")
+
+    async def answer(scope, body=b""):
+        connection = BodyConnection()
+        connection.events.put_nowait({"type": "http.request", "body": body, "more_body": False})
+        task = asyncio.create_task(application(scope, connection.receive, connection.send))
+        await asyncio.wait_for(task, timeout=5)
+        return connection.sent[0]["status"]
+
+    async def scenario():
+        holders = []
+        try:
+            for scope in (
+                asgi_scope("POST", "/", [length]),  # anonymous operator form post
+                asgi_scope("POST", "/v1/uploads", [token, length]),
+            ):
+                connection = BodyConnection()
+                connection.chunk()
+                task = asyncio.create_task(application(scope, connection.receive, connection.send))
+                await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+                holders.append((task, connection))
+
+            # Both pools are full: further large-body requests are refused.
+            assert await answer(asgi_scope("POST", "/", [length])) == 503
+            sync = asgi_scope("POST", "/v1/audio/transcriptions", [token, length])
+            assert await answer(sync) == 503
+
+            # Bodyless requests and JSON-ceiling routes are never counted.
+            assert await answer(asgi_scope("GET", "/v1/health")) == 200
+            assert await answer(asgi_scope("GET", "/")) != 503
+            assert await answer(asgi_scope("POST", "/", [(b"content-length", b"0")])) != 503
+            json_post = [(b"content-type", b"application/json"), length]
+            assert await answer(asgi_scope("POST", "/v1/jobs", json_post), b"{}") == 401
+            assert await answer(asgi_scope("POST", "/v1/uploads", [length]), b"x") == 401
+        finally:
+            for _task, connection in holders:
+                connection.events.put_nowait({"type": "http.disconnect"})
+            await asyncio.wait_for(asyncio.gather(*(task for task, _ in holders)), timeout=2)
+        assert all(spool.closed for spool in body_spools)
 
     asyncio.run(scenario())
 

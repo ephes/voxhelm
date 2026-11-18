@@ -14,7 +14,13 @@ views still answer their own precise 413/401 for small bodies. A declared
 streamed body is cut off at the first chunk past it. The refusal is a JSON 413
 with ``Connection: close``, so the server stops reading the rest.
 An absolute deadline also bounds receipt of the body, without timing the view.
-Each process admits a bounded number of HTTP requests into Django at once.
+
+Each process also bounds how many large-body requests (a route ceiling above the
+JSON ceiling, with a body announced) own a Django spool at once. The anonymous
+operator form and the producer-token upload routes use separate pools, so stalled
+anonymous form posts cannot block producer uploads. Bodyless requests and every
+route with the JSON ceiling (health, worker control plane, job API) are never
+counted, so long uploads or inference cannot starve them.
 """
 
 from __future__ import annotations
@@ -44,6 +50,9 @@ UPLOAD_FRAMING_HEADROOM_BYTES: Final[int] = 1 * MIB
 STAGED_UPLOAD_PATH: Final[str] = "/v1/uploads"
 SYNC_TRANSCRIPTION_PATH: Final[str] = "/v1/audio/transcriptions"
 OPERATOR_FORM_PATH: Final[str] = "/"
+
+OPERATOR_POOL: Final[str] = "operator"
+PRODUCER_POOL: Final[str] = "producer"
 
 
 def _route_path(scope: Scope) -> str:
@@ -81,6 +90,27 @@ def request_body_limit(scope: Scope) -> int:
     if path == STAGED_UPLOAD_PATH and _has_producer_token(scope):
         return settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES + UPLOAD_FRAMING_HEADROOM_BYTES
     return DEFAULT_BODY_LIMIT_BYTES
+
+
+def _announces_body(scope: Scope) -> bool:
+    """Whether the request may carry body bytes (HTTP/1.1 framing headers)."""
+    lengths = []
+    for key, value in scope.get("headers") or ():
+        name = key.lower()
+        if name == b"transfer-encoding":
+            return True
+        if name == b"content-length":
+            lengths.append(bytes(value).decode("latin-1").strip())
+    # Without framing headers an HTTP/1.1 request has an empty body. An
+    # unparsable length is counted, so it can never bypass admission.
+    return any(text != "0" for text in lengths)
+
+
+def _admission_pool(scope: Scope, limit: int) -> str | None:
+    """Return the admission pool for a large-body request, or None if uncounted."""
+    if limit <= DEFAULT_BODY_LIMIT_BYTES or not _announces_body(scope):
+        return None
+    return OPERATOR_POOL if _route_path(scope) == OPERATOR_FORM_PATH else PRODUCER_POOL
 
 
 def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
@@ -129,7 +159,11 @@ class RequestBodyLimitMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self._admission = BoundedSemaphore(settings.VOXHELM_ASGI_MAX_ACTIVE_REQUESTS)
+        slots = settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS
+        self._admission = {
+            OPERATOR_POOL: BoundedSemaphore(slots),
+            PRODUCER_POOL: BoundedSemaphore(slots),
+        }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -139,7 +173,9 @@ class RequestBodyLimitMiddleware:
         if _declared_length_exceeds(scope, limit):
             await _send_too_large(send, limit)
             return
-        if not self._admission.acquire(blocking=False):
+        pool = _admission_pool(scope, limit)
+        admission = None if pool is None else self._admission[pool]
+        if admission is not None and not admission.acquire(blocking=False):
             await _send_error(
                 send, HTTPStatus.SERVICE_UNAVAILABLE, "Server is busy.", error_type="server_error"
             )
@@ -148,7 +184,8 @@ class RequestBodyLimitMiddleware:
         try:
             rejection = await self._serve(scope, receive, send, limit)
         finally:
-            self._admission.release()
+            if admission is not None:
+                admission.release()
         if rejection == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
             await _send_too_large(send, limit)
         elif rejection == HTTPStatus.REQUEST_TIMEOUT:
