@@ -16,11 +16,12 @@ with ``Connection: close``, so the server stops reading the rest.
 An absolute deadline also bounds receipt of the body, without timing the view.
 
 Each process also bounds how many large-body requests (a route ceiling above the
-JSON ceiling, with a body announced) own a Django spool at once. The anonymous
-operator form and the producer-token upload routes use separate pools, so stalled
-anonymous form posts cannot block producer uploads. Bodyless requests and every
-route with the JSON ceiling (health, worker control plane, job API) are never
-counted, so long uploads or inference cannot starve them.
+JSON ceiling, with a body announced) own a Django spool at once. Each large-body
+route has its own pool, so stalled anonymous operator form posts cannot block
+producer uploads and synchronous inference cannot block staged batch uploads.
+Bodyless requests and every route with the JSON ceiling (health, worker control
+plane, job API) are never counted, so long uploads or inference cannot starve
+them.
 """
 
 from __future__ import annotations
@@ -50,9 +51,12 @@ UPLOAD_FRAMING_HEADROOM_BYTES: Final[int] = 1 * MIB
 STAGED_UPLOAD_PATH: Final[str] = "/v1/uploads"
 SYNC_TRANSCRIPTION_PATH: Final[str] = "/v1/audio/transcriptions"
 OPERATOR_FORM_PATH: Final[str] = "/"
-
-OPERATOR_POOL: Final[str] = "operator"
-PRODUCER_POOL: Final[str] = "producer"
+# Each route whose ceiling can exceed the JSON ceiling has its own admission pool.
+ADMISSION_POOLS: Final[tuple[str, ...]] = (
+    OPERATOR_FORM_PATH,
+    SYNC_TRANSCRIPTION_PATH,
+    STAGED_UPLOAD_PATH,
+)
 
 
 def _route_path(scope: Scope) -> str:
@@ -110,7 +114,8 @@ def _admission_pool(scope: Scope, limit: int) -> str | None:
     """Return the admission pool for a large-body request, or None if uncounted."""
     if limit <= DEFAULT_BODY_LIMIT_BYTES or not _announces_body(scope):
         return None
-    return OPERATOR_POOL if _route_path(scope) == OPERATOR_FORM_PATH else PRODUCER_POOL
+    # Only the ADMISSION_POOLS routes can have a ceiling above the JSON ceiling.
+    return _route_path(scope)
 
 
 def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
@@ -160,10 +165,7 @@ class RequestBodyLimitMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
         slots = settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS
-        self._admission = {
-            OPERATOR_POOL: BoundedSemaphore(slots),
-            PRODUCER_POOL: BoundedSemaphore(slots),
-        }
+        self._admission = {pool: BoundedSemaphore(slots) for pool in ADMISSION_POOLS}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -278,8 +280,10 @@ class RequestBodyLimitMiddleware:
                     if disconnect_receive is not None:
                         disconnect_receive.cancel()
                 else:
-                    # limited_receive converts receipt cancellation to a
-                    # disconnect before re-raising it once the spool is closed.
+                    # Before the last chunk Django only suspends in receive()
+                    # (Django 5.2 writes spool chunks synchronously), so the
+                    # cancellation lands in limited_receive, which turns it into
+                    # a disconnect; Django closes the spool and it is re-raised.
                     app_task.cancel()
                 while not app_task.done():
                     try:

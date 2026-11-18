@@ -472,23 +472,28 @@ def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spo
         await asyncio.wait_for(task, timeout=5)
         return connection.sent[0]["status"]
 
-    async def scenario():
-        holders = []
-        try:
-            for scope in (
-                asgi_scope("POST", "/", [length]),  # anonymous operator form post
-                asgi_scope("POST", "/v1/uploads", [token, length]),
-            ):
-                connection = BodyConnection()
-                connection.chunk()
-                task = asyncio.create_task(application(scope, connection.receive, connection.send))
-                await asyncio.wait_for(connection.waiting.wait(), timeout=1)
-                holders.append((task, connection))
+    async def hold(scope, holders):
+        connection = BodyConnection()
+        connection.chunk()
+        task = asyncio.create_task(application(scope, connection.receive, connection.send))
+        await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+        holders.append((task, connection))
 
-            # Both pools are full: further large-body requests are refused.
-            assert await answer(asgi_scope("POST", "/", [length])) == 503
-            sync = asgi_scope("POST", "/v1/audio/transcriptions", [token, length])
-            assert await answer(sync) == 503
+    async def scenario():
+        holders: list[tuple[asyncio.Task[None], BodyConnection]] = []
+        operator = asgi_scope("POST", "/", [length])  # anonymous operator form post
+        staged = asgi_scope("POST", "/v1/uploads", [token, length])
+        sync = asgi_scope("POST", "/v1/audio/transcriptions", [token, length])
+        try:
+            await hold(operator, holders)
+            await hold(staged, holders)
+            # Full operator and staged pools leave synchronous transcription alone.
+            assert await answer(sync) != 503
+            await hold(sync, holders)
+
+            # Every pool is full: further large-body requests are refused.
+            for scope in (operator, staged, sync):
+                assert await answer(scope) == 503
 
             # Bodyless requests and JSON-ceiling routes are never counted.
             assert await answer(asgi_scope("GET", "/v1/health")) == 200
@@ -522,6 +527,7 @@ def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spo
 )
 def test_route_ceilings(settings, path, authorization, expected):
     from config.body_limit import (
+        ADMISSION_POOLS,
         DEFAULT_BODY_LIMIT_BYTES,
         UPLOAD_FRAMING_HEADROOM_BYTES,
         request_body_limit,
@@ -540,6 +546,9 @@ def test_route_ceilings(settings, path, authorization, expected):
         request_body_limit({"path": path, "root_path": "", "headers": headers})
         == (limits[expected])
     )
+    # Every route that admits a large body has its own admission pool.
+    if expected != "default":
+        assert path in ADMISSION_POOLS
 
 
 def test_route_ceiling_strips_the_root_path(settings):

@@ -3,9 +3,9 @@
 ## Unreleased
 
 - Bound concurrent large-upload spools per ASGI process, including cleanup
-  after disconnect or cancellation. Body-carrying requests to the operator form
-  and to the producer-token upload routes use two separate pools of
-  `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots (default four each) for the full
+  after disconnect or cancellation. Body-carrying requests to the operator form,
+  to synchronous transcription and to staged uploads each use their own pool of
+  `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots (default four per route) for the full
   Django request lifetime, and get a JSON 503 without a body read when their
   pool is full. Health, the job API and the remote worker control plane are
   never counted.
