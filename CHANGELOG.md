@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Apply a single ASGI request-body receipt deadline before routing. Stalled and
+  drip-fed uploads get a JSON 408 after spool cleanup. The default is 600
+  seconds, configurable with `VOXHELM_ASGI_BODY_TIMEOUT_SECONDS`. Inference
+  after a completed upload has its own lifetime.
+
 - Bound request bodies at the ASGI entry point before Django spools them: Django
   copied every body to a temporary file before routing or authentication, so any
   client reaching the port could stream an unbounded body to disk without

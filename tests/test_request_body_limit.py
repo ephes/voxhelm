@@ -11,11 +11,67 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from tempfile import SpooledTemporaryFile
+from types import ModuleType
 from typing import Any
 
 import pytest
+from django.http import HttpResponse
+from django.urls import path
+from django.views.decorators.csrf import csrf_exempt
 
 MIB = 1024 * 1024
+
+
+def asgi_scope(
+    method: str, path: str, headers: list[tuple[bytes, bytes]] | None = None, root_path: str = ""
+) -> dict[str, Any]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": root_path + path,
+        "raw_path": (root_path + path).encode(),
+        "root_path": root_path,
+        "query_string": b"",
+        "headers": [(b"host", b"localhost"), *(headers or [])],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+
+
+@pytest.fixture
+def body_spools(settings, monkeypatch):
+    settings.FILE_UPLOAD_MAX_MEMORY_SIZE = 1  # even a synthetic chunk rolls to disk
+    opened = []
+
+    def open_spool(*args, **kwargs):
+        spool = SpooledTemporaryFile(*args, **kwargs)
+        opened.append(spool)
+        return spool
+
+    monkeypatch.setattr("django.core.handlers.asgi.tempfile.SpooledTemporaryFile", open_spool)
+    return opened
+
+
+class BodyConnection:
+    def __init__(self) -> None:
+        self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.waiting = asyncio.Event()
+        self.sent: list[Mapping[str, Any]] = []
+
+    def chunk(self, *, more: bool = True) -> None:
+        self.events.put_nowait({"type": "http.request", "body": b"data", "more_body": more})
+
+    async def receive(self) -> dict[str, Any]:
+        if self.events.empty():
+            self.waiting.set()
+        return await self.events.get()
+
+    async def send(self, message: Mapping[str, Any]) -> None:
+        self.sent.append(message)
 
 
 def run_asgi(
@@ -59,20 +115,7 @@ def run_asgi(
             if not message.get("more_body", False):
                 finished.set()
 
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": method,
-        "scheme": "http",
-        "path": root_path + path,
-        "raw_path": (root_path + path).encode(),
-        "root_path": root_path,
-        "query_string": b"",
-        "headers": [(b"host", b"localhost"), *(headers or [])],
-        "client": ("127.0.0.1", 50000),
-        "server": ("127.0.0.1", 8000),
-    }
+    scope = asgi_scope(method, path, headers, root_path)
 
     async def main() -> None:
         await asyncio.wait_for(application(scope, receive, send), timeout=60)
@@ -82,7 +125,7 @@ def run_asgi(
     return int(start.get("status", 0)), response_headers, bytes(body), pulled
 
 
-def test_unauthenticated_unbounded_stream_is_cut_off_before_django_spools_it():
+def test_unauthenticated_unbounded_stream_is_cut_off_before_django_spools_it(body_spools):
     status, headers, body, pulled = run_asgi(method="POST", path="/v1/health", chunks=64)
 
     assert status == 413
@@ -91,6 +134,7 @@ def test_unauthenticated_unbounded_stream_is_cut_off_before_django_spools_it():
     assert headers[b"x-frame-options"] == b"DENY"
     assert headers[b"x-content-type-options"] == b"nosniff"
     assert json.loads(body)["error"]["type"] == "invalid_request_error"
+    assert len(body_spools) == 1 and body_spools[0].closed
 
 
 def test_non_ascii_digit_content_length_falls_back_to_the_streamed_count():
@@ -172,6 +216,114 @@ def test_get_without_body_passes_through():
 
     assert status == 200
     assert json.loads(body) == {"status": "ok"}
+
+
+@pytest.mark.parametrize("drip", [False, True], ids=["stalled", "drip-fed"])
+def test_body_deadline_closes_django_spool_before_408(settings, monkeypatch, body_spools, drip):
+    from config.asgi import application
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        connection = BodyConnection()
+        connection.chunk()
+        if drip:
+            connection.chunk()
+        received = 0
+
+        async def receive():
+            nonlocal received, elapsed
+            received += 1
+            if drip:
+                elapsed += 4
+                if received < 3:
+                    return await connection.receive()
+                return {"type": "http.request", "body": b"last", "more_body": False}
+            return await connection.receive()
+
+        async def send(message):
+            assert len(body_spools) == 1 and body_spools[0].closed
+            await connection.send(message)
+
+        scope = asgi_scope("POST", "/v1/health", root_path="/voxhelm")
+        task = asyncio.create_task(application(scope, receive, send))
+        if not drip:
+            await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+            assert len(body_spools) == 1 and not body_spools[0].closed
+            elapsed = 11
+        await asyncio.wait_for(task, timeout=1)
+        start, body = connection.sent
+        assert start["status"] == 408
+        headers = dict(start["headers"])
+        assert headers[b"connection"] == b"close"
+        assert headers[b"cache-control"] == b"no-store"
+        assert json.loads(body["body"])["error"] == {
+            "message": "Request body receipt timed out.",
+            "type": "invalid_request_error",
+        }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["disconnect", "cancel"])
+def test_abandoned_partial_body_closes_django_spool(body_spools, cancel):
+    from config.asgi import application
+
+    async def scenario():
+        connection = BodyConnection()
+        connection.chunk()
+        task = asyncio.create_task(
+            application(asgi_scope("POST", "/"), connection.receive, connection.send)
+        )
+        await asyncio.wait_for(connection.waiting.wait(), timeout=1)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            connection.events.put_nowait({"type": "http.disconnect"})
+            await asyncio.wait_for(task, timeout=1)
+        assert connection.sent == []
+        assert len(body_spools) == 1 and body_spools[0].closed
+
+    asyncio.run(scenario())
+
+
+def test_completed_upload_can_run_past_receipt_deadline(settings, monkeypatch, body_spools):
+    from config.asgi import application
+
+    settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 10
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        elapsed = 0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+        connection = BodyConnection()
+
+        @csrf_exempt
+        async def view(request):
+            nonlocal elapsed
+            elapsed = 11
+            await asyncio.sleep(0)
+            assert request.read() == b"data"
+            return HttpResponse(b"done")
+
+        urls = ModuleType("body_deadline_urls")
+        urls.urlpatterns = [path("v1/audio/transcriptions", view)]  # type: ignore[attr-defined]
+        settings.ROOT_URLCONF = urls
+        connection.chunk(more=False)
+        scope = asgi_scope("POST", "/v1/audio/transcriptions")
+        await asyncio.wait_for(application(scope, connection.receive, connection.send), timeout=60)
+        assert connection.sent[0]["status"] == 200
+        assert connection.sent[1]["body"] == b"done"
+        assert len(body_spools) == 1 and body_spools[0].closed
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

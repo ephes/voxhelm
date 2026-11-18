@@ -1837,6 +1837,16 @@ request (the operator form ceiling), instead of an unbounded body. The ceiling
 applies to the ASGI entry point that production runs (`uvicorn
 config.asgi:application`); `config.wsgi` is not wrapped.
 
+The ASGI entry point gives the complete request body one receipt deadline
+(`VOXHELM_ASGI_BODY_TIMEOUT_SECONDS`, a positive integer, default 600 seconds).
+It starts before the first body event and applies across all chunks, including
+the last one. When it expires, the server closes the incomplete Django spool
+and returns a fixed JSON 408 with `Connection: close`. Multipart parsing,
+inference and response delivery after receipt use their own lifetimes.
+Set the budget for the largest legitimate upload at the slowest supported
+upload rate. At the default 512 MiB staged file limit, 600 seconds requires
+roughly 7.2 Mbit/s of sustained upload throughput, plus framing and overhead.
+
 Unexpected batch upload/submission backend `RuntimeError` returns HTTP 500
 `Batch processing failed.` and logs only a fixed operation category, without
 exception text or traceback. Existing staging compensation still removes owned

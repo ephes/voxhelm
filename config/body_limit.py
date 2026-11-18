@@ -13,12 +13,15 @@ views still answer their own precise 413/401 for small bodies. A declared
 ``Content-Length`` above the ceiling is refused before any body byte is read; a
 streamed body is cut off at the first chunk past it. The refusal is a JSON 413
 with ``Connection: close``, so the server stops reading the rest.
+An absolute deadline also bounds receipt of the body, without timing the view.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from http import HTTPStatus
 from typing import Any, Final
 
 from django.conf import settings
@@ -89,21 +92,12 @@ def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
     return False
 
 
-async def _send_too_large(send: Send, limit: int) -> None:
-    body = json.dumps(
-        {
-            "error": {
-                "message": (
-                    f"Request body exceeds the {limit // MIB} MiB limit for this endpoint."
-                ),
-                "type": "invalid_request_error",
-            }
-        }
-    ).encode()
+async def _send_error(send: Send, status: HTTPStatus, message: str) -> None:
+    body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}}).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 413,
+            "status": int(status),
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
@@ -118,8 +112,16 @@ async def _send_too_large(send: Send, limit: int) -> None:
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
+async def _send_too_large(send: Send, limit: int) -> None:
+    await _send_error(
+        send,
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        f"Request body exceeds the {limit // MIB} MiB limit for this endpoint.",
+    )
+
+
 class RequestBodyLimitMiddleware:
-    """ASGI wrapper that refuses request bodies above the route's ceiling."""
+    """ASGI wrapper that bounds the bytes and time spent receiving a body."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -133,22 +135,44 @@ class RequestBodyLimitMiddleware:
             await _send_too_large(send, limit)
             return
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS
         received = 0
-        exceeded = False
+        body_complete = False
+        rejection: HTTPStatus | None = None
+        receive_error: Exception | asyncio.CancelledError | None = None
         response_started = False
 
         async def limited_receive() -> Message:
-            nonlocal received, exceeded
-            if exceeded:
+            nonlocal received, body_complete, rejection, receive_error
+            if rejection is not None or receive_error is not None:
                 return {"type": "http.disconnect"}
-            message = await receive()
+            if body_complete:
+                return await receive()
+
+            timer = asyncio.timeout_at(deadline)
+            message = None
+            try:
+                if loop.time() < deadline:
+                    async with timer:
+                        message = await receive()
+            except (Exception, asyncio.CancelledError) as exc:
+                if not isinstance(exc, TimeoutError) or not timer.expired():
+                    receive_error = exc
+                    return {"type": "http.disconnect"}
+
+            # Django closes the spool on disconnect and returns without a response.
+            if message is None or (
+                message.get("type") != "http.disconnect" and loop.time() >= deadline
+            ):
+                rejection = HTTPStatus.REQUEST_TIMEOUT
+                return {"type": "http.disconnect"}
             if message.get("type") == "http.request":
                 received += len(message.get("body") or b"")
                 if received > limit:
-                    # Django treats a disconnect while reading the body as an
-                    # aborted request and returns without a response.
-                    exceeded = True
+                    rejection = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
                     return {"type": "http.disconnect"}
+                body_complete = not message.get("more_body", False)
             return message
 
         async def tracking_send(message: Message) -> None:
@@ -158,5 +182,10 @@ class RequestBodyLimitMiddleware:
             await send(message)
 
         await self.app(scope, limited_receive, tracking_send)
-        if exceeded and not response_started:
-            await _send_too_large(send, limit)
+        if receive_error is not None:
+            raise receive_error
+        if not response_started:
+            if rejection == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+                await _send_too_large(send, limit)
+            elif rejection == HTTPStatus.REQUEST_TIMEOUT:
+                await _send_error(send, rejection, "Request body receipt timed out.")
