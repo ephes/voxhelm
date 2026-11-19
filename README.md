@@ -1829,9 +1829,11 @@ by route before Django sees it:
   25 hours of uncompressed 48 kHz 16-bit stereo PCM (in a large-file container
   such as RF64; a classic WAV file ends at 4 GiB, about 6 hours), far more as
   MP3 or AAC. The request must declare its `Content-Length` (Django parses
-  multipart only with one); a producer's staged upload without it, or with
-  `Transfer-Encoding`, which overrides a length, gets a JSON 411 before any
-  body byte is read. A `Content-Length` above the ceiling is checked first and
+  multipart only with one). A producer's staged upload that announces a body
+  without a usable length gets a JSON 411 before reading the body.
+  `Transfer-Encoding` overrides a length. If no body is announced, the guard
+  checks for a usable length on the first body bytes. A declared length above
+  the ceiling is checked first and
   gets the 413 below, with or without `Transfer-Encoding`. While it is processed, a staged upload briefly
   occupies up to three times its size in temporary space (Django's body spool,
   the multipart file and the staging copy) before it moves to the artifact
@@ -1879,17 +1881,19 @@ parsing, inference and response delivery after receipt use their own lifetimes.
 
 Each ASGI server process also bounds concurrent large uploads. Only requests to
 a route whose ceiling exceeds the JSON ceiling (POSTs to the operator form at
-`/`, or to `/v1/audio/transcriptions` or `/v1/uploads` with a valid producer token) that
-announce a body (`Content-Length` other than 0, or `Transfer-Encoding`) take a
-slot. Each of these three routes has its own pool of
+`/`, or to `/v1/audio/transcriptions` or `/v1/uploads` with a valid producer token)
+take a slot when they announce a body (`Content-Length` other than 0, or
+`Transfer-Encoding`) or on the first nonempty body event if they did not
+announce one. Each of these three routes has its own pool of
 `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots (a positive integer, default 4, read at
 startup). Anonymous clients can therefore only occupy operator form slots, and
 synchronous transcriptions cannot block staged batch uploads. A slot covers body
 receipt, parsing, view and response handling through Django's spool cleanup, so
 a synchronous transcription keeps its slot while it waits for and runs
 inference. When a pool is full, further requests for that route receive a fixed
-JSON 503 with `Connection: close` before any body read or spool allocation. A
-declared oversized body still gets 413 first. Clients with legitimate uploads
+JSON 503 with `Connection: close`. A body announcement allows this refusal
+before a body read or spool allocation. Otherwise Django closes its empty
+spool before the 503. A declared oversized body still gets 413 first. Clients with legitimate uploads
 can wait for capacity to free up before retrying a 503. Bodyless requests and
 every route with the JSON ceiling (health, job API, the remote worker's
 heartbeat, claim, complete and fail calls) are never counted, so busy uploads or

@@ -781,6 +781,10 @@ can upload media. The staged and synchronous API routes require producer
 authorization for that allowance. Other methods use the 3 MiB ceiling and
 ordinary method handling within it.
 
+Reserve on a body announcement or on the first nonempty ASGI body event.
+Keep the slot through Django's spool cleanup. A staged POST that carries a
+body still requires a usable length.
+
 ---
 
 ## PRD Open Questions (cross-referenced)

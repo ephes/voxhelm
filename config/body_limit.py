@@ -20,7 +20,7 @@ multi-gigabyte producer upload over a slow link still completes while a
 stalled or trickling client is cut off.
 
 Each process also bounds how many large-body requests (a route ceiling above the
-JSON ceiling, with a body announced) own a Django spool at once. Each large-body
+JSON ceiling, with a body announced or received) own a Django spool at once. Each large-body
 route has its own pool, so stalled anonymous operator form posts cannot block
 producer uploads and synchronous inference cannot block staged batch uploads.
 Bodyless requests and every route with the JSON ceiling (health, worker control
@@ -105,24 +105,16 @@ def request_body_limit(scope: Scope) -> int:
 
 def _announces_body(scope: Scope) -> bool:
     """Whether the request may carry body bytes (HTTP/1.1 framing headers)."""
-    lengths = []
     for key, value in scope.get("headers") or ():
         name = key.lower()
         if name == b"transfer-encoding":
             return True
         if name == b"content-length":
-            lengths.append(bytes(value).decode("latin-1").strip())
-    # Without framing headers an HTTP/1.1 request has an empty body. An
-    # unparsable length is counted, so it can never bypass admission.
-    return any(text != "0" for text in lengths)
-
-
-def _admission_pool(scope: Scope, limit: int) -> str | None:
-    """Return the admission pool for a large-body request, or None if uncounted."""
-    if limit <= DEFAULT_BODY_LIMIT_BYTES or not _announces_body(scope):
-        return None
-    # Only the ADMISSION_POOLS routes can have a ceiling above the JSON ceiling.
-    return _route_path(scope)
+            length = bytes(value).decode("latin-1").strip()
+            # Malformed lengths also count as a body announcement.
+            if not length or length.lstrip("0"):
+                return True
+    return False
 
 
 def _declared_length(scope: Scope) -> int | None:
@@ -193,17 +185,12 @@ async def _send_error(
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
-def _staged_upload_without_length(scope: Scope) -> bool:
-    """Whether an admitted staged upload announces a body without a length.
-
-    Django parses multipart only with a ``Content-Length``; without one the
-    staging view would refuse the upload only after spooling all of it.
-    """
+def _staged_upload_requires_length(scope: Scope) -> bool:
+    """Whether a producer's staged POST lacks a length for multipart parsing."""
     return (
         scope.get("method", "").upper() == "POST"
         and _route_path(scope) == STAGED_UPLOAD_PATH
-        and _announces_body(scope)
-        and _framed_length(scope) is None
+        and not _framed_length(scope)
         and _has_producer_token(scope)
     )
 
@@ -232,33 +219,52 @@ class RequestBodyLimitMiddleware:
         if _declared_length_exceeds(scope, limit):
             await _send_too_large(send, limit)
             return
-        if _staged_upload_without_length(scope):
-            await _send_error(
-                send,
-                HTTPStatus.LENGTH_REQUIRED,
-                "Staged uploads require a Content-Length header.",
-            )
-            return
-        pool = _admission_pool(scope, limit)
-        admission = None if pool is None else self._admission[pool]
-        if admission is not None and not admission.acquire(blocking=False):
-            await _send_error(
-                send, HTTPStatus.SERVICE_UNAVAILABLE, "Server is busy.", error_type="server_error"
-            )
-            return
+        length_required = _staged_upload_requires_length(scope)
+        announced = _announces_body(scope)
+        admission = (
+            self._admission[_route_path(scope)] if limit > DEFAULT_BODY_LIMIT_BYTES else None
+        )
+        admitted = False
 
-        try:
-            rejection = await self._serve(scope, receive, send, limit)
-        finally:
-            if admission is not None:
-                admission.release()
+        def try_admit() -> bool:
+            nonlocal admitted
+            if admission is None:
+                return True
+            if not admitted:
+                admitted = admission.acquire(blocking=False)
+            return admitted
+
+        rejection: HTTPStatus | None
+        if announced and length_required:
+            rejection = HTTPStatus.LENGTH_REQUIRED
+        elif announced and not try_admit():
+            rejection = HTTPStatus.SERVICE_UNAVAILABLE
+        else:
+            try:
+                rejection = await self._serve(
+                    scope, receive, send, limit, try_admit, length_required
+                )
+            finally:
+                if admission is not None and admitted:
+                    admission.release()
+
         if rejection == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
             await _send_too_large(send, limit)
         elif rejection == HTTPStatus.REQUEST_TIMEOUT:
             await _send_error(send, rejection, "Request body receipt timed out.")
+        elif rejection == HTTPStatus.LENGTH_REQUIRED:
+            await _send_error(send, rejection, "Staged uploads require a Content-Length header.")
+        elif rejection == HTTPStatus.SERVICE_UNAVAILABLE:
+            await _send_error(send, rejection, "Server is busy.", error_type="server_error")
 
     async def _serve(
-        self, scope: Scope, receive: Receive, send: Send, limit: int
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        limit: int,
+        try_admit: Callable[[], bool],
+        length_required: bool,
     ) -> HTTPStatus | None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + receipt_budget_seconds(scope, limit)
@@ -322,10 +328,20 @@ class RequestBodyLimitMiddleware:
                 rejection = HTTPStatus.REQUEST_TIMEOUT
                 return {"type": "http.disconnect"}
             if message.get("type") == "http.request":
-                received += len(message.get("body") or b"")
-                if received > limit:
+                chunk_size = len(message.get("body") or b"")
+                if received + chunk_size > limit:
                     rejection = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
                     return {"type": "http.disconnect"}
+                if received == 0 and chunk_size:
+                    # An ASGI transport can supply bytes without HTTP/1.1
+                    # framing. Refuse before Django writes the first chunk.
+                    if length_required:
+                        rejection = HTTPStatus.LENGTH_REQUIRED
+                        return {"type": "http.disconnect"}
+                    if not try_admit():
+                        rejection = HTTPStatus.SERVICE_UNAVAILABLE
+                        return {"type": "http.disconnect"}
+                received += chunk_size
                 body_complete = not message.get("more_body", False)
             return message
 

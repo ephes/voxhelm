@@ -525,6 +525,7 @@ def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spo
             assert await answer(asgi_scope("GET", "/v1/health")) == 200
             assert await answer(asgi_scope("GET", "/", [length])) != 503
             assert await answer(asgi_scope("POST", "/", [(b"content-length", b"0")])) != 503
+            assert await answer(asgi_scope("POST", "/", [(b"content-length", b"000")])) != 503
             json_post = [(b"content-type", b"application/json"), length]
             assert await answer(asgi_scope("POST", "/v1/jobs", json_post), b"{}") == 401
             assert await answer(asgi_scope("POST", "/v1/uploads", [length]), b"x") == 401
@@ -533,6 +534,53 @@ def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spo
                 connection.events.put_nowait({"type": "http.disconnect"})
             await asyncio.wait_for(asyncio.gather(*(task for task, _ in holders)), timeout=2)
         assert all(spool.closed for spool in body_spools)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("headers", [[], [(b"content-length", b"0")]], ids=["absent", "zero"])
+def test_first_body_bytes_acquire_upload_slot(settings, body_spools, headers):
+    from config.asgi import django_application
+    from config.body_limit import RequestBodyLimitMiddleware
+
+    settings.VOXHELM_ASGI_MAX_ACTIVE_UPLOADS = 1
+    application = RequestBodyLimitMiddleware(django_application)
+    scope = asgi_scope(
+        "POST", "/v1/audio/transcriptions", [(b"authorization", b"Bearer test-token"), *headers]
+    )
+
+    async def scenario():
+        holder = BodyConnection()
+        holder.chunk()
+        task = asyncio.create_task(application(scope, holder.receive, holder.send))
+        try:
+            await asyncio.wait_for(holder.waiting.wait(), timeout=2)
+            assert len(body_spools) == 1 and not body_spools[0].closed
+
+            excess = BodyConnection()
+            excess.chunk(more=False)
+
+            async def send_busy(message):
+                assert len(body_spools) == 2 and body_spools[1].closed
+                await excess.send(message)
+
+            await asyncio.wait_for(application(scope, excess.receive, send_busy), timeout=2)
+            assert excess.pulls == 1
+            assert excess.sent[0]["status"] == 503
+
+            empty = BodyConnection()
+            empty.events.put_nowait({"type": "http.request", "body": b"", "more_body": False})
+            await asyncio.wait_for(application(scope, empty.receive, empty.send), timeout=2)
+            assert empty.sent[0]["status"] == 400
+        finally:
+            holder.events.put_nowait({"type": "http.disconnect"})
+            await asyncio.wait_for(task, timeout=2)
+        assert all(spool.closed for spool in body_spools)
+
+        replacement = BodyConnection()
+        replacement.chunk(more=False)
+        await asyncio.wait_for(application(scope, replacement.receive, replacement.send), timeout=2)
+        assert replacement.sent[0]["status"] == 400
 
     asyncio.run(scenario())
 
@@ -884,6 +932,26 @@ def test_staged_upload_without_a_declared_length_is_refused_before_spooling(
         assert pulled == 0
         assert response_headers[b"connection"] == b"close"
         assert "Content-Length" in json.loads(body)["error"]["message"]
+
+
+@pytest.mark.parametrize("headers", [[], [(b"content-length", b"0")]], ids=["absent", "zero"])
+def test_unframed_staged_body_requires_length_on_first_bytes(body_spools, headers):
+    status, response_headers, body, pulled = run_asgi(
+        method="POST",
+        path="/v1/uploads",
+        chunks=4,
+        chunk_size=4,
+        headers=[
+            (b"authorization", b"Bearer test-token"),
+            (b"content-type", b"multipart/form-data; boundary=x"),
+            *headers,
+        ],
+    )
+
+    assert (status, pulled) == (411, 1)
+    assert response_headers[b"connection"] == b"close"
+    assert "Content-Length" in json.loads(body)["error"]["message"]
+    assert len(body_spools) == 1 and body_spools[0].closed
 
 
 @pytest.mark.django_db(transaction=True)
