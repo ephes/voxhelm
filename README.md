@@ -1848,6 +1848,10 @@ by route before Django sees it:
   return their own 2 MiB limit error, and unauthenticated requests within the
   ceiling still get a 401 where authentication is required.
 
+Producer bearer authentication accepts one `Authorization` field with a single
+credential. Repeated fields, even identical ones, and comma-joined credentials
+stay under the default ASGI ceiling and receive a 401 if they reach the view.
+
 Route matching uses Django's effective ASGI script prefix. A nonempty
 `FORCE_SCRIPT_NAME` takes precedence over `root_path`. The prefix is removed
 when present, so an already unprefixed path still matches its route. Exact

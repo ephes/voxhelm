@@ -438,6 +438,9 @@ Voxhelm maintains producer, worker, operator/admin, and artifact credential doma
 ### 4.1 Producer Tokens (Job Submission)
 
 Each producer system gets its own bearer token for submitting jobs and polling status.
+Producer requests use one `Authorization` field carrying a single bearer credential.
+Repeated fields and comma-joined values are refused by producer authentication and
+receive the default request-body ceiling at the ASGI upload boundary.
 
 | Producer | Token env var (proposed) | Scope |
 |----------|--------------------------|-------|

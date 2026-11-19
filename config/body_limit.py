@@ -71,17 +71,16 @@ def _route_path(scope: Scope) -> str:
     return path.removeprefix(get_script_prefix(scope))
 
 
-def _header(scope: Scope, name: bytes) -> str:
-    for key, value in scope.get("headers") or ():
-        if key.lower() == name:
-            return bytes(value).decode("latin-1")
-    return ""
-
-
 def _has_producer_token(scope: Scope) -> bool:
     from transcriptions.views import producer_for_authorization
 
-    return producer_for_authorization(_header(scope, b"authorization")) is not None
+    # Match Django's comma folding so the shared parser sees the same credentials.
+    header = ",".join(
+        value.decode("latin-1")
+        for name, value in scope.get("headers", ())
+        if name.lower() == b"authorization"
+    )
+    return producer_for_authorization(header) is not None
 
 
 def request_body_limit(scope: Scope) -> int:

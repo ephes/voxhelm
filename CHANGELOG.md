@@ -11,6 +11,9 @@
   by the admission check.
 - Match Django's ASGI script prefix when choosing request body limits and pools,
   including deployments that set `FORCE_SCRIPT_NAME`.
+- Apply the same single-credential bearer policy during ASGI upload admission
+  and producer authentication. Repeated or comma-joined Authorization fields
+  keep the default body ceiling.
 
 ## 0.1.15 (2026-11-18)
 

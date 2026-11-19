@@ -207,6 +207,37 @@ def test_invalid_bearer_token_does_not_unlock_the_staged_upload_ceiling():
     assert pulled <= 4
 
 
+@pytest.mark.parametrize("path", ["/v1/uploads", "/v1/audio/transcriptions"])
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        [b"Bearer test-token", b"Bearer other-token"],
+        [b"Bearer other-token", b"Bearer test-token"],
+        [b"Bearer test-token", b"Bearer test-token"],
+        [b"Bearer test-token", b""],
+        [b"Bearer test-token,Bearer other-token"],
+    ],
+    ids=["valid-first", "valid-last", "identical", "empty-second", "combined"],
+)
+def test_ambiguous_authorization_stays_unauthenticated_across_asgi(settings, path, credentials):
+    from config.body_limit import DEFAULT_BODY_LIMIT_BYTES, request_body_limit
+
+    settings.VOXHELM_BEARER_TOKENS = {
+        **settings.VOXHELM_BEARER_TOKENS,
+        "synthetic-folded": "test-token,Bearer other-token",
+    }
+    names = [b"authorization", b"Authorization"]
+    headers = list(zip(names[: len(credentials)], credentials, strict=True))
+    headers.append((b"content-length", b"4"))
+
+    assert request_body_limit(asgi_scope("POST", path, headers)) == DEFAULT_BODY_LIMIT_BYTES
+    status, _, body, pulled = run_asgi(
+        method="POST", path=path, chunks=1, chunk_size=4, headers=headers
+    )
+    assert (status, pulled) == (401, 1)
+    assert json.loads(body)["error"]["type"] == "authentication_error"
+
+
 def test_valid_bearer_token_admits_an_upload_above_the_default_ceiling():
     # A 5 MiB body exceeds the 3 MiB default; with a producer token the sync
     # transcription route admits it and the view answers (unsupported type).

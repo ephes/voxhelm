@@ -158,8 +158,8 @@ def require_bearer_token(request: HttpRequest) -> str:
 
 
 def producer_for_authorization(header: str) -> str | None:
-    """Return the producer label of a valid ``Bearer`` header, else ``None``."""
-    if not header.startswith("Bearer "):
+    """Return the producer label for a single valid bearer credential."""
+    if not header.startswith("Bearer ") or "," in header:
         return None
     presented = header.removeprefix("Bearer ").strip()
     for label, token in settings.VOXHELM_BEARER_TOKENS.items():
