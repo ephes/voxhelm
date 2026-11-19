@@ -200,6 +200,25 @@ def test_valid_bearer_token_admits_an_upload_above_the_default_ceiling():
     assert "Unsupported content type" in json.loads(body)["error"]["message"]
 
 
+@pytest.mark.parametrize("path", ["/v1/uploads", "/v1/audio/transcriptions"])
+def test_only_upload_posts_receive_large_admission(path):
+    headers = [
+        (b"authorization", b"Bearer test-token"),
+        (b"content-length", str(4 * MIB).encode()),
+        (b"content-type", b"application/octet-stream"),
+    ]
+
+    status, _, _, pulled = run_asgi(method="POST", path=path, chunks=4, headers=headers)
+    assert (status, pulled) == (400, 4)
+    status, _, _, pulled = run_asgi(method="PUT", path=path, chunks=4, headers=headers)
+    assert (status, pulled) == (413, 0)
+
+    headers[1] = (b"content-length", b"4")
+    assert run_asgi(method="PUT", path=path, chunks=1, chunk_size=4, headers=headers)[0] == 405
+    headers[1] = (b"transfer-encoding", b"chunked")
+    assert run_asgi(method="PUT", path=path, chunks=1, chunk_size=4, headers=headers)[0] == 405
+
+
 def test_small_unauthenticated_body_still_reaches_the_view():
     status, _headers, _body, pulled = run_asgi(
         method="POST",
@@ -498,9 +517,13 @@ def test_admission_counts_only_large_bodies_in_separate_pools(settings, body_spo
             for scope in (operator, staged, sync):
                 assert await answer(scope) == 503
 
+            # Methods that cannot upload still reach Django's method checks.
+            for path in ("/v1/uploads", "/v1/audio/transcriptions"):
+                assert await answer(asgi_scope("PUT", path, [token, length]), b"data") == 405
+
             # Bodyless requests and JSON-ceiling routes are never counted.
             assert await answer(asgi_scope("GET", "/v1/health")) == 200
-            assert await answer(asgi_scope("GET", "/")) != 503
+            assert await answer(asgi_scope("GET", "/", [length])) != 503
             assert await answer(asgi_scope("POST", "/", [(b"content-length", b"0")])) != 503
             json_post = [(b"content-type", b"application/json"), length]
             assert await answer(asgi_scope("POST", "/v1/jobs", json_post), b"{}") == 401
@@ -545,10 +568,7 @@ def test_route_ceilings(settings, path, authorization, expected):
         "default": DEFAULT_BODY_LIMIT_BYTES,
     }
 
-    assert (
-        request_body_limit({"path": path, "root_path": "", "headers": headers})
-        == (limits[expected])
-    )
+    assert request_body_limit(asgi_scope("POST", path, headers)) == (limits[expected])
     # Every route that admits a large body has its own admission pool.
     if expected != "default":
         assert path in ADMISSION_POOLS
@@ -559,6 +579,7 @@ def test_route_ceiling_strips_the_root_path(settings):
 
     settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 512 * MIB
     scope = {
+        "method": "POST",
         "path": "/voxhelm/v1/uploads",
         "root_path": "/voxhelm",
         "headers": [(b"authorization", b"Bearer test-token")],
@@ -572,6 +593,7 @@ def test_sync_ceiling_never_drops_below_the_json_limit(settings):
 
     settings.VOXHELM_MAX_UPLOAD_BYTES = 1024
     scope = {
+        "method": "POST",
         "path": "/v1/audio/transcriptions",
         "root_path": "",
         "headers": [(b"authorization", b"Bearer test-token")],
@@ -693,7 +715,7 @@ def test_receipt_budget(settings, path, authorization, content_length, expected_
     headers = [(b"authorization", authorization)] if authorization else []
     if content_length is not None:
         headers.append((b"content-length", content_length))
-    scope = {"path": path, "root_path": "", "headers": headers}
+    scope = asgi_scope("POST", path, headers)
 
     assert receipt_budget_seconds(scope, request_body_limit(scope)) == expected_seconds
 
@@ -940,6 +962,7 @@ def test_transfer_encoding_voids_a_declared_length_for_the_budget(settings):
     settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS = 600
     settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND = 128 * 1024
     scope = {
+        "method": "POST",
         "path": "/v1/uploads",
         "root_path": "",
         "headers": [

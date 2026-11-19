@@ -5,9 +5,9 @@ URL routing, CSRF, authentication or any view runs, and it has no size limit for
 that copy. Without this wrapper any client that reaches the port could stream an
 unbounded body to disk without credentials.
 
-The ceiling depends on the route. Only the two bearer upload routes admit large
-bodies, and only when the request carries a valid producer token; the operator
-form at ``/`` admits the synchronous upload limit. Every other request, and an
+The ceiling depends on the route and method. POSTs to the two bearer upload
+routes admit large bodies with a valid producer token. POSTs to the operator
+form at ``/`` admit the synchronous upload limit. Every other request, and an
 upload request without a valid token, gets the JSON ceiling plus headroom so the
 views still answer their own precise 413/401 for small bodies. A declared
 ``Content-Length`` above the ceiling is refused before any body byte is read; a
@@ -87,6 +87,8 @@ def _has_producer_token(scope: Scope) -> bool:
 
 def request_body_limit(scope: Scope) -> int:
     """Return the largest request body this route admits, in bytes."""
+    if scope.get("method", "").upper() != "POST":
+        return DEFAULT_BODY_LIMIT_BYTES
     path = _route_path(scope)
     sync_limit = max(
         settings.VOXHELM_MAX_UPLOAD_BYTES + UPLOAD_FRAMING_HEADROOM_BYTES,
@@ -198,7 +200,8 @@ def _staged_upload_without_length(scope: Scope) -> bool:
     staging view would refuse the upload only after spooling all of it.
     """
     return (
-        _route_path(scope) == STAGED_UPLOAD_PATH
+        scope.get("method", "").upper() == "POST"
+        and _route_path(scope) == STAGED_UPLOAD_PATH
         and _announces_body(scope)
         and _framed_length(scope) is None
         and _has_producer_token(scope)

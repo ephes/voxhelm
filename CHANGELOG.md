@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Restrict the larger ASGI body ceilings and upload pools to POSTs. Small
+  requests using other methods continue to reach Django's method checks.
+
 ## 0.1.15 (2026-11-18)
 
 Published to PyPI for the remote transcription workers (`atlas`, `studio`),

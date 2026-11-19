@@ -1838,10 +1838,11 @@ by route before Django sees it:
   store, four times with the filesystem artifact backend on the same volume;
   size the limit and `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` to the free disk space.
 - `POST /v1/audio/transcriptions` with a valid producer bearer token, and the
-  operator form at `/`: `VOXHELM_MAX_UPLOAD_BYTES` plus 1 MiB (never below 3 MiB).
+  operator form at `POST /`: `VOXHELM_MAX_UPLOAD_BYTES` plus 1 MiB (never below 3 MiB).
   These routes answer synchronously, so larger media goes through a staged
   upload or a batch URL job instead.
-- Everything else, including those upload routes without a valid token: 3 MiB, so
+- All other requests use the 3 MiB ceiling, including other methods and requests
+  to bearer upload routes without a valid token. This leaves room so
   the JSON endpoints still answer their own 2 MiB 413 and an unauthenticated
   request still gets its 401.
 
@@ -1877,8 +1878,8 @@ Django spool and returns a fixed JSON 408 with `Connection: close`. Multipart
 parsing, inference and response delivery after receipt use their own lifetimes.
 
 Each ASGI server process also bounds concurrent large uploads. Only requests to
-a route whose ceiling exceeds the JSON ceiling (the operator form at `/`, and
-`/v1/audio/transcriptions` or `/v1/uploads` with a valid producer token) that
+a route whose ceiling exceeds the JSON ceiling (POSTs to the operator form at
+`/`, or to `/v1/audio/transcriptions` or `/v1/uploads` with a valid producer token) that
 announce a body (`Content-Length` other than 0, or `Transfer-Encoding`) take a
 slot. Each of these three routes has its own pool of
 `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` slots (a positive integer, default 4, read at

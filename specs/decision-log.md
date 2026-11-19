@@ -774,6 +774,15 @@ This adds no deployment claim.
 
 ---
 
+## ASGI request body admission
+
+Large body ceilings and their per-route spool pools apply only to POSTs that
+can upload media. The staged and synchronous API routes require producer
+authorization for that allowance. Other methods use the 3 MiB ceiling and
+ordinary method handling within it.
+
+---
+
 ## PRD Open Questions (cross-referenced)
 
 The PRD's 8 open questions are addressed by the following decisions:
