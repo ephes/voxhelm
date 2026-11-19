@@ -39,6 +39,7 @@ from threading import BoundedSemaphore
 from typing import Any, Final
 
 from django.conf import settings
+from django.core.handlers.asgi import get_script_prefix
 
 # The shapes Django's ASGIHandler.__call__ declares.
 Scope = dict[str, Any]
@@ -65,11 +66,9 @@ ADMISSION_POOLS: Final[tuple[str, ...]] = (
 
 
 def _route_path(scope: Scope) -> str:
-    path = str(scope.get("path") or "")
-    root_path = str(scope.get("root_path") or "")
-    if root_path and path.startswith(root_path):
-        path = path[len(root_path) :]
-    return path or "/"
+    # Match ASGIRequest.path_info, including an empty path after stripping.
+    path: str = scope["path"]
+    return path.removeprefix(get_script_prefix(scope))
 
 
 def _header(scope: Scope, name: bytes) -> str:

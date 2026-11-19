@@ -7,7 +7,10 @@
 - Reserve a pool slot when ASGI first delivers unannounced upload bytes.
   Staged uploads still require a usable length for a body.
 - Compare declared lengths with the ASGI route ceiling before converting them
-  to integers, so oversized lengths get a 413 and leading zeros are accepted.
+  to integers, so oversized lengths get a 413 and leading zeros are accepted
+  by the admission check.
+- Match Django's ASGI script prefix when choosing request body limits and pools,
+  including deployments that set `FORCE_SCRIPT_NAME`.
 
 ## 0.1.15 (2026-11-18)
 

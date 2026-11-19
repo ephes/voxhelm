@@ -1833,9 +1833,9 @@ by route before Django sees it:
   without a usable length gets a JSON 411 before reading the body.
   `Transfer-Encoding` overrides a length. If no body is announced, the guard
   checks for a usable length on the first body bytes. A declared length above
-  the ceiling is checked first and
-  gets the 413 below, with or without `Transfer-Encoding`. While it is processed, a staged upload briefly
-  occupies up to three times its size in temporary space (Django's body spool,
+  the ceiling gets a 413 first, with or without `Transfer-Encoding`. While it
+  is processed, a staged upload briefly occupies up to three times its size
+  in temporary space (Django's body spool,
   the multipart file and the staging copy) before it moves to the artifact
   store, four times with the filesystem artifact backend on the same volume;
   size the limit and `VOXHELM_ASGI_MAX_ACTIVE_UPLOADS` to the free disk space.
@@ -1844,9 +1844,15 @@ by route before Django sees it:
   These routes answer synchronously, so larger media goes through a staged
   upload or a batch URL job instead.
 - All other requests use the 3 MiB ceiling, including other methods and requests
-  to bearer upload routes without a valid token. This leaves room so
-  the JSON endpoints still answer their own 2 MiB 413 and an unauthenticated
-  request still gets its 401.
+  to bearer upload routes without a valid token. JSON endpoints can still
+  return their own 2 MiB limit error, and unauthenticated requests within the
+  ceiling still get a 401 where authentication is required.
+
+Route matching uses Django's effective ASGI script prefix. A nonempty
+`FORCE_SCRIPT_NAME` takes precedence over `root_path`. The prefix is removed
+when present, so an already unprefixed path still matches its route. Exact
+paths matter. For example, `/v1/uploads/` uses the 3 MiB ceiling, and a path
+that becomes empty after prefix removal does not match the operator form at `/`.
 
 The largest valid decimal `Content-Length` is checked against the route ceiling
 before integer conversion. Leading zeros do not affect the comparison. An
@@ -1895,7 +1901,7 @@ a synchronous transcription keeps its slot while it waits for and runs
 inference. When a pool is full, further requests for that route receive a fixed
 JSON 503 with `Connection: close`. A body announcement allows this refusal
 before a body read or spool allocation. Otherwise Django closes its empty
-spool before the 503. A declared oversized body still gets 413 first. Clients with legitimate uploads
+spool before the 503. A declared oversized body still gets 413 first. Clients
 can wait for capacity to free up before retrying a 503. Bodyless requests and
 every route with the JSON ceiling (health, job API, the remote worker's
 heartbeat, claim, complete and fail calls) are never counted, so busy uploads or

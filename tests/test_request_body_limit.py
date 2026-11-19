@@ -11,13 +11,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from io import BytesIO
 from tempfile import SpooledTemporaryFile
 from types import ModuleType
 from typing import Any
 
 import pytest
+from django.core.handlers.asgi import ASGIRequest
 from django.http import HttpResponse
-from django.urls import path
+from django.urls import Resolver404, path, resolve
 from django.views.decorators.csrf import csrf_exempt
 
 MIB = 1024 * 1024
@@ -645,18 +647,42 @@ def test_route_ceilings(settings, path, authorization, expected):
         assert path in ADMISSION_POOLS
 
 
-def test_route_ceiling_strips_the_root_path(settings):
-    from config.body_limit import UPLOAD_FRAMING_HEADROOM_BYTES, request_body_limit
+@pytest.mark.parametrize(
+    ("force_prefix", "root_path", "scope_path", "route"),
+    [
+        (None, "", "/v1/uploads", "uploads-collection"),
+        (None, "/edge", "/edge/v1/uploads", "uploads-collection"),
+        (None, "/edge", "/v1/uploads", "uploads-collection"),
+        ("", "/edge", "/edge/v1/uploads", "uploads-collection"),
+        ("/site", "/edge", "/site/v1/uploads", "uploads-collection"),
+        ("/site", "/edge", "/edge/v1/uploads", None),
+        (None, "/edge", "/edge/v1/uploads/", None),
+        (None, "/edge", "/edge/", "root"),
+        (None, "/edge", "/edge", None),
+        ("/site/", "/edge", "/site/v1/uploads", None),
+    ],
+)
+def test_route_ceiling_matches_django_path_resolution(
+    settings, force_prefix, root_path, scope_path, route
+):
+    from config.body_limit import DEFAULT_BODY_LIMIT_BYTES, request_body_limit
 
+    settings.FORCE_SCRIPT_NAME = force_prefix
+    settings.VOXHELM_MAX_UPLOAD_BYTES = 25 * MIB
     settings.VOXHELM_BATCH_MAX_STAGED_UPLOAD_BYTES = 512 * MIB
-    scope = {
-        "method": "POST",
-        "path": "/voxhelm/v1/uploads",
-        "root_path": "/voxhelm",
-        "headers": [(b"authorization", b"Bearer test-token")],
-    }
+    scope = asgi_scope("POST", scope_path, [(b"authorization", b"Bearer test-token")])
+    scope["root_path"] = root_path
 
-    assert request_body_limit(scope) == 512 * MIB + UPLOAD_FRAMING_HEADROOM_BYTES
+    with BytesIO() as body:
+        request = ASGIRequest(scope, body)
+        try:
+            resolved = resolve(request.path_info).url_name
+        except Resolver404:
+            resolved = None
+
+    assert resolved == route
+    limits = {"uploads-collection": 513 * MIB, "root": 26 * MIB, None: DEFAULT_BODY_LIMIT_BYTES}
+    assert request_body_limit(scope) == limits[resolved]
 
 
 def test_sync_ceiling_never_drops_below_the_json_limit(settings):

@@ -789,6 +789,10 @@ Check decimal declarations against the ceiling before converting them to
 integers. Use the largest valid declaration for the early size check, including
 when Transfer-Encoding frames the body.
 
+Use Django's effective script prefix to derive the same routing path for
+the byte ceiling, staged length requirement and spool pool. Preserve the path
+left by prefix removal, including trailing slashes and an empty path.
+
 ---
 
 ## PRD Open Questions (cross-referenced)
