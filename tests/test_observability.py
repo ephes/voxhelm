@@ -22,12 +22,15 @@ def test_invalid_wav_is_diagnostic_metadata(tmp_path, contents):
 
     assert summary["suffix"] == ".wav"
     assert summary["bytes"] == len(contents)
-    assert "wav_error" in summary
+    assert summary["wav_error"] == "invalid_wav"
     assert "frames" not in summary
 
 
 def test_missing_audio_is_diagnostic_metadata(tmp_path):
-    assert "stat_error" in summarize_audio_file(tmp_path / "missing.wav")
+    assert summarize_audio_file(tmp_path / "missing.wav") == {
+        "suffix": ".wav",
+        "stat_error": "io_error",
+    }
 
 
 def test_wav_summary_uses_the_open_file_after_path_replacement(tmp_path, monkeypatch):
@@ -63,6 +66,56 @@ def test_wav_summary_rejects_a_directory(tmp_path):
     path.mkdir()
 
     assert summarize_audio_file(path).keys() == {"suffix", "stat_error"}
+
+
+@pytest.mark.parametrize("failure", ["stat", "open", "parse", "read"])
+def test_debug_log_uses_fixed_audio_error_categories(
+    tmp_path, monkeypatch, settings, caplog, failure
+):
+    settings.VOXHELM_STT_DEBUG_LOGGING = True
+    path = tmp_path / ("input.mp3" if failure == "stat" else "input.wav")
+    path.write_bytes(b"RIFF")
+    marker = "synthetic diagnostic marker"
+
+    def fail_io(*args, **kwargs):
+        raise OSError(f"{path}: {marker}")
+
+    def fail_parse(*args, **kwargs):
+        raise wave.Error(f"{path}: {marker}")
+
+    with monkeypatch.context() as patch:
+        if failure == "stat":
+            patch.setattr(Path, "stat", fail_io)
+        elif failure == "open":
+            patch.setattr("transcriptions.observability.open", fail_io, raising=False)
+        else:
+            patch.setattr(wave, "open", fail_parse if failure == "parse" else fail_io)
+        summary = summarize_audio_file(path)
+
+    with caplog.at_level(logging.WARNING, logger="voxhelm.stt"):
+        emit_transcription_debug_log(
+            source="synthetic",
+            audio_shape=summary,
+            request_model="requested",
+            request_language=None,
+            prompt=None,
+            result=TranscriptionResult(text="Synthetic success", language="en", segments=[]),
+            duration_ms=7,
+        )
+
+    (record,) = [record for record in caplog.records if record.name == "voxhelm.stt"]
+    message = record.getMessage()
+    assert str(path) not in message
+    assert marker not in message
+    payload = json.loads(message.removeprefix("stt_debug "))
+    if failure in {"stat", "open"}:
+        assert payload["audio_shape"] == {"suffix": path.suffix, "stat_error": "io_error"}
+    else:
+        assert payload["audio_shape"] == {
+            "suffix": ".wav",
+            "bytes": 4,
+            "wav_error": "invalid_wav" if failure == "parse" else "io_error",
+        }
 
 
 @pytest.mark.parametrize("debug_enabled", [False, True])

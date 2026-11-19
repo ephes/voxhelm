@@ -1537,6 +1537,9 @@ same open regular file, even if its path is replaced during inspection. For
 other formats, diagnostics only record the suffix and file size.
 Unreadable, unsupported or truncated WAV metadata is diagnostic-only
 and does not discard a completed transcription; temporary input cleanup still runs.
+The `stat_error` field reports `io_error` or `not_regular_file`.
+The `wav_error` field reports `io_error` or `invalid_wav`.
+These categories omit local paths and parser messages.
 Synthetic coverage of these boundaries: `uv run pytest tests/test_observability.py`.
 
 ## Lane Scheduler

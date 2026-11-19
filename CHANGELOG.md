@@ -4,6 +4,8 @@
 
 - Measure WAV size and format from the same open regular file in opt-in
   transcription diagnostics.
+- Report fixed categories in audio diagnostic error fields to keep local
+  paths and parser messages out of the logs.
 - Restrict the larger ASGI body ceilings and upload pools to POSTs. Small
   requests using other methods continue to reach Django's method checks.
 - Reserve a pool slot when ASGI first delivers unannounced upload bytes.
