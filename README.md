@@ -1848,8 +1848,10 @@ by route before Django sees it:
   the JSON endpoints still answer their own 2 MiB 413 and an unauthenticated
   request still gets its 401.
 
-A declared `Content-Length` above the ceiling is refused before any body byte is
-read; a chunked or undeclared body is cut off at the first chunk past it. The
+The largest valid decimal `Content-Length` is checked against the route ceiling
+before integer conversion. Leading zeros do not affect the comparison. An
+oversized declaration is refused before reading any body bytes. A chunked or
+undeclared body is cut off at the first chunk past the ceiling. The
 refusal is a JSON 413 (`invalid_request_error`) with `Connection: close`,
 `X-Frame-Options: DENY` and `X-Content-Type-Options: nosniff`. An
 unauthenticated client can therefore make the server spool at most 26 MiB per

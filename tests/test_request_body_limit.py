@@ -167,6 +167,29 @@ def test_declared_oversized_length_is_refused_without_reading_the_body():
     assert headers[b"connection"] == b"close"
 
 
+@pytest.mark.parametrize(
+    ("lengths", "expected"),
+    [
+        ([b"9" * 5000], 413),
+        ([b"0" * 5000 + str(3 * MIB).encode()], 200),
+        ([b"4"], 200),
+        ([str(3 * MIB + 1).encode(), b"4"], 413),
+        ([b"4", str(3 * MIB + 1).encode()], 413),
+    ],
+    ids=["oversized", "padded-at-limit", "ordinary", "largest-first", "largest-last"],
+)
+def test_content_length_conversion_stays_within_the_route_limit(lengths, expected):
+    status, _, _, pulled = run_asgi(
+        method="GET",
+        path="/v1/health",
+        chunks=1,
+        chunk_size=4,
+        headers=[(b"content-length", value) for value in lengths],
+    )
+
+    assert (status, pulled) == (expected, 0 if expected == 413 else 1)
+
+
 def test_invalid_bearer_token_does_not_unlock_the_staged_upload_ceiling():
     status, _headers, _body, pulled = run_asgi(
         method="POST",

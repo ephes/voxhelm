@@ -6,6 +6,8 @@
   requests using other methods continue to reach Django's method checks.
 - Reserve a pool slot when ASGI first delivers unannounced upload bytes.
   Staged uploads still require a usable length for a body.
+- Compare declared lengths with the ASGI route ceiling before converting them
+  to integers, so oversized lengths get a 413 and leading zeros are accepted.
 
 ## 0.1.15 (2026-11-18)
 

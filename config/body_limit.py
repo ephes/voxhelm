@@ -117,26 +117,32 @@ def _announces_body(scope: Scope) -> bool:
     return False
 
 
-def _declared_length(scope: Scope) -> int | None:
-    """Return the largest parsable ``Content-Length``, or None without one."""
+def _declared_length(scope: Scope, limit: int) -> int | None:
+    """Return the largest valid length, saturating above the ceiling at limit + 1."""
+    ceiling = str(limit)
     declared = None
     for key, value in scope.get("headers") or ():
         if key.lower() != b"content-length":
             continue
         text = bytes(value).decode("latin-1").strip()
-        # isdigit() also accepts non-ASCII digits that int() refuses.
-        if text.isascii() and text.isdigit():
-            declared = max(declared or 0, int(text))
+        if not (text.isascii() and text.isdigit()):
+            continue
+        significant = text.lstrip("0") or "0"
+        if len(significant) > len(ceiling) or (
+            len(significant) == len(ceiling) and significant > ceiling
+        ):
+            return limit + 1
+        declared = max(declared or 0, int(significant))
     return declared
 
 
 def _declared_length_exceeds(scope: Scope, limit: int) -> bool:
     # Any oversized length is refused early, whatever else frames the body.
-    declared = _declared_length(scope)
+    declared = _declared_length(scope, limit)
     return declared is not None and declared > limit
 
 
-def _framed_length(scope: Scope) -> int | None:
+def _framed_length(scope: Scope, limit: int) -> int | None:
     """Return the length that frames the body, or None for chunked framing.
 
     ``Transfer-Encoding`` takes precedence over ``Content-Length`` in HTTP/1.1
@@ -145,7 +151,7 @@ def _framed_length(scope: Scope) -> int | None:
     """
     if any(key.lower() == b"transfer-encoding" for key, _value in scope.get("headers") or ()):
         return None
-    return _declared_length(scope)
+    return _declared_length(scope, limit)
 
 
 def receipt_budget_seconds(scope: Scope, limit: int) -> float:
@@ -156,7 +162,7 @@ def receipt_budget_seconds(scope: Scope, limit: int) -> float:
     without a declared length keeps the base budget, and small ceilings
     (anonymous and JSON routes) never exceed it.
     """
-    declared = _framed_length(scope)
+    declared = _framed_length(scope, limit)
     if declared is None:
         return float(settings.VOXHELM_ASGI_BODY_TIMEOUT_SECONDS)
     scaled = math.ceil(min(declared, limit) / settings.VOXHELM_ASGI_BODY_MIN_BYTES_PER_SECOND)
@@ -185,12 +191,12 @@ async def _send_error(
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
-def _staged_upload_requires_length(scope: Scope) -> bool:
+def _staged_upload_requires_length(scope: Scope, limit: int) -> bool:
     """Whether a producer's staged POST lacks a length for multipart parsing."""
     return (
         scope.get("method", "").upper() == "POST"
         and _route_path(scope) == STAGED_UPLOAD_PATH
-        and not _framed_length(scope)
+        and not _framed_length(scope, limit)
         and _has_producer_token(scope)
     )
 
@@ -219,7 +225,7 @@ class RequestBodyLimitMiddleware:
         if _declared_length_exceeds(scope, limit):
             await _send_too_large(send, limit)
             return
-        length_required = _staged_upload_requires_length(scope)
+        length_required = _staged_upload_requires_length(scope, limit)
         announced = _announces_body(scope)
         admission = (
             self._admission[_route_path(scope)] if limit > DEFAULT_BODY_LIMIT_BYTES else None

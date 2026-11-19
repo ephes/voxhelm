@@ -785,6 +785,10 @@ Reserve on a body announcement or on the first nonempty ASGI body event.
 Keep the slot through Django's spool cleanup. A staged POST that carries a
 body still requires a usable length.
 
+Check decimal declarations against the ceiling before converting them to
+integers. Use the largest valid declaration for the early size check, including
+when Transfer-Encoding frames the body.
+
 ---
 
 ## PRD Open Questions (cross-referenced)
