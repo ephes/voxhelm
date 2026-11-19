@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Measure WAV size and format from the same open regular file in opt-in
+  transcription diagnostics.
 - Restrict the larger ASGI body ceilings and upload pools to POSTs. Small
   requests using other methods continue to reach Django's method checks.
 - Reserve a pool slot when ASGI first delivers unannounced upload bytes.

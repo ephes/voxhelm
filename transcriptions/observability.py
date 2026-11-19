@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import wave
 from pathlib import Path
+from stat import S_ISREG
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
@@ -15,26 +17,33 @@ _LOGGER = logging.getLogger("voxhelm.stt")
 
 
 def summarize_audio_file(audio_path: Path) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "suffix": audio_path.suffix.lower(),
-    }
+    suffix = audio_path.suffix.lower()
+    summary: dict[str, Any] = {"suffix": suffix}
     try:
-        summary["bytes"] = audio_path.stat().st_size
+        if suffix != ".wav":
+            summary["bytes"] = audio_path.stat().st_size
+            return summary
+
+        # Opening a FIFO must not block before we can check the file type.
+        with open(
+            audio_path, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)
+        ) as handle:
+            metadata = os.fstat(handle.fileno())
+            if not S_ISREG(metadata.st_mode):
+                summary["stat_error"] = "not_regular_file"
+                return summary
+            summary["bytes"] = metadata.st_size
+            try:
+                with wave.open(handle, "rb") as wav_file:
+                    frames = wav_file.getnframes()
+                    rate = wav_file.getframerate()
+                    width = wav_file.getsampwidth()
+                    channels = wav_file.getnchannels()
+            except (OSError, EOFError, wave.Error) as exc:
+                summary["wav_error"] = str(exc)
+                return summary
     except OSError as exc:
         summary["stat_error"] = str(exc)
-        return summary
-
-    if audio_path.suffix.lower() != ".wav":
-        return summary
-
-    try:
-        with wave.open(str(audio_path), "rb") as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            width = wav_file.getsampwidth()
-            channels = wav_file.getnchannels()
-    except (OSError, EOFError, wave.Error) as exc:
-        summary["wav_error"] = str(exc)
         return summary
 
     duration_seconds = 0.0

@@ -30,6 +30,41 @@ def test_missing_audio_is_diagnostic_metadata(tmp_path):
     assert "stat_error" in summarize_audio_file(tmp_path / "missing.wav")
 
 
+def test_wav_summary_uses_the_open_file_after_path_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "input.wav"
+    replacement = tmp_path / "replacement.wav"
+    for target, frames in ((path, 16), (replacement, 64)):
+        with wave.open(str(target), "wb") as wav_file:
+            wav_file.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            wav_file.writeframes(b"\x00\x00" * frames)
+    original_size = path.stat().st_size
+    open_wave = wave.open
+
+    def replace_path_then_probe(source, mode):
+        replacement.replace(path)
+        return open_wave(source, mode)
+
+    monkeypatch.setattr(wave, "open", replace_path_then_probe)
+
+    assert summarize_audio_file(path) == {
+        "suffix": ".wav",
+        "bytes": original_size,
+        "frames": 16,
+        "rate": 16000,
+        "width": 2,
+        "channels": 1,
+        "duration_seconds": 0.001,
+    }
+    assert path.stat().st_size != original_size
+
+
+def test_wav_summary_rejects_a_directory(tmp_path):
+    path = tmp_path / "directory.wav"
+    path.mkdir()
+
+    assert summarize_audio_file(path).keys() == {"suffix", "stat_error"}
+
+
 @pytest.mark.parametrize("debug_enabled", [False, True])
 def test_completed_transcription_survives_truncated_diagnostic_wav(
     client, settings, monkeypatch, debug_enabled

@@ -1532,7 +1532,10 @@ most 160 characters and transcript previews of at most 300 characters, followed
 by `...` when truncated. A nonblank raw transcript is included only when it
 differs from the normalized transcript, with the same 300-character preview limit.
 The default (`false`) emits no `stt_debug` record and skips HTTP audio metadata
-inspection. Unreadable, unsupported or truncated WAV metadata is diagnostic-only
+inspection. WAV diagnostics take the byte size and format measurements from the
+same open regular file, even if its path is replaced during inspection. For
+other formats, diagnostics only record the suffix and file size.
+Unreadable, unsupported or truncated WAV metadata is diagnostic-only
 and does not discard a completed transcription; temporary input cleanup still runs.
 Synthetic coverage of these boundaries: `uv run pytest tests/test_observability.py`.
 
