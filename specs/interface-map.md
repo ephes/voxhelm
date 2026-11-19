@@ -505,6 +505,10 @@ S3-compatible credentials for artifact storage. Used only by Voxhelm internally 
 
 Consumers do not access MinIO directly. They retrieve artifacts through the Voxhelm HTTP API (`GET /v1/jobs/{id}/artifacts/{name}`), which proxies the download from MinIO. The sync endpoint returns results inline in the HTTP response body.
 
+Producer and operator downloads compare the recorded size with size metadata from
+the opened file descriptor or S3 GET. A known difference closes the reader and
+returns HTTP 503 before any artifact bytes are sent.
+
 ### 4.5 Network Boundary
 
 All interfaces assume Tailscale or local-network-only access:

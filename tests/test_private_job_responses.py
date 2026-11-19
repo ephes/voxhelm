@@ -41,7 +41,7 @@ def private_job():
         result_text="private synthetic transcript",
     )
     key = f"voxhelm/jobs/{job.id}/transcript.txt"
-    get_artifact_store().put_bytes(
+    stored = get_artifact_store().put_bytes(
         key=key, data=b"private synthetic transcript", content_type="text/plain"
     )
     artifact = JobArtifact.objects.create(
@@ -52,6 +52,7 @@ def private_job():
         storage_backend="filesystem",
         storage_key=key,
         content_type="text/plain",
+        size_bytes=stored.size_bytes,
         exposed=True,
     )
     return user, job, artifact

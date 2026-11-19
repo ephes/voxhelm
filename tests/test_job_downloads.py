@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 from asgiref.sync import sync_to_async
 from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.response import StreamingBody
 from django.http import StreamingHttpResponse
 from django.test import AsyncClient
 
-from jobs.artifacts import S3ArtifactStore, get_artifact_store
+from jobs.artifacts import FilesystemArtifactStore, S3ArtifactStore, get_artifact_store
 from jobs.models import Job, JobArtifact
 from tests.test_jobs import build_job_payload, build_synthesis_payload, configure_task_backend
 
@@ -111,6 +112,70 @@ def artifact_url(job, operator):
         if operator
         else f"/v1/jobs/{job.id}/artifacts/transcript.txt"
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("backend", ["filesystem", "s3"])
+@pytest.mark.parametrize(
+    "data,recorded_size,status",
+    [(b"abc", 3, 200), (b"", 0, 200), (b"ab", 3, 503), (b"replaced", 3, 503)],
+    ids=["matching", "empty", "truncated", "replaced"],
+)
+def test_artifact_download_admits_opened_object_size(
+    client, django_user_model, monkeypatch, tmp_path, operator, backend, data, recorded_size, status
+):
+    user = django_user_model.objects.create_user(username="synthetic-size", is_staff=True)
+    if operator:
+        client.force_login(user)
+    job, artifact = artifact_fixture(user)
+    artifact.size_bytes = recorded_size
+    artifact.save(update_fields=["size_bytes"])
+    opened: list[io.FileIO | io.BytesIO] = []
+    store: FilesystemArtifactStore | S3ArtifactStore
+
+    if backend == "filesystem":
+        store = FilesystemArtifactStore(root=tmp_path)
+        store.put_bytes(key=artifact.storage_key, data=data, content_type=artifact.content_type)
+
+        def track_file(*args, **kwargs):
+            raw = io.FileIO(*args, **kwargs)
+            opened.append(raw)
+            return raw
+
+        monkeypatch.setattr(
+            "jobs.artifacts.io",
+            SimpleNamespace(FileIO=track_file, BufferedReader=io.BufferedReader),
+        )
+    else:
+        store = object.__new__(S3ArtifactStore)
+        store.bucket = "synthetic"
+
+        def get_object(*, Bucket, Key):
+            assert (Bucket, Key) == ("synthetic", artifact.storage_key)
+            raw = io.BytesIO(data)
+            opened.append(raw)
+            return {"Body": StreamingBody(raw, len(data)), "ContentLength": len(data)}
+
+        store.client = SimpleNamespace(get_object=get_object)
+
+    install_store(monkeypatch, lambda identity: store)
+    response = client.get(artifact_url(job, operator), HTTP_AUTHORIZATION="Bearer test-token")
+    try:
+        assert response.status_code == status
+        assert len(opened) == 1
+        if status == 200:
+            assert response.streaming
+            assert b"".join(response.streaming_content) == data
+        else:
+            assert not response.streaming
+            assert opened[0].closed
+            assert response.json()["error"]["type"] == "server_error"
+            assert "no-store" in response["Cache-Control"]
+    finally:
+        response.close()
+    assert opened[0].closed
+    assert JobArtifact.objects.get(pk=artifact.pk).size_bytes == recorded_size
 
 
 @pytest.mark.django_db

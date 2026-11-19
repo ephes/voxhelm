@@ -34,7 +34,9 @@ class ArtifactStore(Protocol):
 
     def put_bytes(self, *, key: str, data: bytes, content_type: str) -> StoredArtifact: ...
 
-    def open_reader(self, *, key: str) -> BinaryIO: ...
+    def open_reader(self, *, key: str, expected_size_bytes: int | None = None) -> BinaryIO:
+        """Open an object, rejecting a known size mismatch if a size is supplied."""
+        ...
 
     def read_bytes(self, *, key: str) -> bytes: ...
 
@@ -45,6 +47,13 @@ class ArtifactStore(Protocol):
     def delete(self, *, key: str) -> None: ...
 
     def list_keys(self, *, prefix: str) -> list[str]: ...
+
+
+def _close_rejected_reader(reader: BinaryIO) -> None:
+    try:
+        reader.close()
+    except Exception:
+        logger.warning("Artifact reader cleanup failed after open was refused.")
 
 
 class FilesystemArtifactStore:
@@ -92,7 +101,7 @@ class FilesystemArtifactStore:
         if not stat.S_ISREG(mode):
             raise ValueError("Artifact objects must be regular files, not aliases or directories.")
 
-    def open_reader(self, *, key: str) -> BinaryIO:
+    def open_reader(self, *, key: str, expected_size_bytes: int | None = None) -> BinaryIO:
         with self._parent(key) as (directory, name):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             try:
@@ -101,13 +110,15 @@ class FilesystemArtifactStore:
                 os.close(fd)
                 raise
             try:
-                source = io.BufferedReader(raw)
-                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                metadata = os.fstat(raw.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("Artifact objects must be regular files.")
+                if expected_size_bytes is not None and metadata.st_size != expected_size_bytes:
+                    raise ValueError("Artifact object size differs from the recorded size.")
+                return io.BufferedReader(raw)
             except BaseException:
-                raw.close()
+                _close_rejected_reader(raw)
                 raise
-            return source
 
     @contextmanager
     def _reader(self, key: str) -> Iterator[BinaryIO]:
@@ -267,9 +278,14 @@ class S3ArtifactStore:
             size_bytes=len(data),
         )
 
-    def open_reader(self, *, key: str) -> BinaryIO:
+    def open_reader(self, *, key: str, expected_size_bytes: int | None = None) -> BinaryIO:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"]
+        body = response["Body"]
+        size = response.get("ContentLength")
+        if expected_size_bytes is not None and size is not None and size != expected_size_bytes:
+            _close_rejected_reader(body)
+            raise ValueError("Artifact object size differs from the recorded size.")
+        return body
 
     def read_bytes(self, *, key: str) -> bytes:
         with closing(self.open_reader(key=key)) as source:

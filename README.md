@@ -673,13 +673,17 @@ finite floats with field-specific HTTP 400 errors before any job is saved.
 Ordinary finite numbers and existing synthesis speed bounds remain supported.
 
 Producer and operator artifact downloads stream bounded reads from the artifact's
-recorded filesystem/S3 store, including asynchronous reads under ASGI. Closing or
-cancelling the response closes the underlying reader once its active read settles. Authorization, private
-cache headers and recorded content types still apply. A missing stored object
-returns HTTP 404; other supported storage/configuration failures before response
-headers return HTTP 503 with a bounded JSON error and no storage details. Rows
-are kept for diagnosis and retry. A read failure after headers have been sent
-terminates the stream; it cannot change the HTTP status or become a JSON error.
+recorded filesystem/S3 store, including asynchronous reads under ASGI. Before
+sending download headers, Voxhelm compares the recorded artifact size with the
+open file descriptor's size or the S3 GET response's reported `ContentLength`.
+A known mismatch closes the reader and returns HTTP 503 without streaming any
+artifact bytes. Closing or cancelling a streaming response closes its reader once
+the active read settles. Authorization, private cache headers and recorded
+content types still apply. A missing stored object returns HTTP 404. Other
+supported storage and configuration failures before response headers return
+HTTP 503 with a bounded JSON error and no storage details. Rows are kept for
+diagnosis and retry. A read failure after headers have been sent terminates the
+stream with the status already sent.
 
 Local Django Tasks execution atomically claims a queued job for its expected
 task ID. Replayed, already running, terminal, or stale-task invocations return

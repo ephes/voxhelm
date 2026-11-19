@@ -14,6 +14,8 @@
 - Apply the same single-credential bearer policy during ASGI upload admission
   and producer authentication. Repeated or comma-joined Authorization fields
   keep the default body ceiling.
+- Check the opened filesystem or S3 artifact size against the recorded size
+  before streaming. Close mismatched readers and return HTTP 503.
 
 ## 0.1.15 (2026-11-18)
 
