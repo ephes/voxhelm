@@ -42,6 +42,15 @@ def install_native_read_barrier(monkeypatch, change):
                 first = handle.read(max(1, metadata.st_size // 2))
 
                 def write():
+                    if change == "replace":
+                        # Renaming the directory switches the pathname without
+                        # changing the open file's inode metadata.
+                        parent = native_path.parent
+                        parent.rename(parent.with_name("retired"))
+                        parent.mkdir()
+                        native_path.write_bytes(b'{"text":"after!"}')
+                        changed.append(native_path)
+                        return
                     raw = native_path.read_bytes()
                     if change == "rewrite":
                         raw = raw.replace(b"before", b"after!")

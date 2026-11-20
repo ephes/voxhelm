@@ -56,8 +56,10 @@ artifact publication. No models are needed for the synthetic admission tests.
 All shared native JSON reads (standalone, window and chapter-window inference,
 including remote workers) require unchanged descriptor identity, size, nanosecond
 mtime and ctime across the bounded read, with exactly the initially admitted byte
-length. A rewrite, truncation or growth during reading fails through the native
-output error boundary before parsing or transcript publication. A same-size
+length. After reading, a lookup without following symlinks must still identify
+the opened generation at the output pathname. Rewrites, truncation, growth
+and pathname replacement or removal fail through the native output error
+boundary before parsing or transcript publication. A same-size
 rewrite is detected through the mtime and ctime change, so it can go
 unnoticed only when it lands within one tick of the filesystem's timestamp
 resolution.

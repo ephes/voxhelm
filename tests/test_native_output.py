@@ -32,6 +32,16 @@ def test_stable_native_json_accepts_exact_limit(tmp_path):
     assert read_native_json(path, limit=len(raw)) == raw
 
 
+def test_native_json_refuses_replaced_path_with_stable_descriptor(tmp_path, monkeypatch):
+    path = tmp_path / "current" / "out.json"
+    path.parent.mkdir()
+    path.write_bytes(b'{"text":"before"}')
+    changed = install_native_read_barrier(monkeypatch, "replace")
+    with pytest.raises(RuntimeError, match="JSON output changed while being read"):
+        read_native_json(path, limit=1024)
+    assert changed == [path]
+
+
 @pytest.mark.parametrize("change", ["rewrite", "truncate"])
 def test_backend_refuses_changing_json(tmp_path, monkeypatch, settings, change):
     changed = install_native_read_barrier(monkeypatch, change)

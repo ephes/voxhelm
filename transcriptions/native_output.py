@@ -6,6 +6,16 @@ from pathlib import Path
 from stat import S_ISREG
 
 
+def _generation(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def read_native_json(path: Path, *, limit: int) -> bytes:
     """Read whisper.cpp's native JSON output, refusing files over ``limit`` bytes.
 
@@ -15,8 +25,9 @@ def read_native_json(path: Path, *, limit: int) -> bytes:
     bytes from that descriptor, so a file that grows after a size check cannot slip
     past the cap. Raises ``RuntimeError`` when over the cap and ``OSError`` when the
     file cannot be opened or read. Descriptor identity, size, mtime and ctime must
-    stay unchanged across the read, and the read must return the admitted size;
-    a changing or incomplete generation raises ``RuntimeError``.
+    stay unchanged across the read, the read must return the admitted size, and
+    the pathname must still name the opened generation without following links.
+    A changing or incomplete generation raises ``RuntimeError``.
     """
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC
     try:
@@ -40,18 +51,13 @@ def read_native_json(path: Path, *, limit: int) -> bytes:
             raise RuntimeError(
                 f"whisper.cpp JSON output exceeded the {limit // (1024 * 1024)} MiB window limit."
             )
-        if (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_mtime_ns,
-            metadata.st_ctime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ) or len(raw) != metadata.st_size:
+        generation = _generation(metadata)
+        if _generation(after) != generation or len(raw) != metadata.st_size:
+            raise RuntimeError("whisper.cpp JSON output changed while being read.")
+        try:
+            named = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError("whisper.cpp JSON output changed while being read.") from exc
+        if not S_ISREG(named.st_mode) or _generation(named) != generation:
             raise RuntimeError("whisper.cpp JSON output changed while being read.")
     return raw
