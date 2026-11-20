@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Return `not_claimed` when a local batch task loses its claim before the
+  final success update.
+
 - Count speaker track support in one pass without copying frames.
 
 - Normalize the probe once per known-speaker classification.

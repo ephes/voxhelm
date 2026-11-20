@@ -10,6 +10,7 @@ from jobs import services
 from jobs.artifacts import get_artifact_store
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion
+from synthesis.service import SynthesisResult
 from tests.test_remote_worker_cli import sample_transcription_result
 
 
@@ -82,12 +83,72 @@ def test_local_reentrant_invocation_runs_inference_and_input_once(monkeypatch, t
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("job_type", [Job.JobType.TRANSCRIBE, Job.JobType.SYNTHESIZE])
+@pytest.mark.parametrize("retire", ["cancel", "delete"])
+def test_local_task_returns_no_receipt_after_claim_is_retired(
+    monkeypatch, tmp_path, job_type, retire
+):
+    job = Job.objects.create(
+        producer="synthetic",
+        job_type=job_type,
+        input_data={"text": "Synthetic speech"},
+        output_data={"formats": ["text" if job_type == Job.JobType.TRANSCRIBE else "wav"]},
+    )
+    job_id = str(job.id)
+    media = tmp_path / "synthetic.wav"
+    media.write_bytes(b"synthetic media")
+
+    if job_type == Job.JobType.TRANSCRIBE:
+        execute = services.execute_transcription_job
+        monkeypatch.setattr(
+            services,
+            "prepare_transcription_input_media",
+            lambda **kwargs: (DownloadedMedia(path=media, content_type="audio/wav"), None),
+        )
+        monkeypatch.setattr(
+            services, "transcribe_audio", lambda *args: sample_transcription_result()
+        )
+    else:
+        execute = services.execute_synthesis_job
+        monkeypatch.setattr(
+            services,
+            "synthesize_text",
+            lambda *args: SynthesisResult(media, "fake", "fake", "test", "en", 16000, 2, 1, 1.0),
+        )
+
+    publish_success = services.mark_job_succeeded
+
+    def retire_before_update(**kwargs):
+        running = Job.objects.filter(pk=job_id, state=Job.State.RUNNING)
+        assert running.exists()
+        if retire == "cancel":
+            running.update(state=Job.State.CANCELED, result_metadata={"keep": True})
+        else:
+            running.delete()
+        return publish_success(**kwargs)
+
+    monkeypatch.setattr(services, "mark_job_succeeded", retire_before_update)
+    receipt = execute(job_id=job_id, task_result_id="expected")
+    assert receipt == {"job_id": job_id, "execution": "not_claimed"}
+    if retire == "cancel":
+        job.refresh_from_db()
+        assert job.state == Job.State.CANCELED
+        assert job.result_metadata == {"keep": True}
+        assert job.result_text == ""
+    else:
+        assert not Job.objects.filter(pk=job_id).exists()
+    assert not media.exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("finish", ["success", "failure"])
 def test_stale_local_task_cannot_publish_terminal_state(finish):
     job = make_job(state="running", django_task_id="old-task")
     Job.objects.filter(pk=job.pk).update(django_task_id="new-task", result_text="keep")
     if finish == "success":
-        services.mark_job_succeeded(job=job, metadata={"stale": True}, result_text="stale")
+        assert not services.mark_job_succeeded(
+            job=job, metadata={"stale": True}, result_text="stale"
+        )
     else:
         services.mark_job_failed(job=job, exc=ValueError("stale"))
     job.refresh_from_db()
@@ -103,7 +164,8 @@ def test_stale_local_task_cannot_publish_terminal_state(finish):
 def test_committed_success_survives_running_backend(monkeypatch):
     job = make_job(state="running", django_task_id="expected")
     stale = Job.objects.get(pk=job.pk)
-    services.mark_job_succeeded(job=job, metadata={"keep": True}, result_text="keep")
+    assert services.mark_job_succeeded(job=job, metadata={"keep": True}, result_text="keep")
+    job.refresh_from_db()
     monkeypatch.setattr(
         services,
         "default_task_backend",

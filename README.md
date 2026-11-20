@@ -699,6 +699,8 @@ task ID. Replayed, already running, terminal, or stale-task invocations return
 executor alone sets running/success states; backend polling can resolve failed
 unfinished tasks, but cannot revive terminal jobs or take the execution claim.
 Success, failure and artifact publication check the same task ownership.
+If the final success update no longer owns the row, local batch transcription
+and synthesis tasks return `execution: not_claimed` with the job ID.
 
 Local artifacts use fresh `jobs/<job-id>/allocation-<uuidhex>/<filename>` keys.
 The artifact row switches references in a database transaction, preserving the

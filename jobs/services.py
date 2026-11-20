@@ -403,6 +403,7 @@ def create_operator_sync_transcription(
         )
         persist_transcription_output_artifacts(job=job, result=result)
         mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
+        job.refresh_from_db()
     except Exception as exc:
         mark_job_failed(job=job, exc=exc)
         raise
@@ -1040,7 +1041,8 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
         if profile_run is not None:
             persist_profile_words_artifact(job=job, profile_run=profile_run)
             persist_profile_chapter_windows_artifact(job=job, profile_run=profile_run)
-        mark_job_succeeded(job=job, metadata=metadata, result_text=result.text)
+        if not mark_job_succeeded(job=job, metadata=metadata, result_text=result.text):
+            return {"job_id": job_id, "execution": "not_claimed"}
         if job.profile:
             # The task backend keeps the return value (django_tasks_db: DBTaskResult) beyond
             # the job's deletion; a profile transcript must only live in the job and its
@@ -1164,7 +1166,8 @@ def execute_synthesis_job(*, job_id: str, task_result_id: str) -> dict[str, Any]
             processing_seconds=round(monotonic() - started, 3),
         )
         persist_synthesis_output_artifacts(job=job, exports=exports)
-        mark_job_succeeded(job=job, metadata=metadata, result_text="")
+        if not mark_job_succeeded(job=job, metadata=metadata, result_text=""):
+            return {"job_id": job_id, "execution": "not_claimed"}
         return {"job_id": str(job.id), "metadata": metadata}
     except Exception as exc:
         mark_job_failed(job=job, exc=exc)
@@ -1204,16 +1207,16 @@ def local_execution_queryset(job: Job):
     )
 
 
-def mark_job_succeeded(*, job: Job, metadata: dict[str, Any], result_text: str) -> None:
+def mark_job_succeeded(*, job: Job, metadata: dict[str, Any], result_text: str) -> bool:
     now = timezone.now()
-    local_execution_queryset(job).update(
+    updated = local_execution_queryset(job).update(
         state=Job.State.SUCCEEDED,
         result_text=result_text,
         result_metadata=metadata,
         finished_at=now,
         updated_at=now,
     )
-    job.refresh_from_db()
+    return updated == 1
 
 
 def mark_job_failed(*, job: Job, exc: Exception) -> None:
