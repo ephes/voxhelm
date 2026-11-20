@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import wave
 from pathlib import Path
 
@@ -65,7 +66,14 @@ def test_wav_summary_rejects_a_directory(tmp_path):
     path = tmp_path / "directory.wav"
     path.mkdir()
 
-    assert summarize_audio_file(path).keys() == {"suffix", "stat_error"}
+    assert summarize_audio_file(path) == {"suffix": ".wav", "stat_error": "io_error"}
+
+
+def test_wav_summary_rejects_a_fifo_without_blocking(tmp_path):
+    path = tmp_path / "pipe.wav"
+    os.mkfifo(path)
+
+    assert summarize_audio_file(path) == {"suffix": ".wav", "stat_error": "not_regular_file"}
 
 
 @pytest.mark.parametrize("failure", ["stat", "open", "parse", "read"])
