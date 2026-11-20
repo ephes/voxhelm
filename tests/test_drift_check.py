@@ -229,6 +229,39 @@ def test_splice_keeps_order_across_several_windows_like_splice_py():
     assert [w["w"] for w in check.words if 30 <= w["s"] < 90] == ["Retry", "Wort."] * 2
 
 
+def test_ordered_clean_scan_reuses_words_without_splicing(monkeypatch):
+    words = [word(f"und {index}", float(index // 2)) for index in range(4096)]
+    original = words.copy()
+    indexed = 0
+    original_index = drift.window_index
+
+    def count_index(start, window_seconds):
+        nonlocal indexed
+        indexed += 1
+        return original_index(start, window_seconds)
+
+    monkeypatch.setattr(drift, "window_index", count_index)
+
+    check = run_drift_check(AUDIO, words, language="de")
+
+    assert indexed == len(words)
+    assert check.words is words
+    assert words == original
+    assert check.record["summary"]["accepted"] == 0
+
+
+def test_unordered_clean_scan_sorts_stably_without_mutating_input():
+    first = word("eins", 0.0)
+    tied_first = word("zwei", 30.0)
+    tied_second = word("drei", 30.0)
+    words = [tied_first, first, tied_second]
+
+    check = run_drift_check(AUDIO, words, language="de")
+
+    assert check.words == [first, tied_first, tied_second]
+    assert words == [tied_first, first, tied_second]
+
+
 @pytest.mark.parametrize(
     ("answer", "accepted"),
     [
@@ -707,7 +740,7 @@ def test_empty_or_unusable_retry_retains_original_words(retry_words):
         )
 
     check = run_drift_check(AUDIO, original, language="de", retry=retry)
-    assert check.words == original
+    assert check.words is original
     record = check.record["windows"][0]
     assert record["accepted"] is False
     assert record["rejection_reason"] == "empty_retry"

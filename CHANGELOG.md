@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Check cancellation during drift word grouping and unflagged window scans.
+- Reuse ordered drift words when no retry is accepted, retaining stable
+  start-time order.
 
 - Keep in-flight operator login reservations when unrelated cache writes evict
   cached failure counts.

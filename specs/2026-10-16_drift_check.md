@@ -57,7 +57,9 @@ profile).
    stay.
 6. Splice (`splice.py`): every Parakeet word starting in an accepted window
    is dropped, the retry's words are added, and the list is sorted by start
-   (stable). Retry words carry `c: null`.
+   (stable). Retry words carry `c: null`. If no retry is accepted and the words
+   are already ordered, the check reuses the original list. The profile
+   serializes the words without mutating the list.
 
 The check runs only for `language_hint` `de` (`DriftRule.languages`); for any
 other hint or none it does nothing and says so in its record.

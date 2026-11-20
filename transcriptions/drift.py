@@ -138,12 +138,27 @@ def grid_windows(
     cancel_event: threading.Event | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
     """Words by grid window of their start, in input order (``lib.py`` ``grid``)."""
+    grid, _ = _group_windows(words, window_seconds, cancel_event=cancel_event)
+    return grid
+
+
+def _group_windows(
+    words: list[dict[str, Any]],
+    window_seconds: float,
+    *,
+    cancel_event: threading.Event | None,
+) -> tuple[dict[int, list[dict[str, Any]]], bool]:
     grid: dict[int, list[dict[str, Any]]] = {}
+    ordered = True
+    previous_start = -math.inf
     for index, word in enumerate(words):
         if cancel_event is not None and index % 256 == 0:
             raise_if_cancelled(cancel_event)
-        grid.setdefault(window_index(word["s"], window_seconds), []).append(word)
-    return grid
+        start = word["s"]
+        ordered = ordered and previous_start <= start
+        previous_start = start
+        grid.setdefault(window_index(start, window_seconds), []).append(word)
+    return grid, ordered
 
 
 def splice_words(
@@ -156,6 +171,8 @@ def splice_words(
     The result is sorted by start; the sort is stable, so words with equal starts keep
     their order.
     """
+    if not replacements:
+        return sorted(words, key=lambda word: word["s"])
     kept = [word for word in words if window_index(word["s"], window_seconds) not in replacements]
     added = [word for index in sorted(replacements) for word in replacements[index]]
     spliced = kept + added
@@ -210,7 +227,8 @@ def run_drift_check(
     Retry words carry ``c: null`` (whisper's token probabilities are not Parakeet
     confidences). Raises what the retry raises (``BackendUnavailableError`` when the
     turbo runtime went away, ``RuntimeError`` on a failed window, ``InferenceCancelled``).
-    ``retry`` defaults to ``transcribe_window``.
+    ``retry`` defaults to ``transcribe_window``. When there are no accepted replacements,
+    the result may share the input list. Treat the words as read-only.
     """
     raise_if_cancelled(cancel_event)
     retry_window = retry or transcribe_window
@@ -237,7 +255,7 @@ def run_drift_check(
     records: list[dict[str, Any]] = []
     replacements: dict[int, list[dict[str, Any]]] = {}
     retry_seconds = 0.0
-    grid = grid_windows(words, rule.window_seconds, cancel_event=cancel_event)
+    grid, ordered = _group_windows(words, rule.window_seconds, cancel_event=cancel_event)
     raise_if_cancelled(cancel_event)
     for index, window_words in sorted(grid.items()):
         raise_if_cancelled(cancel_event)
@@ -293,7 +311,9 @@ def run_drift_check(
     summary["windows"] = len(records)
     summary["retry_seconds"] = round(retry_seconds, 3)
     return DriftCheck(
-        words=splice_words(words, replacements, rule.window_seconds),
+        words=words
+        if ordered and not replacements
+        else splice_words(words, replacements, rule.window_seconds),
         record={
             "rule": rule.rule,
             "checked": True,
