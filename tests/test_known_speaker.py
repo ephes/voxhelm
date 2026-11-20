@@ -13,6 +13,7 @@ from jobs.remote_workers import (
     KNOWN_SPEAKER_SUMMARY_STRING_KEYS,
 )
 from jobs.services import job_wants_word_timestamps, parse_diarization_option
+from transcriptions import known_speaker
 from transcriptions.diarization import SpeakerTurn
 from transcriptions.errors import ApiError
 from transcriptions.known_speaker import (
@@ -117,6 +118,37 @@ def test_classify_embedding_picks_nearest_centroid_with_margin() -> None:
     assert classification.candidates[0].speaker == "Johannes"
     assert classification.candidates[1].speaker == "Dominik"
     assert classification.margin > 0
+
+
+@pytest.mark.parametrize("scale", [0.0, 1.0, 1e308, 1e-308])
+def test_classify_embedding_normalizes_probe_once(monkeypatch, scale: float) -> None:
+    probe = [scale, -scale]
+    centroids = {f"Speaker {index:02d}": [float(index % 4), 1.0] for index in range(24)}
+    expected = sorted(
+        ((name, cosine_similarity(probe, centroid)) for name, centroid in centroids.items()),
+        key=lambda pair: (-pair[1], pair[0]),
+    )
+    normalize = known_speaker.l2_normalize
+    probe_calls = 0
+
+    def count_normalize(vector):
+        nonlocal probe_calls
+        if vector is probe:
+            probe_calls += 1
+        return normalize(vector)
+
+    monkeypatch.setattr(known_speaker, "l2_normalize", count_normalize)
+    classification = classify_embedding(probe, centroids)
+
+    assert [
+        (candidate.speaker, candidate.similarity) for candidate in classification.candidates
+    ] == expected
+    assert probe_calls == 1
+
+
+def test_classify_embedding_rejects_mismatched_dimensions() -> None:
+    with pytest.raises(KnownSpeakerConfigurationError, match="different dimensions"):
+        classify_embedding([1.0, 0.0], {"Alpha": [1.0, 0.0], "Bravo": [1.0]})
 
 
 def test_classify_embedding_ties_break_on_speaker_name() -> None:

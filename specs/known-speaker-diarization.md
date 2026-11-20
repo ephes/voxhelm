@@ -266,6 +266,10 @@ candidate list for review. The
 sidecar is a suggestion: it never writes the public transcript artifacts. Raw
 anonymous pyannote labels are preserved per segment for audit and remapping.
 
+Each classification normalizes the probe embedding once and reuses it across
+centroid scores. Cosine scores use finite, equal-dimensional vectors, and ties
+are ordered by speaker name.
+
 ### Mixed-segment veto
 
 One embedding per segment hides a second voice: a segment that holds a short

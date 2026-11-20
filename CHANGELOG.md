@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Normalize the probe once per known-speaker classification.
+
 - Give a single ASGI stream traversal exclusive ownership of the reader and its
   cleanup.
 - Validate maintenance cursor overrides and batch sizes before creating shared

@@ -393,9 +393,11 @@ def average_vectors(vectors: Sequence[Sequence[float]]) -> list[float]:
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right):
         raise KnownSpeakerConfigurationError("Cannot compare embeddings of different dimensions.")
-    left_unit = l2_normalize(left)
-    right_unit = l2_normalize(right)
-    return max(-1.0, min(1.0, math.fsum(a * b for a, b in zip(left_unit, right_unit, strict=True))))
+    return _unit_dot_product(l2_normalize(left), l2_normalize(right))
+
+
+def _unit_dot_product(left: Sequence[float], right: Sequence[float]) -> float:
+    return max(-1.0, min(1.0, math.fsum(a * b for a, b in zip(left, right, strict=True))))
 
 
 def build_centroid(embeddings: Sequence[Sequence[float]]) -> list[float]:
@@ -409,10 +411,13 @@ def classify_embedding(
 ) -> SegmentClassification:
     if not centroids:
         raise KnownSpeakerConfigurationError("Cannot classify without speaker centroids.")
-    scored = [
-        SpeakerCandidate(speaker=name, similarity=cosine_similarity(embedding, centroid))
-        for name, centroid in centroids.items()
-    ]
+    probe_unit = l2_normalize(embedding)
+    scored = []
+    for name, centroid in centroids.items():
+        if len(probe_unit) != len(centroid):
+            raise KnownSpeakerConfigurationError("Cannot compare embeddings of different dimensions.")
+        similarity = _unit_dot_product(probe_unit, l2_normalize(centroid))
+        scored.append(SpeakerCandidate(speaker=name, similarity=similarity))
     # Stable: highest similarity first, then speaker name for deterministic ties.
     scored.sort(key=lambda candidate: (-candidate.similarity, candidate.speaker))
     top = scored[0]
