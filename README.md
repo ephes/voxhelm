@@ -565,8 +565,9 @@ ingress, which forwards `X-Forwarded-Proto: https`.
   proxy's address bucket; `X-Forwarded-For` is deliberately not trusted because
   the backend port is also reachable directly. Reservations live in the single
   uvicorn process, and completed failure counts live in the default Django
-  cache. Cache eviction can clear completed failure counts. The admission
-  guarantee applies within one server process.
+  cache. A restart clears reservations and, with the default local-memory
+  cache, failure counts; cache eviction can also clear completed failure
+  counts. The admission guarantee applies within one server process.
 - **Private responses:** producer job submission/status/results, staging and
   artifact responses send `Cache-Control: private, no-store` (plus Django's
   never-cache directives) and `Vary: Authorization`, including errors. Operator
