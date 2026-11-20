@@ -69,7 +69,9 @@ runtime (`whisper-cli`, the turbo model with the pinned SHA-256) before
 Parakeet runs, then runs Parakeet, builds the words, and runs the drift check
 on them, all inside the lane admission the caller already holds (local Django
 Tasks worker or `process_claim` on a remote worker). Each flagged window
-starts one `whisper-cli` (D-27); windows run one after another.
+starts one `whisper-cli` (D-27); windows run one after another. Cancellation
+raises `InferenceCancelled` at entry, during word grouping (checked every 256
+words), before evaluating each window and before each model retry.
 
 No silent skip:
 

@@ -132,11 +132,16 @@ def window_index(start: float, window_seconds: float) -> int:
 
 
 def grid_windows(
-    words: list[dict[str, Any]], window_seconds: float
+    words: list[dict[str, Any]],
+    window_seconds: float,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
     """Words by grid window of their start, in input order (``lib.py`` ``grid``)."""
     grid: dict[int, list[dict[str, Any]]] = {}
-    for word in words:
+    for index, word in enumerate(words):
+        if cancel_event is not None and index % 256 == 0:
+            raise_if_cancelled(cancel_event)
         grid.setdefault(window_index(word["s"], window_seconds), []).append(word)
     return grid
 
@@ -207,6 +212,7 @@ def run_drift_check(
     turbo runtime went away, ``RuntimeError`` on a failed window, ``InferenceCancelled``).
     ``retry`` defaults to ``transcribe_window``.
     """
+    raise_if_cancelled(cancel_event)
     retry_window = retry or transcribe_window
     if language not in rule.languages:
         checked = ", ".join(rule.languages)
@@ -231,7 +237,10 @@ def run_drift_check(
     records: list[dict[str, Any]] = []
     replacements: dict[int, list[dict[str, Any]]] = {}
     retry_seconds = 0.0
-    for index, window_words in sorted(grid_windows(words, rule.window_seconds).items()):
+    grid = grid_windows(words, rule.window_seconds, cancel_event=cancel_event)
+    raise_if_cancelled(cancel_event)
+    for index, window_words in sorted(grid.items()):
+        raise_if_cancelled(cancel_event)
         english, german = count_function_words([word["w"] for word in window_words])
         flagged = rule.flags(english, german)
         record: dict[str, Any] = {

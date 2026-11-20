@@ -339,6 +339,45 @@ def test_cancellation_before_and_between_windows():
     assert retry.events == [cancel]  # the retry itself gets the event
 
 
+def test_cancellation_during_grouping_stops_unflagged_words(monkeypatch):
+    cancel = threading.Event()
+    words = [word("und", float(index)) for index in range(4096)]
+    indexed = 0
+    original_index = drift.window_index
+
+    def cancel_midway(start, window_seconds):
+        nonlocal indexed
+        indexed += 1
+        if indexed == 17:
+            cancel.set()
+        return original_index(start, window_seconds)
+
+    monkeypatch.setattr(drift, "window_index", cancel_midway)
+    retry = FakeRetry()
+    with pytest.raises(InferenceCancelled):
+        run_drift_check(AUDIO, words, language="de", retry=retry, cancel_event=cancel)
+    assert indexed <= 17 + 256
+    assert retry.calls == []
+
+
+def test_cancellation_during_evaluation_stops_unflagged_windows(monkeypatch):
+    cancel = threading.Event()
+    words = [word("und", float(index * 30)) for index in range(300)]
+    evaluated = 0
+    original_count = drift.count_function_words
+
+    def cancel_in_first_window(texts):
+        nonlocal evaluated
+        evaluated += 1
+        cancel.set()
+        return original_count(texts)
+
+    monkeypatch.setattr(drift, "count_function_words", cancel_in_first_window)
+    with pytest.raises(InferenceCancelled):
+        run_drift_check(AUDIO, words, language="de", cancel_event=cancel)
+    assert evaluated == 1
+
+
 # --- through the profile (fake Parakeet CLI, real transcribe_window, fake whisper-cli) ---------
 
 

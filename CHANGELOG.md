@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Check cancellation during drift word grouping and unflagged window scans.
+
 - Keep in-flight operator login reservations when unrelated cache writes evict
   cached failure counts.
 - Refuse native transcript output when its pathname no longer names the opened
