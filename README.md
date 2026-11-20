@@ -1794,7 +1794,10 @@ does not invoke ffmpeg or use this deadline.
   need operator recovery; on platforms that refuse unlinking open files the export
   may remain until removed after the response closes. A returned response owns its
   handle until closure. If response construction or header assignment fails, the
-  endpoint closes the reader; a secondary close failure adds only a fixed warning.
+  endpoint closes the reader. A secondary close failure attempts a fixed
+  warning. If the logging sink fails, the original response setup, read or
+  cancellation error still propagates. A close failure on its own still fails
+  ASGI iteration.
 - A Piper voice whose `.onnx.json` config cannot be read or parsed is skipped
   with a logged warning; other installed voices stay available.
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve the primary streaming reader error when close and cleanup logging
+  both fail.
+
 - Normalize VTT, DOTe and Podlove cues as they are rendered after full timestamp
   validation, avoiding an intermediate list of cue wrappers.
 - Check cancellation during drift word grouping and unflagged window scans.

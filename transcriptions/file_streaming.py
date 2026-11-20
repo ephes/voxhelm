@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from threading import Lock
 from typing import BinaryIO
 
@@ -21,7 +22,9 @@ def _close_reader(reader: BinaryIO, *, preserve_error: bool) -> None:
     except BaseException:
         if not preserve_error:
             raise
-        _LOGGER.warning("Reader cleanup failed; operator recovery may be needed.")
+        # A failing diagnostic must also leave the primary error in control.
+        with suppress(BaseException):
+            _LOGGER.warning("Reader cleanup failed; operator recovery may be needed.")
 
 
 class AsyncReaderStream:

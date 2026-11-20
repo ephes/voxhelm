@@ -63,7 +63,8 @@ def test_response_construction_failure_closes_once(monkeypatch, asgi, stage, clo
 
 
 @pytest.mark.parametrize("read_fails", [False, True])
-def test_async_read_and_close_failure_preserve_primary(caplog, read_fails):
+@pytest.mark.parametrize("log_fails", [False, True])
+def test_async_read_and_close_failure_preserve_primary(caplog, monkeypatch, read_fails, log_fails):
     primary = OSError("synthetic read")
     secondary = OSError("private close diagnostic")
     calls = []
@@ -79,6 +80,14 @@ def test_async_read_and_close_failure_preserve_primary(caplog, read_fails):
             super().close()
             raise secondary
 
+    if log_fails:
+
+        def fail_warning(message):
+            calls.append("warning")
+            raise RuntimeError("synthetic logging failure")
+
+        monkeypatch.setattr(file_streaming._LOGGER, "warning", fail_warning)
+
     stream = file_streaming.AsyncReaderStream(Reader())
 
     async def consume():
@@ -88,9 +97,9 @@ def test_async_read_and_close_failure_preserve_primary(caplog, read_fails):
         asyncio.run(consume())
     assert caught.value is (primary if read_fails else secondary)
     stream.close()
-    assert calls == ["close"]
+    assert calls == (["close", "warning"] if read_fails and log_fails else ["close"])
     assert "private close diagnostic" not in caplog.text
-    if read_fails:
+    if read_fails and not log_fails:
         assert "Reader cleanup failed" in caplog.text
 
 
