@@ -33,6 +33,7 @@ class AsyncReaderStream:
     def __init__(self, reader: BinaryIO) -> None:
         self.reader = reader
         self.lock = Lock()
+        self.claimed = False
         self.reading = False
         self.closed = False
 
@@ -62,6 +63,13 @@ class AsyncReaderStream:
                     _close_reader(self.reader, preserve_error=True)
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        with self.lock:
+            if self.closed:
+                return
+            if self.claimed:
+                raise RuntimeError("Reader stream is already being consumed.")
+            self.claimed = True
+
         # Track this iterator's own failure explicitly: sys.exception() in a finally
         # block would also report an unrelated exception a caller is handling.
         primary: BaseException | None = None

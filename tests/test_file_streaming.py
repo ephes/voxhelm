@@ -164,6 +164,42 @@ def test_cancelled_read_defers_failing_close_and_preserves_worker_error(caplog, 
     assert "private close diagnostic" not in caplog.text
 
 
+def test_second_traversal_cannot_read_or_close_owned_reader():
+    started, release = Event(), Event()
+    calls = []
+
+    class Reader(io.BytesIO):
+        def read(self, size=-1):
+            calls.append("read")
+            if started.is_set():
+                return b""
+            started.set()
+            assert release.wait(5)
+            calls.append("read settled")
+            return b""
+
+        def close(self):
+            calls.append("close")
+            super().close()
+
+    stream = file_streaming.AsyncReaderStream(Reader())
+
+    async def consume():
+        owner = asyncio.create_task(anext(aiter(stream), None))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            with pytest.raises(RuntimeError, match="already being consumed"):
+                await anext(aiter(stream), None)
+            assert calls == ["read"]
+        finally:
+            release.set()
+            assert await owner is None
+        stream.close()
+
+    asyncio.run(consume())
+    assert calls == ["read", "read settled", "close"]
+
+
 def test_close_inside_caller_handled_exception_still_reports_close_failure(caplog):
     secondary = OSError("private close diagnostic")
 

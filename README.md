@@ -303,7 +303,9 @@ receive fingerprints. The entire upgrade rolls back on failure.
 
 ## Download and publication failure ownership
 
-ASGI artifact downloads read at most 64 KiB at a time. On disconnect, cancellation
+ASGI artifact downloads read at most 64 KiB at a time. The first traversal owns
+the reader. A concurrent traversal of the reader stream raises `RuntimeError`
+before reading or taking over cleanup. On disconnect, cancellation
 propagates immediately, while the active worker retains the reader until its read
 settles and closes it exactly once. Response closure also handles streams that
 never started. Reader ownership starts before response/header construction: a
