@@ -701,6 +701,10 @@ unfinished tasks, but cannot revive terminal jobs or take the execution claim.
 Success, failure and artifact publication check the same task ownership.
 If the final success update no longer owns the row, local batch transcription
 and synthesis tasks return `execution: not_claimed` with the job ID.
+On exit, a local transcription task independently tries to remove its
+temporary input and extracted audio and to retire any remaining staged upload.
+Cleanup errors preserve the task outcome. Warnings identify only the failed
+cleanup stage.
 
 Local artifacts use fresh `jobs/<job-id>/allocation-<uuidhex>/<filename>` keys.
 The artifact row switches references in a database transaction, preserving the

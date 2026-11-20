@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -105,6 +107,8 @@ from transcriptions.service import (
     render_vtt,
     transcribe_audio,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 PRIORITY_TO_TASK_PRIORITY = {
     Job.Priority.LOW: -10,
@@ -1053,15 +1057,26 @@ def execute_transcription_job(*, job_id: str, task_result_id: str) -> dict[str, 
         mark_job_failed(job=job, exc=exc)
         raise
     finally:
-        if media is not None:
-            media.path.unlink(missing_ok=True)
-        if extracted_audio_path is not None:
-            extracted_audio_path.unlink(missing_ok=True)
+        for path, stage in (
+            (media.path if media is not None else None, "input media"),
+            (extracted_audio_path, "extracted audio"),
+        ):
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    _warn_local_transcription_cleanup(stage)
         if staged_media is not None:
             try:
-                delete_staged_media(staged=staged_media, missing_ok=True)
+                delete_staged_media(staged=staged_media, missing_ok=False)
             except Exception:
-                pass
+                _warn_local_transcription_cleanup("staged media")
+
+
+def _warn_local_transcription_cleanup(stage: str) -> None:
+    # A failing log sink must not replace the outcome or interrupt cleanup.
+    with suppress(Exception):
+        _LOGGER.warning("Local transcription cleanup failed for %s.", stage)
 
 
 def run_profile_for_job(*, job: Job, audio_path: Path) -> ProfileTranscription:

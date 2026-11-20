@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -138,6 +139,82 @@ def test_local_task_returns_no_receipt_after_claim_is_retired(
     else:
         assert not Job.objects.filter(pk=job_id).exists()
     assert not media.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", ["success", "inference_failure", "input_failure"])
+def test_local_transcription_cleanup_preserves_outcome(monkeypatch, tmp_path, caplog, outcome):
+    job = make_job(django_task_id="expected", output_data={"formats": ["text"]})
+    source = tmp_path / "synthetic.mp4"
+    extracted = tmp_path / "extracted.wav"
+    source.write_bytes(b"synthetic video")
+    extracted.write_bytes(b"synthetic audio")
+    staged = SimpleNamespace()
+    cleanup_order = []
+    primary = RuntimeError("synthetic primary failure")
+    unlink = Path.unlink
+
+    def unlink_with_failure(path, *, missing_ok=False):
+        if path == source:
+            cleanup_order.append("input")
+            raise PermissionError("private input path")
+        if path == extracted:
+            cleanup_order.append("extracted")
+        return unlink(path, missing_ok=missing_ok)
+
+    def retire_staged(*, staged, missing_ok):
+        cleanup_order.append("staged")
+
+    def fail_input(**kwargs):
+        raise primary
+
+    def infer(*args):
+        if outcome == "inference_failure":
+            raise primary
+        return sample_transcription_result()
+
+    def execute():
+        return services.execute_transcription_job(job_id=str(job.id), task_result_id="expected")
+
+    monkeypatch.setattr(Path, "unlink", unlink_with_failure)
+    monkeypatch.setattr(
+        services,
+        "prepare_transcription_input_media",
+        lambda **kwargs: (
+            DownloadedMedia(path=source, content_type="video/mp4"),
+            staged if outcome == "input_failure" else None,
+        ),
+    )
+    monkeypatch.setattr(services, "extract_audio_from_video", lambda **kwargs: extracted)
+    monkeypatch.setattr(services, "delete_staged_media", retire_staged)
+    monkeypatch.setattr(services, "transcribe_audio", infer)
+
+    if outcome == "input_failure":
+        monkeypatch.setattr(services, "store_job_input_artifact", fail_input)
+    if outcome == "success":
+        receipt = execute()
+        job.refresh_from_db()
+        assert job.state == Job.State.SUCCEEDED
+        assert receipt == {
+            "job_id": str(job.id),
+            "text": job.result_text,
+            "metadata": job.result_metadata,
+        }
+    else:
+        with pytest.raises(RuntimeError) as exc_info:
+            execute()
+        assert exc_info.value is primary
+        job.refresh_from_db()
+        assert job.state == Job.State.FAILED
+        assert job.error_detail == str(primary)
+
+    if outcome == "input_failure":
+        assert cleanup_order == ["input", "staged"]
+    else:
+        assert cleanup_order == ["input", "extracted"]
+        assert not extracted.exists()
+    assert "Local transcription cleanup failed for input media." in caplog.messages
+    assert "private input path" not in caplog.text
 
 
 @pytest.mark.django_db

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve local transcription outcomes when cleanup fails and continue
+  cleaning the remaining resources.
+
 - Return `not_claimed` when a local batch task loses its claim before the
   final success update.
 
