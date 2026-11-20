@@ -415,7 +415,9 @@ def classify_embedding(
     scored = []
     for name, centroid in centroids.items():
         if len(probe_unit) != len(centroid):
-            raise KnownSpeakerConfigurationError("Cannot compare embeddings of different dimensions.")
+            raise KnownSpeakerConfigurationError(
+                "Cannot compare embeddings of different dimensions."
+            )
         similarity = _unit_dot_product(probe_unit, l2_normalize(centroid))
         scored.append(SpeakerCandidate(speaker=name, similarity=similarity))
     # Stable: highest similarity first, then speaker name for deterministic ties.
@@ -1083,13 +1085,21 @@ def track_speaker_for_segment(
         return None
     if duration > 2 * TRACK_EDGE_SECONDS:
         start, end = start + TRACK_EDGE_SECONDS, end - TRACK_EDGE_SECONDS
-    inside = frames[bisect_left(centers, start) : bisect_right(centers, end)]
-    clear = [frame for frame in inside if frame.clear]
-    if not clear or any(frame.speaker != clear[0].speaker for frame in clear):
+    first = bisect_left(centers, start)
+    stop = min(bisect_right(centers, end), len(frames))
+    speaker = None
+    clear_count = 0
+    for index in range(first, stop):
+        frame = frames[index]
+        if not frame.clear:
+            continue
+        if speaker is not None and frame.speaker != speaker:
+            return None
+        speaker = frame.speaker
+        clear_count += 1
+    if duration >= TRACK_SHARE_MIN_SECONDS and clear_count < TRACK_MIN_CLEAR_SHARE * (stop - first):
         return None
-    if duration >= TRACK_SHARE_MIN_SECONDS and len(clear) < TRACK_MIN_CLEAR_SHARE * len(inside):
-        return None
-    return clear[0].speaker
+    return speaker
 
 
 def raw_turn_overlaps(

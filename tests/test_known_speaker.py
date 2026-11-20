@@ -106,6 +106,33 @@ def test_cosine_similarity_rejects_mismatched_dimensions() -> None:
         cosine_similarity([1.0], [1.0, 2.0])
 
 
+@pytest.mark.parametrize(
+    "end, centers, clear_speakers, expected",
+    [
+        # Both trimmed edges are inclusive; clear frames outside are irrelevant.
+        (2.0, [0.39, 0.4, 1.6, 1.61], ["Bravo", "Alpha", "Alpha", "Bravo"], "Alpha"),
+        (2.0, [0.4, 1.6], ["Alpha", "Bravo"], None),
+        (0.8, [0.0, 0.8], ["Alpha", None], "Alpha"),
+        (2.0, [0.4, 1.6], [None, None], None),
+        (2.0, [0.39, 1.61], ["Alpha", "Alpha"], None),
+        (2.5, [0.5 + index / 10 for index in range(10)], ["Alpha"] * 3 + [None] * 7, "Alpha"),
+        (2.5, [0.5 + index / 10 for index in range(10)], ["Alpha"] * 2 + [None] * 8, None),
+        (2.49, [0.5 + index / 10 for index in range(10)], ["Alpha"] * 2 + [None] * 8, "Alpha"),
+    ],
+)
+def test_track_support_counts_frames_without_slicing(end, centers, clear_speakers, expected):
+    class UnsliceableFrames(list[TrackFrame]):
+        def __getitem__(self, index):
+            assert not isinstance(index, slice)
+            return super().__getitem__(index)
+
+    frames = UnsliceableFrames(
+        TrackFrame(center, speaker or "Bravo", 0.8, 0.2, speaker is not None)
+        for center, speaker in zip(centers, clear_speakers, strict=True)
+    )
+    assert known_speaker.track_speaker_for_segment(0.0, end, frames, centers) == expected
+
+
 def test_build_centroid_normalizes_average() -> None:
     centroid = build_centroid([[2.0, 0.0], [0.0, 0.0]])
     assert centroid == pytest.approx([1.0, 0.0])

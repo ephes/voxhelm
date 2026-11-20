@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Count speaker track support in one pass without copying frames.
+
 - Normalize the probe once per known-speaker classification.
 
 - Give a single ASGI stream traversal exclusive ownership of the reader and its

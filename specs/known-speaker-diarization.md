@@ -377,7 +377,9 @@ track only compares against the known references, and a guest's voice can
 resemble a host's. The track supports a speaker when: every clear
 frame centred inside the segment (0.4 s in from each edge when it is longer
 than 0.8 s) names the same speaker, there is at least one such frame, and for
-segments of 2.5 s and more at least 30% of the frames are clear. This is not
+segments of 2.5 s and more at least 30% of the frames are clear. The lookup
+counts directly between the inclusive centre bounds and stops when two clear
+frames name different speakers. This is not
 applied when the segment is at least `min_segment_duration` long and its own
 embedding names another speaker with `margin >= auto_accept_margin`. The
 mixed-segment veto runs against the track's speaker first; if it finds a
