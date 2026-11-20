@@ -746,9 +746,12 @@ phases (artifacts, pending deletions, attempt prefixes, staged uploads, job meta
 plus one lookahead row per phase. Results are bounded to this batch. The command saves the cursor in the database automatically, including on reported
 storage failures, so existing scheduled invocations resume without new arguments.
 An exhausted sweep resets to `{}` to retry failures/refusals and pick up rows inserted
-behind the cursor. `--cursor '<json>'` overrides the saved starting point; `{}` restarts
-a sweep. Cursor publication uses a generation compare-and-swap: overlapping runs
-may repeat deletion checks, but a stale run cannot overwrite a newer continuation.
+behind the cursor. `--cursor '<json>'` accepts a JSON object that overrides the
+saved starting point. Use `{}` to restart a sweep. The command validates the
+cursor override and positive integer batch size before creating or updating
+shared progress. Cursor publication uses a generation compare-and-swap:
+overlapping runs may repeat deletion checks, but a stale run cannot overwrite a
+newer continuation.
 It reports that its continuation was not saved; retry without `--cursor` to use the
 current saved progress. No cursor lock spans storage calls.
 A dry run starts at `{}`, uses the same limits and never updates saved progress; its cursor is for preview only. Do not pass a dry-run

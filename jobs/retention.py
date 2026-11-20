@@ -484,7 +484,7 @@ def delete_profile_task_results(jobs: Iterable[Job]) -> None:
         DBTaskResult.objects.filter(id__in=task_ids).delete()
 
 
-def validate_prune_cursor(cursor: dict[str, str | None]) -> None:
+def validate_prune_cursor(cursor: object) -> None:
     fields = {
         "artifacts": JobArtifact,
         "pending": PendingArtifactDeletion,
@@ -504,6 +504,12 @@ def validate_prune_cursor(cursor: dict[str, str | None]) -> None:
                 raise ValueError(f"Invalid retention cursor for {phase}.") from exc
 
 
+def validate_prune_options(*, batch_size: int, cursor: object) -> None:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("Batch size must be a positive integer.")
+    validate_prune_cursor(cursor)
+
+
 def prune_job_artifacts(
     *,
     now: datetime | None = None,
@@ -516,12 +522,10 @@ def prune_job_artifacts(
     A failed object deletion keeps the row so the next run retries it. Pending
     deletions queued by remote completions are drained as well.
     """
-    result = PruneResult()
-    if batch_size < 1:
-        raise ValueError("Batch size must be positive.")
-    now = now or timezone.now()
     cursor = cursor if cursor is not None else {}
-    validate_prune_cursor(cursor)
+    validate_prune_options(batch_size=batch_size, cursor=cursor)
+    result = PruneResult()
+    now = now or timezone.now()
 
     def batch(query, phase):
         # None marks a phase exhausted in this sweep. Advance even after failure;

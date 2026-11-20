@@ -4,6 +4,8 @@
 
 - Give a single ASGI stream traversal exclusive ownership of the reader and its
   cleanup.
+- Validate maintenance cursor overrides and batch sizes before creating shared
+  artifact-retention progress.
 
 - Preserve the primary streaming reader error when close and cleanup logging
   both fail.

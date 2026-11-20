@@ -7,7 +7,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import F
 
 from jobs.models import RetentionProgress
-from jobs.retention import prune_job_artifacts
+from jobs.retention import prune_job_artifacts, validate_prune_options
 
 
 class Command(BaseCommand):
@@ -31,7 +31,7 @@ class Command(BaseCommand):
             help="Maximum rows per phase (four phases plus job metadata).",
         )
         parser.add_argument(
-            "--cursor", help="Override the saved JSON cursor; dry runs start at {}."
+            "--cursor", help="Override the saved cursor with a JSON object; dry runs start at {}."
         )
         parser.add_argument(
             "--dry-run",
@@ -42,18 +42,17 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         del args
         dry_run = bool(options["dry_run"])
+        batch_size = options["batch_size"]
+        raw_cursor = options["cursor"]
         progress = None
-        if not dry_run:
-            progress, _ = RetentionProgress.objects.get_or_create(name="job-artifacts")
         try:
-            cursor = (
-                json.loads(options["cursor"])
-                if options["cursor"] is not None
-                else (progress.cursor if progress is not None else {})
-            )
-            result = prune_job_artifacts(
-                dry_run=dry_run, batch_size=options["batch_size"], cursor=cursor
-            )
+            cursor = json.loads(raw_cursor) if raw_cursor is not None else {}
+            validate_prune_options(batch_size=batch_size, cursor=cursor)
+            if not dry_run:
+                progress, _ = RetentionProgress.objects.get_or_create(name="job-artifacts")
+                if raw_cursor is None:
+                    cursor = progress.cursor
+            result = prune_job_artifacts(dry_run=dry_run, batch_size=batch_size, cursor=cursor)
         except (ValueError, TypeError) as exc:
             raise CommandError(str(exc)) from exc
         if not dry_run:

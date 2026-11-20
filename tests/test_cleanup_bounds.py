@@ -172,6 +172,29 @@ def test_all_maintenance_phases_are_bounded(settings):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--cursor", "{"), "Expecting property name"),
+        (("--cursor", '{"jobs": "broken"}'), "Invalid retention cursor for jobs"),
+        (("--cursor", "null"), "Invalid retention cursor"),
+        (("--batch-size", "0"), "Batch size must be"),
+        (("--batch-size", "-1"), "Batch size must be"),
+    ],
+)
+def test_command_rejects_invalid_options_before_creating_progress(args, message):
+    from io import StringIO
+
+    from django.core.management import CommandError, call_command
+
+    from jobs.models import RetentionProgress
+
+    with pytest.raises(CommandError, match=message):
+        call_command("prune_job_artifacts", *args, stdout=StringIO())
+    assert not RetentionProgress.objects.exists()
+
+
+@pytest.mark.django_db
 def test_command_persists_cursor_through_failures_and_validates_before_deleting(monkeypatch):
     from io import StringIO
     from uuid import uuid4
