@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from weakref import WeakSet
 
 import pytest
 
+from transcriptions import formats
+from transcriptions.errors import TranscriptionError
 from transcriptions.formats import escape_vtt_cue_text, render_vtt
 from transcriptions.service import TranscriptionResult, TranscriptionSegment
 
@@ -134,3 +137,64 @@ def test_text_only_timed_exports_have_one_millisecond_duration():
     assert render_podlove(result)["transcripts"][0]["end_ms"] == 1
     assert render_dote(result)["lines"][0]["endTime"] == "00:00:00,001"
     assert "00:00:00.000 --> 00:00:00.001" in render_vtt(result)
+
+
+@pytest.mark.parametrize("render", [render_vtt, formats.render_dote, formats.render_podlove])
+def test_timed_exports_keep_at_most_two_normalized_cues_alive(monkeypatch, render):
+    live: WeakSet[formats.SimpleSegment] = WeakSet()
+    peak = 0
+
+    class TrackedSegment(formats.SimpleSegment):
+        def __init__(self, **kwargs):
+            nonlocal peak
+            super().__init__(**kwargs)
+            live.add(self)
+            peak = max(peak, len(live))
+
+    monkeypatch.setattr(formats, "SimpleSegment", TrackedSegment)
+    text = "A" + " " * 4096 + "B"
+    result = _result(
+        *(
+            TranscriptionSegment(id=i, start=i, end=i + 1, text=text if i == 0 else "Cue")
+            for i in range(1024)
+        )
+    )
+
+    rendered = render(result)
+
+    if render is render_vtt:
+        payloads = _cue_payloads(rendered)
+        assert len(payloads) == 1024
+        assert payloads[0] == text
+    else:
+        cues = rendered["lines" if render is formats.render_dote else "transcripts"]
+        assert len(cues) == 1024
+        assert cues[0]["text"] == text
+    assert 0 < peak <= 2
+    assert not live
+
+
+@pytest.mark.parametrize("render", [render_vtt, formats.render_dote, formats.render_podlove])
+def test_timed_exports_validate_late_blank_cue_before_normalizing(monkeypatch, render):
+    def unexpected_cue(**kwargs):
+        pytest.fail("Built a cue before checking the whole transcript")
+
+    monkeypatch.setattr(formats, "SimpleSegment", unexpected_cue)
+    result = _result(
+        TranscriptionSegment(id=0, start=0, end=1, text="Cue"),
+        TranscriptionSegment(id=1, start=1, end=float("inf"), text=" "),
+    )
+
+    with pytest.raises(TranscriptionError, match="timestamps must be finite"):
+        render(result)
+
+
+def test_blank_segments_do_not_trigger_text_only_fallback():
+    result = _result(
+        TranscriptionSegment(id=0, start=0, end=1, text=" \n "),
+        text="Synthetic fallback",
+    )
+
+    assert render_vtt(result) == "WEBVTT\n"
+    assert formats.render_dote(result) == {"lines": []}
+    assert formats.render_podlove(result) == {"version": 1, "transcripts": []}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Normalize VTT, DOTe and Podlove cues as they are rendered after full timestamp
+  validation, avoiding an intermediate list of cue wrappers.
 - Check cancellation during drift word grouping and unflagged window scans.
 - Reuse ordered drift words when no retry is accepted, retaining stable
   start-time order.

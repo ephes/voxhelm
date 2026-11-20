@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from transcriptions.errors import TranscriptionError
@@ -58,7 +59,7 @@ def render_text(result: TranscriptionResult) -> str:
 
 def render_vtt(result: TranscriptionResult) -> str:
     lines = ["WEBVTT", ""]
-    for segment in normalized_segments(result):
+    for segment in _iter_normalized_segments(result):
         cue_text = escape_vtt_cue_text(segment.text)
         if not cue_text:
             continue
@@ -110,14 +111,14 @@ def render_dote(result: TranscriptionResult) -> dict[str, Any]:
                 "speakerDesignation": segment.speaker or "",
                 "text": segment.text,
             }
-            for segment in normalized_segments(result)
+            for segment in _iter_normalized_segments(result)
         ]
     }
 
 
 def render_podlove(result: TranscriptionResult) -> dict[str, Any]:
     transcripts = []
-    for segment in normalized_segments(result):
+    for segment in _iter_normalized_segments(result):
         transcripts.append(
             {
                 "start": format_milliseconds(segment.start_ms),
@@ -133,30 +134,24 @@ def render_podlove(result: TranscriptionResult) -> dict[str, Any]:
 
 
 def normalized_segments(result: TranscriptionResult) -> list[SegmentLike]:
+    """Return the validated, normalized cues as a list."""
+    return list(_iter_normalized_segments(result))
+
+
+def _iter_normalized_segments(result: TranscriptionResult) -> Iterator[SegmentLike]:
     validate_timestamps(result)
     if result.segments:
-        return [
-            SimpleSegment(
-                id=segment.id,
-                start=segment.start,
-                end=max(segment.start, segment.end),
-                text=segment.text,
-                speaker=segment.speaker,
-            )
-            for segment in result.segments
-            if segment.text.strip()
-        ]
-    if result.text.strip():
-        return [
-            SimpleSegment(
-                id=0,
-                start=0.0,
-                end=0.0,
-                text=result.text.strip(),
-                speaker=None,
-            )
-        ]
-    return []
+        for segment in result.segments:
+            if segment.text.strip():
+                yield SimpleSegment(
+                    id=segment.id,
+                    start=segment.start,
+                    end=max(segment.start, segment.end),
+                    text=segment.text,
+                    speaker=segment.speaker,
+                )
+    elif text := result.text.strip():
+        yield SimpleSegment(id=0, start=0.0, end=0.0, text=text, speaker=None)
 
 
 class SimpleSegment:
