@@ -1,9 +1,9 @@
 """Bound failed and in-flight operator logins within the single server process.
 
 Failures use fixed windows starting at the first completed failure. Pending
-password checks reserve capacity until settlement, even across window expiry.
-REMOTE_ADDR is trusted; forwarded addresses are deliberately ignored. Cache
-state and a process lock match the supported single-uvicorn-process scope.
+password checks reserve capacity until settlement, even across window expiry
+and cache eviction. REMOTE_ADDR is trusted; forwarded addresses are deliberately
+ignored. A process lock protects admission within the single uvicorn process.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.cache import cache
@@ -21,13 +21,13 @@ from django.http import HttpRequest
 
 KEY_PREFIX = "voxhelm:operator-login-admission"
 _LOCK = threading.Lock()
+_PENDING: dict[str, set[str]] = {}
 
 
 @dataclass
 class _Bucket:
     failures: int = 0
     expires_at: float = 0
-    pending: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -53,10 +53,7 @@ def _load(key: str, now: float) -> _Bucket:
 
 
 def _save(key: str, bucket: _Bucket, now: float) -> None:
-    if bucket.pending:
-        # A slow authentication cannot escape its reservation by outliving a window.
-        cache.set(key, bucket, timeout=None)
-    elif bucket.failures:
+    if bucket.failures:
         cache.set(key, bucket, timeout=max(1, math.ceil(bucket.expires_at - now)))
     else:
         cache.delete(key)
@@ -67,26 +64,32 @@ def reserve_attempt(request: HttpRequest, username: str) -> LoginReservation | N
     with _LOCK:
         now = time.time()
         keys = _keys(request, username)
-        buckets = [_load(key, now) for key in keys]
-        if any(b.failures + len(b.pending) >= settings.VOXHELM_LOGIN_MAX_FAILURES for b in buckets):
+        if any(
+            _load(key, now).failures + len(_PENDING.get(key, ()))
+            >= settings.VOXHELM_LOGIN_MAX_FAILURES
+            for key in keys
+        ):
             return None
         token = uuid.uuid4().hex
-        for key, bucket in zip(keys, buckets, strict=True):
-            bucket.pending.add(token)
-            _save(key, bucket, now)
+        for key in keys:
+            _PENDING.setdefault(key, set()).add(token)
         return LoginReservation(keys=keys, token=token)
 
 
 def settle_attempt(reservation: LoginReservation, *, success: bool) -> None:
     """Release only this reservation; success resets username failures only."""
     with _LOCK:
+        if any(reservation.token not in _PENDING.get(key, ()) for key in reservation.keys):
+            return
+        for key in reservation.keys:
+            pending = _PENDING[key]
+            pending.remove(reservation.token)
+            if not pending:
+                del _PENDING[key]
+
         now = time.time()
         for index, key in enumerate(reservation.keys):
             bucket = _load(key, now)
-            if reservation.token not in bucket.pending:
-                # An evicted/replaced cache entry must not be changed by an old attempt.
-                continue
-            bucket.pending.remove(reservation.token)
             if success:
                 if index == 1:
                     bucket.failures = 0

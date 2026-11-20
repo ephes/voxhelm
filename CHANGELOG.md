@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep in-flight operator login reservations when unrelated cache writes evict
+  cached failure counts.
 - Refuse native transcript output when its pathname no longer names the opened
   file generation after the bounded read.
 - Measure WAV size and format from the same open regular file in opt-in

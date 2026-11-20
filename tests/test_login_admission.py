@@ -5,6 +5,7 @@ from threading import Event
 from types import SimpleNamespace
 
 import pytest
+from django.core.cache import cache
 from django.test import Client, RequestFactory
 
 from operators import login_throttle
@@ -15,8 +16,19 @@ def request(address="192.0.2.1"):
 
 
 @pytest.mark.parametrize("same_username", [True, False])
-def test_login_admits_only_one_held_authenticator(settings, monkeypatch, same_username):
+@pytest.mark.parametrize("evict_cache", [False, True])
+def test_login_admits_only_one_held_authenticator(
+    settings, monkeypatch, same_username, evict_cache
+):
     settings.VOXHELM_LOGIN_MAX_FAILURES = 1
+    if evict_cache:
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "login-admission-eviction",
+                "OPTIONS": {"MAX_ENTRIES": 4, "CULL_FREQUENCY": 0},
+            }
+        }
     entered = Event()
     release = Event()
     calls = []
@@ -38,16 +50,20 @@ def test_login_admits_only_one_held_authenticator(settings, monkeypatch, same_us
         )
         try:
             assert entered.wait(5)
-            second = Client().post(
-                "/",
-                {"username": "synthetic" if same_username else "other", "password": "wrong"},
-                REMOTE_ADDR="192.0.2.2" if same_username else "192.0.2.1",
-            )
+            if evict_cache:
+                cache.set("unrelated-sentinel", True)
+                for index in range(4):
+                    cache.set(f"unrelated-{index}", True)
+                assert cache.get("unrelated-sentinel") is None
+            data = {"username": "synthetic" if same_username else "other", "password": "wrong"}
+            address = "192.0.2.2" if same_username else "192.0.2.1"
+            second = Client().post("/", data, REMOTE_ADDR=address)
             assert second.status_code == 429
             assert calls == ["synthetic"]
         finally:
             release.set()
         assert first.result(timeout=5).status_code == 200
+    assert Client().post("/", data, REMOTE_ADDR=address).status_code == 429
 
 
 def test_success_keeps_other_pending_guesses_and_address_failures(settings):
@@ -92,7 +108,9 @@ def test_window_expiry_does_not_drop_pending_or_let_old_settlement_clear_new_sta
     login_throttle.settle_attempt(held, success=True)
     assert login_throttle.reserve_attempt(request(), "synthetic") is None
     login_throttle.settle_attempt(fresh, success=True)
-    assert login_throttle.reserve_attempt(request(), "synthetic")
+    released = login_throttle.reserve_attempt(request(), "synthetic")
+    assert released
+    login_throttle.settle_attempt(released, success=True)
 
 
 def test_authenticator_exception_settles_reservation(settings, monkeypatch):

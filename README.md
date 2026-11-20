@@ -556,16 +556,17 @@ ingress, which forwards `X-Forwarded-Proto: https`.
   Admission reserves both budgets before authentication; exhausted budgets return
   HTTP 429 without checking a password. Failures expire after
   `VOXHELM_LOGIN_LOCKOUT_SECONDS` (default 900, starting at the first completed
-  failure). Pending checks keep their slots across expiry until they finish.
+  failure). Pending checks keep their slots until they finish, across both
+  expiry and cache eviction.
   Success clears username failures, preserves other pending checks and leaves
   address failures intact. Denials for inactive or non-staff accounts (including
   correct passwords) and authentication exceptions settle as failures too.
   The client address is `REMOTE_ADDR`, so behind Traefik all browsers share the
   proxy's address bucket; `X-Forwarded-For` is deliberately not trusted because
-  the backend port is also reachable directly. State lives in the default Django
-  cache and admission is serialized within one process, matching the single
-  uvicorn process. Restart or cache eviction clears state; a shared cache alone
-  does not extend this admission guarantee to multiple server processes.
+  the backend port is also reachable directly. Reservations live in the single
+  uvicorn process, and completed failure counts live in the default Django
+  cache. Cache eviction can clear completed failure counts. The admission
+  guarantee applies within one server process.
 - **Private responses:** producer job submission/status/results, staging and
   artifact responses send `Cache-Control: private, no-store` (plus Django's
   never-cache directives) and `Vary: Authorization`, including errors. Operator
