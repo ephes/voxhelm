@@ -16,6 +16,11 @@ The current slice also adds the first Voxhelm-owned operator UI:
 - transcript downloads for `text`, `json`, `vtt`, `dote`, and `podlove`
 - staged batch uploads for oversized/private/local audio via `POST /v1/uploads`
 
+The synchronous API, operator uploads and batch staging take ownership of their
+temporary copy only after it closes successfully. A failed copy attempts to
+remove the incomplete file. Secondary close or removal failures add fixed
+diagnostics to the original error.
+
 `whisper.cpp` inputs are normalized through `ffmpeg` to 16 kHz mono PCM WAV before
 inference so AAC/M4A and other container/codec quirks do not leak into the backend.
 The normalizer runs ffmpeg at error log level in its own process group: a 2 KiB

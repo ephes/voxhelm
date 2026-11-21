@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from jobs import media
 from jobs.media import extract_audio_from_video, write_uploaded_media_to_tempfile
+from transcriptions.input_media import write_upload_to_tempfile
 
 
 def test_extract_audio_from_video_handles_non_utf8_ffmpeg_stderr(tmp_path: Path, settings) -> None:
@@ -66,6 +68,74 @@ def test_write_uploaded_media_removes_tempfile_when_chunk_stream_fails(
 
     assert len(reserved_paths) == 1
     assert not reserved_paths[0].exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["chunks", "close", "both"])
+def test_sync_upload_removes_incomplete_copy(monkeypatch, tmp_path, reserved_paths, failure_stage):
+    chunk_error = ConnectionResetError("synthetic chunk failure")
+    close_error = OSError("synthetic buffered close failure")
+    real_open = Path.open
+    real_named_tempfile = tempfile.NamedTemporaryFile
+
+    class UploadHandle:
+        def __init__(self, handle):
+            self.handle = handle
+            self.name = handle.name
+            self.write = handle.write
+
+        def close(self):
+            self.handle.close()
+            if failure_stage != "chunks":
+                raise close_error
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self.close()
+
+    def open_upload(path, *args, **kwargs):
+        return UploadHandle(real_open(path, *args, **kwargs))
+
+    def open_named_upload(**kwargs):
+        return UploadHandle(real_named_tempfile(dir=tmp_path, **kwargs))
+
+    def chunks():
+        yield b"synthetic prefix"
+        if failure_stage != "close":
+            raise chunk_error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", open_upload)
+        patch.setattr(tempfile, "NamedTemporaryFile", open_named_upload)
+        with pytest.raises(OSError) as caught:
+            write_upload_to_tempfile(chunks(), suffix=".wav")
+
+    assert caught.value is (close_error if failure_stage == "close" else chunk_error)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_staging_unlink_failure_keeps_chunk_error(monkeypatch, reserved_paths):
+    chunk_error = ConnectionResetError("synthetic chunk failure")
+    unlink_attempts = []
+
+    def chunks():
+        yield b"synthetic prefix"
+        raise chunk_error
+
+    def fail_unlink(path, *, missing_ok=False):
+        unlink_attempts.append(path)
+        raise PermissionError("synthetic private path")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail_unlink)
+        with pytest.raises(ConnectionResetError) as caught:
+            write_uploaded_media_to_tempfile(chunks(), suffix=".wav")
+
+    assert caught.value is chunk_error
+    assert len(unlink_attempts) == 1
+    assert unlink_attempts == reserved_paths
+    assert chunk_error.__notes__ == ["Could not remove incomplete temporary upload."]
 
 
 def test_write_uploaded_media_removes_tempfile_when_write_fails(

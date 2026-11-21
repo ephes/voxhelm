@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Remove incomplete synchronous transcription upload copies after copy or close
+  failures and preserve the original error if cleanup also fails.
+
 - Limit expired final attempts reconciled per worker claim request to 16, then
   scan for runnable work even when the expired backlog has rows left.
 

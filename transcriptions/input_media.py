@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import mimetypes
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
@@ -9,7 +8,7 @@ from urllib.parse import urlsplit
 
 from django.conf import settings
 
-from jobs.media import fetch_allowed_url_to_tempfile
+from jobs.media import fetch_allowed_url_to_tempfile, write_uploaded_media_to_tempfile
 
 SUPPORTED_SUFFIXES: Final[dict[str, str]] = {
     ".flac": "audio/flac",
@@ -32,13 +31,7 @@ CONTENT_TYPE_SUFFIXES: Final[dict[str, str]] = {
 
 
 def write_upload_to_tempfile(chunks: Iterable[bytes], *, suffix: str) -> Path:
-    file_handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    try:
-        for chunk in chunks:
-            file_handle.write(chunk)
-    finally:
-        file_handle.close()
-    return Path(file_handle.name)
+    return write_uploaded_media_to_tempfile(chunks, suffix=suffix)
 
 
 def download_allowed_url_to_tempfile(*, source_url: str) -> Path:

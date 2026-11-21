@@ -104,17 +104,27 @@ def reserve_temp_media_path(*, suffix: str) -> Path:
 def write_uploaded_media_to_tempfile(chunks: Iterable[bytes], *, suffix: str) -> Path:
     """Copy uploaded chunks into a reserved temp file and return its path.
 
-    The caller owns the returned file and removes it when done. A failed copy
-    (broken upload stream, disk write error) removes the partial file here, so
-    an interrupted upload leaves no local media behind.
+    The caller takes ownership only after a successful close. On failure, this
+    function attempts to remove the partial file while preserving the first error.
     """
     temp_path = reserve_temp_media_path(suffix=suffix)
     try:
-        with temp_path.open("wb") as file_handle:
+        file_handle = temp_path.open("wb")
+        try:
             for chunk in chunks:
                 file_handle.write(chunk)
-    except BaseException:
-        temp_path.unlink(missing_ok=True)
+        except BaseException as exc:
+            try:
+                file_handle.close()
+            except BaseException:
+                exc.add_note("Could not close incomplete temporary upload.")
+            raise
+        file_handle.close()
+    except BaseException as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except BaseException:
+            exc.add_note("Could not remove incomplete temporary upload.")
         raise
     return temp_path
 
