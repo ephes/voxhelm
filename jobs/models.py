@@ -213,8 +213,11 @@ class PendingArtifactDeletion(models.Model):
     storage_identity = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    drain_attempts = models.PositiveBigIntegerField(default=0)
+
     class Meta:
         ordering = ["created_at"]
+        indexes = [models.Index(fields=["drain_attempts", "id"])]
 
 
 class RemoteAttemptPrefix(models.Model):

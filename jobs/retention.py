@@ -46,8 +46,8 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import transaction
-from django.db.models import Exists, OuterRef, Q, QuerySet
+from django.db import DatabaseError, transaction
+from django.db.models import Exists, F, OuterRef, Q, QuerySet
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django_tasks_db.models import DBTaskResult
@@ -819,13 +819,28 @@ def drain_pending_artifact_deletions(
     """Process queued deletions; returns counts per outcome."""
     if pending is None:
         pending_pks = list(
-            PendingArtifactDeletion.objects.order_by("pk").values_list("pk", flat=True)[:100]
+            PendingArtifactDeletion.objects.order_by("drain_attempts", "pk").values_list(
+                "pk", flat=True
+            )[:100]
         )
     else:
         pending_pks = [item.pk for item in pending]
     counts = {"resolved": 0, "refused": 0, "failed": 0}
+    unresolved = []
     for pending_pk in pending_pks:
-        counts[process_pending_artifact_deletion(pending_pk)] += 1
+        outcome = process_pending_artifact_deletion(pending_pk)
+        counts[outcome] += 1
+        if pending is None and outcome != "resolved":
+            unresolved.append(pending_pk)
+    if unresolved:
+        # The default drain owns its selection order. Explicit callers supply
+        # their own selection, including the maintenance command's saved cursor.
+        try:
+            PendingArtifactDeletion.objects.filter(pk__in=unresolved).update(
+                drain_attempts=F("drain_attempts") + 1
+            )
+        except DatabaseError:
+            logger.warning("Could not update queued artifact deletion retry order.")
     return counts
 
 

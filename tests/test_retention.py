@@ -12,6 +12,7 @@ from django.utils import timezone
 from jobs.artifacts import current_artifact_store_identity, get_artifact_store
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia
 from jobs.retention import (
+    drain_pending_artifact_deletions,
     expired_job_metadata,
     job_key_is_deletable,
     object_location,
@@ -65,6 +66,36 @@ def make_artifact(
 
 def object_path(settings, artifact: JobArtifact) -> Path:
     return Path(settings.VOXHELM_ARTIFACT_ROOT) / artifact.storage_key
+
+
+@pytest.mark.django_db
+def test_default_pending_drain_advances_past_a_refused_page(settings):
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=2))
+    blocked = [
+        PendingArtifactDeletion(
+            job_id=job.pk,
+            kind=JobArtifact.Kind.SOURCE,
+            storage_backend="filesystem",
+            storage_key=f"foreign/blocked-{i}.mp3",
+        )
+        for i in range(100)
+    ]
+    PendingArtifactDeletion.objects.bulk_create(blocked)
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    pending = queue_replaced_intermediate_objects(replaced=[source], kept=[])[0]
+    source.delete()
+
+    assert drain_pending_artifact_deletions() == {"resolved": 0, "refused": 100, "failed": 0}
+    assert object_path(settings, source).exists()
+
+    counts = drain_pending_artifact_deletions()
+
+    assert counts == {"resolved": 1, "refused": 99, "failed": 0}
+    assert not object_path(settings, source).exists()
+    assert not PendingArtifactDeletion.objects.filter(pk=pending.pk).exists()
+    assert set(PendingArtifactDeletion.objects.values_list("pk", flat=True)) == {
+        item.pk for item in blocked
+    }
 
 
 @pytest.mark.django_db

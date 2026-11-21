@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Persist retry order for default queued artifact deletion drains so refused or
+  failed entries cannot prevent later entries from being attempted.
+
 - Apply retention key ownership and shared-reference checks during staged upload
   admission and submission cleanup.
 

@@ -834,7 +834,10 @@ retention), with no empty, `.` or `..` segments; a staged upload's key must end 
 must also equal the literal path under the root (no symlinks) and the file must
 not be hard-linked. Anything else is refused: the row and object stay, and the
 command (and `--dry-run`) lists it as refused; refused queued deletions stay
-queued. An allowed object that another artifact row or
+queued. A default drain takes at most 100 entries, ordered by the fewest prior
+default-drain attempts and then by ID. Refused and failed entries stay queued
+and move behind entries with fewer attempts. The maintenance command uses its
+saved per-phase cursor. An allowed object that another artifact row or
 staged upload still references after resolution (store identity, real path
 and inode, canonical S3 endpoint and exact key) is also kept; only its row
 goes.
