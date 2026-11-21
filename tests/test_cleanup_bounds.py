@@ -94,27 +94,26 @@ def test_failed_or_refused_pending_rows_do_not_starve_later_rows(monkeypatch):
 @pytest.mark.parametrize("size", [1, 1000])
 def test_admission_deletes_only_small_batch(size, monkeypatch):
     expired = timezone.now() - timedelta(days=1)
-    StagedMedia.objects.bulk_create(
-        [
-            StagedMedia(
-                producer="synthetic",
-                original_filename="input.mp3",
-                storage_key=f"expired-{n}",
-                storage_backend="filesystem",
-                expires_at=expired,
-                size_bytes=1,
-                content_type="audio/mpeg",
-            )
-            for n in range(size)
-        ]
-    )
+    candidates = [
+        StagedMedia(
+            producer="synthetic",
+            original_filename="input.mp3",
+            storage_backend="filesystem",
+            expires_at=expired,
+            size_bytes=1,
+            content_type="audio/mpeg",
+        )
+        for _ in range(size)
+    ]
+    for candidate in candidates:
+        candidate.storage_key = staging.build_staged_media_key(staged=candidate)
+    StagedMedia.objects.bulk_create(candidates)
     deleted = []
 
-    def delete(*, staged, missing_ok):
-        deleted.append(staged.pk)
-        staged.delete()
+    def delete(*, identity, key):
+        deleted.append(key)
 
-    monkeypatch.setattr(staging, "delete_staged_media", delete)
+    monkeypatch.setattr(retention, "delete_stored_object", delete)
     staged = staging.stage_uploaded_audio(
         producer="synthetic",
         upload=SimpleUploadedFile("new.mp3", b"audio", content_type="audio/mpeg"),

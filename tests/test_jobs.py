@@ -868,10 +868,33 @@ def test_staging_restores_cleanup_record_when_row_vanished_and_compensation_fail
 
 
 @pytest.mark.django_db
+def test_admission_cleanup_keeps_a_staged_object_shared_with_another_upload(settings):
+    staged = stage_audio_directly()
+    StagedMedia.objects.create(
+        producer=staged.producer,
+        original_filename=staged.original_filename,
+        content_type=staged.content_type,
+        storage_backend=staged.storage_backend,
+        storage_identity=staged.storage_identity,
+        storage_key=staged.storage_key,
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+    StagedMedia.objects.filter(pk=staged.pk).update(expires_at=timezone.now())
+
+    jobs_staging.cleanup_expired_staged_media()
+
+    assert (Path(settings.VOXHELM_ARTIFACT_ROOT) / staged.storage_key).exists()
+    assert not StagedMedia.objects.filter(pk=staged.pk).exists()
+    assert StagedMedia.objects.filter(storage_key=staged.storage_key).count() == 1
+
+
+@pytest.mark.django_db
 def test_expiry_cleanup_rechecks_extended_expiry(settings, monkeypatch):
+    from jobs import retention
+
     staged = stage_audio_directly()
     StagedMedia.objects.filter(pk=staged.pk).update(expires_at=timezone.now())
-    real_lock = services.acquire_sqlite_write_lock
+    real_lock = retention.acquire_sqlite_write_lock
 
     def extend_expiry():
         StagedMedia.objects.filter(pk=staged.pk).update(
@@ -879,7 +902,7 @@ def test_expiry_cleanup_rechecks_extended_expiry(settings, monkeypatch):
         )
         real_lock()
 
-    monkeypatch.setattr(services, "acquire_sqlite_write_lock", extend_expiry)
+    monkeypatch.setattr(retention, "acquire_sqlite_write_lock", extend_expiry)
     jobs_staging.cleanup_expired_staged_media()
     assert StagedMedia.objects.filter(pk=staged.pk).exists()
     assert len(stored_staged_objects(settings)) == 1

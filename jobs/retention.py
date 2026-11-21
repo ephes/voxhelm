@@ -444,10 +444,17 @@ def delete_claimed_staged_upload(*, staged_pk: UUID, job_id: UUID) -> None:
         staged.delete()
 
 
-def delete_expired_staged_upload(*, staged_pk: UUID, now: datetime) -> None:
+def delete_expired_staged_upload(
+    *, staged_pk: UUID, now: datetime, include_profile_backstop: bool = True
+) -> None:
     with transaction.atomic():
         acquire_sqlite_write_lock()
-        staged = staged_candidates(now=now).select_for_update().filter(pk=staged_pk).first()
+        staged = (
+            staged_candidates(now=now, include_profile_backstop=include_profile_backstop)
+            .select_for_update()
+            .filter(pk=staged_pk)
+            .first()
+        )
         if staged is None:
             return
         if not staged_key_is_deletable(
@@ -647,14 +654,15 @@ def prune_job_artifacts(
     return result
 
 
-def staged_candidates(*, now: datetime) -> QuerySet[StagedMedia]:
-    return StagedMedia.objects.filter(
-        Q(claimed_by_job__in=expired_profile_jobs(now=now).values("id"))
-        | (
-            Q(expires_at__lte=now)
-            & (Q(claimed_by_job__isnull=True) | Q(claimed_by_job__finished_at__isnull=False))
-        )
+def staged_candidates(
+    *, now: datetime, include_profile_backstop: bool = True
+) -> QuerySet[StagedMedia]:
+    eligible = Q(expires_at__lte=now) & (
+        Q(claimed_by_job__isnull=True) | Q(claimed_by_job__finished_at__isnull=False)
     )
+    if include_profile_backstop:
+        eligible |= Q(claimed_by_job__in=expired_profile_jobs(now=now).values("id"))
+    return StagedMedia.objects.filter(eligible)
 
 
 def prune_profile_leftovers(*, result: PruneResult, now: datetime, batch) -> None:

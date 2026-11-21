@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from django.utils import timezone
 
+from jobs import retention
 from jobs import staging as jobs_staging
 from jobs.models import Job, JobArtifact, StagedMedia
 from tests.test_remote_workers import (
@@ -508,14 +509,17 @@ def test_normalizer_kills_descendants_holding_its_pipes(tmp_path, settings) -> N
 
 
 def _expired_upload(index: int, now) -> StagedMedia:
-    return StagedMedia.objects.create(
+    staged = StagedMedia(
         producer="synthetic",
         original_filename=f"u{index}.mp3",
         content_type="audio/mpeg",
         storage_backend="filesystem",
-        storage_key=f"voxhelm/staged/synthetic/u{index}.mp3",
         expires_at=now - timedelta(hours=10 - index),
     )
+
+    staged.storage_key = jobs_staging.build_staged_media_key(staged=staged)
+    staged.save()
+    return staged
 
 
 @pytest.mark.django_db
@@ -525,12 +529,15 @@ def test_failing_cleanup_rows_do_not_starve_newer_expired_uploads(monkeypatch) -
     healthy = [_expired_upload(i, now) for i in range(2, 6)]
     failing_ids = {row.pk for row in failing}
 
-    def delete(*, staged, missing_ok):
-        if staged.pk in failing_ids:
-            raise OSError("synthetic storage failure")
-        staged.delete()
+    failing_keys = {row.storage_key for row in failing}
+    real_delete = retention.delete_stored_object
 
-    monkeypatch.setattr(jobs_staging, "delete_staged_media", delete)
+    def delete(*, identity, key):
+        if key in failing_keys:
+            raise OSError("synthetic storage failure")
+        real_delete(identity=identity, key=key)
+
+    monkeypatch.setattr(retention, "delete_stored_object", delete)
     for _ in range(4):
         jobs_staging.cleanup_expired_staged_media(limit=2)
     remaining = set(StagedMedia.objects.values_list("pk", flat=True))

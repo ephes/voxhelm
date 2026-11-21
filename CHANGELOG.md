@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Apply retention key ownership and shared-reference checks during staged upload
+  admission and submission cleanup.
+
 - Speak only valid 24-hour clock values in German synthesis, with `00:00` as
   midnight. Preserve out-of-range and multi-component colon notation.
 

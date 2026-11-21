@@ -8,7 +8,6 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from jobs.artifacts import (
@@ -140,31 +139,21 @@ def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
 def cleanup_expired_staged_media(
     *, exclude_upload_id: str | None = None, limit: int = ADMISSION_CLEANUP_LIMIT
 ) -> None:
-    from jobs.services import acquire_sqlite_write_lock
+    from jobs.retention import delete_expired_staged_upload, staged_candidates
 
-    now = timezone.now()
-    expired = StagedMedia.objects.filter(expires_at__lte=now).filter(
-        Q(claimed_by_job__isnull=True) | Q(claimed_by_job__finished_at__isnull=False)
-    )
-    if exclude_upload_id:
-        expired = expired.exclude(id=exclude_upload_id)
     if limit < 1:
         raise ValueError("Cleanup limit must be positive.")
+    now = timezone.now()
+    expired = staged_candidates(now=now, include_profile_backstop=False)
+    if exclude_upload_id:
+        expired = expired.exclude(id=exclude_upload_id)
     for upload_id in list(
         expired.order_by("expires_at", "pk").values_list("pk", flat=True)[:limit]
     ):
         try:
-            with transaction.atomic():
-                acquire_sqlite_write_lock()
-                staged = StagedMedia.objects.select_for_update().filter(pk=upload_id).first()
-                if staged is None or staged.expires_at > timezone.now():
-                    continue
-                job = staged.claimed_by_job
-                if job is not None and job.finished_at is None:
-                    continue
-                # Keep the lock through object deletion and row removal: submission
-                # must either claim first or observe that the upload is gone.
-                delete_staged_media(staged=staged, missing_ok=False)
+            delete_expired_staged_upload(
+                staged_pk=upload_id, now=now, include_profile_backstop=False
+            )
         except Exception:
             # Leave the row for maintenance retry. Log only its public identifier:
             # storage/DB exceptions may contain private keys, URLs or credentials.

@@ -764,9 +764,12 @@ worker update; no deployment is performed by the change itself.
 ### Bounded cleanup progress
 
 Upload admission and upload-backed job submission try at most four expired staged
-uploads. Each candidate has its own locked transaction and expiry/claim recheck.
-A storage or row deletion failure rolls back that candidate, retains its retry row,
-and continues the bounded pass so a healthy new upload can proceed. Warnings log
+uploads. Each candidate uses the maintenance deletion policy in its own locked
+transaction, with an expiry/claim recheck, a key ownership check and protection
+for objects still referenced by another row. The separate profile backstop runs
+during maintenance.
+A refusal or deletion failure retains the candidate for retry
+and the pass continues the bounded pass so a healthy new upload can proceed. Warnings log
 only the upload ID, without storage keys or raw exception details. Expiry removal
 is eventual; maintenance retries failures. A failed candidate's `expires_at` moves to
 the time of the failure: it stays expired, but later passes reach older healthy
