@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Speak only valid 24-hour clock values in German synthesis, with `00:00` as
+  midnight. Preserve out-of-range and multi-component colon notation.
+
 - Validate German synthesis dates against the Gregorian calendar and keep
   invalid date candidates literal.
 

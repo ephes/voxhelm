@@ -253,6 +253,10 @@ named-month dates. An explicit four-digit year determines whether February 29
 is valid. Without a year, February 29 is accepted. Invalid date candidates stay
 literal through date and ordinal normalization.
 
+German clock expansion accepts hours 0–23 and two-digit minutes 00–59.
+Midnight `00:00` becomes `null Uhr`. Out-of-range values and longer colon
+sequences such as `1:02:03` stay literal through clock and ordinal normalization.
+
 Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
 publication. Valid samples keep the existing clipping and 16-bit PCM conversion.

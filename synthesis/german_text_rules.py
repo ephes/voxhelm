@@ -26,6 +26,7 @@
 # - Numeric substitutions preserve tokens above 64 digits without conversion.
 # - Cardinal labels emit their punctuation directly; no text markers are reserved.
 # - Date expansions require valid Gregorian calendar components.
+# - Clock expansions require a time from 00:00 to 23:59.
 from __future__ import annotations
 
 import re
@@ -427,6 +428,8 @@ def normalize_german_text(text: str) -> str:
     def replace_time(match: re.Match[str]) -> str:
         hour = int(match.group(1))
         minute = int(match.group(2))
+        if hour >= 24 or minute >= 60:
+            return match.group(0)
         hour_word = "ein" if hour == 1 else number_to_words(hour)
         if minute == 0:
             return f"{hour_word} Uhr"
@@ -489,14 +492,18 @@ def normalize_german_text(text: str) -> str:
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°\s*[Cc]\b", replace_temperature, text)
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
     text = re.sub(
-        r"(?i)(?<!\w)(?<!\d\.)(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
+        r"(?i)(?<!\w)(?<!\d[.:])(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
         r"(\d{1,2})\.(\d{1,2})\.(?:\s*(\d{4}))?(?!\.\d)(?=\s|[.,!?]|$)",
         replace_numeric_date,
         text,
     )
-    text = re.sub(r"(?<!\w)(\d{1,2}):(\d{2})(?:\s*[Uu]hr)?(?=\s|[.,!?]|$)", replace_time, text)
     text = re.sub(
-        r"(?i)(?<!\w)(?<!\d\.)(?:"
+        r"(?<!\w)(?<!\d:)(\d{1,2}):(\d{2})(?:\s*[Uu]hr)?(?!\.\d)(?=\s|[.,!?]|$)",
+        replace_time,
+        text,
+    )
+    text = re.sub(
+        r"(?i)(?<!\w)(?<!\d[.:])(?:"
         r"(?P<date_prefix>am\s+|der\s+|die\s+|das\s+|den\s+|zum\s+|vom\s+|dem\s+|bis\s+zum\s+|jeden\s+)?"
         rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})(?:\s+(?P<year>\d{{4}}))?(?=\s|[.,!?]|$)"
         r"|(?P<ordinal_prefix>am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"

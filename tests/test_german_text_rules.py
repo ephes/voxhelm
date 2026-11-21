@@ -90,6 +90,33 @@ def test_valid_german_dates_are_spoken(text: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Stand 12:60 im Spiel.",
+        "Wert 25:30 Uhr.",
+        "Wert 12:99. Danach geht es weiter.",
+        "Wert 24:00.",
+        "Protokoll 1:02:03.",
+        "Protokoll 12:30.5.",
+    ],
+)
+def test_non_clock_colon_notation_remains_literal(text: str) -> None:
+    assert normalize_german_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Um 00:00.", "Um null Uhr."),
+        ("Um 23:59 Uhr.", "Um dreiundzwanzig Uhr neunundfünfzig."),
+        ("Um 1:00 Uhr.", "Um ein Uhr."),
+    ],
+)
+def test_valid_german_clock_times_are_spoken(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
+
+
+@pytest.mark.parametrize(
     ("year", "expected"),
     [
         (1990, "neunzehnhundertneunzig"),
