@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError
 from django.utils import timezone
 
+from jobs import services
 from jobs.artifacts import StoredArtifact, current_artifact_store_identity, get_artifact_store
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia, Worker
 from jobs.retention import prune_job_artifacts
@@ -1975,6 +1977,46 @@ def test_expired_final_attempt_releases_staged_upload_for_retry(client, settings
     )
     assert retry_response.status_code == 201
     assert retry_response.json()["id"] != str(job.id)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_expired_final_attempt_rolls_back_if_staged_claim_release_fails(
+    client, settings, monkeypatch
+):
+    settings.VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = 1
+    job, upload_id, _ = submit_remote_upload_job(
+        client, settings, task_ref="synthetic-expired-final-attempt-rollback"
+    )
+    claim_one(client)
+    Job.objects.filter(pk=job.pk).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+    job.refresh_from_db()
+    release = services.release_staged_media_claims_for_job
+
+    def release_then_fail(*, job):
+        release(job=job)
+        raise DatabaseError("synthetic claim release failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(services, "release_staged_media_claims_for_job", release_then_fail)
+        with pytest.raises(DatabaseError, match="synthetic claim release failure"):
+            reconcile_remote_job_state(job)
+
+    job.refresh_from_db()
+    assert job.state == Job.State.RUNNING
+    assert job.finished_at is None
+    assert job.error_detail == ""
+    staged = StagedMedia.objects.get(pk=upload_id)
+    assert staged.claimed_by_job_id == job.pk
+    assert staged.claimed_at is not None
+
+    assert reconcile_remote_job_state(job)
+    job.refresh_from_db()
+    staged.refresh_from_db()
+    assert job.state == Job.State.FAILED
+    assert job.finished_at is not None
+    assert staged.claimed_by_job_id is None
+    assert staged.claimed_at is None
+    assert not reconcile_remote_job_state(job)
 
 
 @pytest.mark.django_db

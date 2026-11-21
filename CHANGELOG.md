@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Commit exhausted remote lease failure and staged upload claim release together
+  so a failed claim release can be retried.
+
 - Persist retry order for default queued artifact deletion drains so refused or
   failed entries cannot prevent later entries from being attempted.
 

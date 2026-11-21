@@ -542,7 +542,10 @@ Server-side algorithm shape:
 
 All lease and heartbeat comparisons use `studio` server time. Worker-supplied timestamps are informational only.
 
-Producer retries with the same `task_ref` also reconcile stale remote leases before returning an existing job. An expired lease with attempts remaining moves back to `queued` with the stale worker assignment and lease token cleared, so the next worker poll can reclaim it. An expired final attempt is marked `failed` and releases any staged upload claim.
+Producer retries with the same `task_ref` also reconcile stale remote leases before returning an existing job. An expired lease with attempts remaining moves back to `queued` with the stale worker assignment and lease token cleared, so the next worker poll can reclaim it. An expired final attempt is marked `failed` and releases any staged upload
+claim in the same write transaction. A failure during the transition leaves
+the expired attempt and its claim available for reconciliation on a later
+request.
 
 Completion validates artifact manifests against the leased prefix and artifact-store snapshots, not the process's current artifact settings, so an in-flight worker can finish after an artifact prefix, filesystem-root, endpoint, or bucket rollout when the old store remains reachable. Object-store existence and size checks run before the short settlement transaction; the transaction rechecks the lease and manifest shape without waiting on MinIO/S3.
 Committed `JobArtifact` rows also persist the winning non-secret store identity so producer artifact downloads keep reading from the store that accepted the completion manifest.

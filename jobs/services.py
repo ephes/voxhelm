@@ -1860,24 +1860,26 @@ def reconcile_remote_job_state(job: Job) -> bool:
         return True
 
     error_detail = "Remote worker lease expired after maximum attempts."
-    updated = Job.objects.filter(
-        id=job.id,
-        execution_mode=Job.ExecutionMode.REMOTE_PULL,
-        state=Job.State.RUNNING,
-        lease_expires_at__lt=now,
-        attempt_count__gte=F("max_attempts"),
-    ).update(
-        state=Job.State.FAILED,
-        error_detail=error_detail,
-        finished_at=now,
-        worker_progress={},
-        updated_at=now,
-    )
+    with transaction.atomic():
+        updated = Job.objects.filter(
+            id=job.id,
+            execution_mode=Job.ExecutionMode.REMOTE_PULL,
+            state=Job.State.RUNNING,
+            lease_expires_at__lt=now,
+            attempt_count__gte=F("max_attempts"),
+        ).update(
+            state=Job.State.FAILED,
+            error_detail=error_detail,
+            finished_at=now,
+            worker_progress={},
+            updated_at=now,
+        )
+        if updated == 1:
+            release_staged_media_claims_for_job(job=job)
     if updated != 1:
         job.refresh_from_db()
         return False
 
-    release_staged_media_claims_for_job(job=job)
     job.state = Job.State.FAILED
     job.error_detail = error_detail
     job.finished_at = now
