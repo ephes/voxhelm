@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -75,7 +74,6 @@ def test_sync_upload_removes_incomplete_copy(monkeypatch, tmp_path, reserved_pat
     chunk_error = ConnectionResetError("synthetic chunk failure")
     close_error = OSError("synthetic buffered close failure")
     real_open = Path.open
-    real_named_tempfile = tempfile.NamedTemporaryFile
 
     class UploadHandle:
         def __init__(self, handle):
@@ -97,9 +95,6 @@ def test_sync_upload_removes_incomplete_copy(monkeypatch, tmp_path, reserved_pat
     def open_upload(path, *args, **kwargs):
         return UploadHandle(real_open(path, *args, **kwargs))
 
-    def open_named_upload(**kwargs):
-        return UploadHandle(real_named_tempfile(dir=tmp_path, **kwargs))
-
     def chunks():
         yield b"synthetic prefix"
         if failure_stage != "close":
@@ -107,11 +102,15 @@ def test_sync_upload_removes_incomplete_copy(monkeypatch, tmp_path, reserved_pat
 
     with monkeypatch.context() as patch:
         patch.setattr(Path, "open", open_upload)
-        patch.setattr(tempfile, "NamedTemporaryFile", open_named_upload)
         with pytest.raises(OSError) as caught:
             write_upload_to_tempfile(chunks(), suffix=".wav")
 
     assert caught.value is (close_error if failure_stage == "close" else chunk_error)
+    expected_notes = (
+        ["Could not close incomplete temporary upload."] if failure_stage == "both" else []
+    )
+    assert getattr(caught.value, "__notes__", []) == expected_notes
+    assert len(reserved_paths) == 1
     assert list(tmp_path.iterdir()) == []
 
 
