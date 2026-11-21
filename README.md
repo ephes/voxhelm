@@ -766,8 +766,11 @@ worker update; no deployment is performed by the change itself.
 Upload admission and upload-backed job submission try at most four expired staged
 uploads. Each candidate uses the maintenance deletion policy in its own locked
 transaction, with an expiry/claim recheck, a key ownership check and protection
-for objects still referenced by another row. The separate profile backstop runs
-during maintenance.
+for objects still referenced by another row. On the filesystem backend that
+reference check resolves every artifact and staged-upload row, so each admission
+candidate costs time proportional to the stored rows (the filesystem backend is
+meant for small installations). The separate profile backstop runs during
+maintenance.
 A refusal or deletion failure retains the candidate for retry, and the bounded
 pass continues so a healthy new upload can proceed. Warnings log only the upload
 ID, without storage keys or raw exception details. Expiry removal
