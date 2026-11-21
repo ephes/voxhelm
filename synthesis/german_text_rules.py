@@ -165,11 +165,12 @@ MONTHS = "januar|februar|märz|april|mai|juni|juli|august|september|oktober|nove
 MONTH_NUMBERS = {month: number for number, month in enumerate(MONTHS.split("|"), start=1)}
 MAX_NUMERIC_TOKEN_DIGITS = 64
 # Day, month and optional year of a named-month date such as "3. Mai 2024".
+# The date ends at any non-word character after the month or year.
 # Only 20xx years are spoken; another four-digit year stays literal but still
 # decides whether the day exists.
 NAMED_DATE = (
     rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})"
-    r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?!\d)))?(?=\s|[.,!?]|$)"
+    r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?!\d)))?(?!\w)"
 )
 NAMED_DATE_RE = re.compile(rf"(?i){NAMED_DATE}")
 
@@ -535,7 +536,7 @@ def normalize_german_text(text: str) -> str:
         r"eine\s+|einer\s+|einen\s+|einem\s+|jeden\s+|jedem\s+|jede\s+|jeder\s+|"
         r"nach\s+der\s+(?:gefühlt\s+)?)?"
         # An ordinal prefix such as "im" can begin before a named date.
-        rf"(?!\d{{1,2}}\.\s*(?:{MONTHS})(?=\s|[.,!?]|$))"
+        rf"(?!\d{{1,2}}\.\s*(?:{MONTHS})(?!\w))"
         r"(?P<ordinal_number>\d{1,6})\.(?=\s+\w|$))",
         replace_text_date_or_ordinal,
         text,

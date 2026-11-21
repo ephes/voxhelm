@@ -7,6 +7,8 @@
 
 - Validate German synthesis dates against the Gregorian calendar and keep
   invalid date candidates literal. Spoken years stay limited to 2000–2099.
+  Named-month dates now end at any non-word character, so `3. Mai)` or
+  `3. Mai;` is read as a date.
 
 - Return retryable HTTP 503 for malformed S3 errors during artifact downloads.
 
