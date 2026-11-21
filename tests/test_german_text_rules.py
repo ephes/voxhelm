@@ -72,6 +72,18 @@ def test_invalid_german_dates_remain_literal(text: str) -> None:
     assert normalize_german_text(text) == text
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A valid named date after an ordinal is read as its spoken ordinal word.
+        ("Platz 1. 3. Mai war gut.", "Platz erster dritter Mai war gut."),
+        ("Platz 1. 31. April war gut.", "Platz eins. 31. April war gut."),
+    ],
+)
+def test_ordinal_before_named_date(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
+
+
 @pytest.mark.parametrize("text", ["Am 3.4.1990.", "Am 3.4.3000."])
 def test_glued_non_20xx_years_are_not_expanded(text: str) -> None:
     # The numeric date rule only accepts a directly attached 20xx year.

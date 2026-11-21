@@ -164,6 +164,14 @@ SENTENCE_STARTERS = frozenset(
 MONTHS = "januar|februar|märz|april|mai|juni|juli|august|september|oktober|november|dezember"
 MONTH_NUMBERS = {month: number for number, month in enumerate(MONTHS.split("|"), start=1)}
 MAX_NUMERIC_TOKEN_DIGITS = 64
+# Day, month and optional year of a named-month date such as "3. Mai 2024".
+# Only 20xx years are spoken; another four-digit year stays literal but still
+# decides whether the day exists.
+NAMED_DATE = (
+    rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})"
+    r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?=\s|[.,!?]|$)))?(?=\s|[.,!?]|$)"
+)
+NAMED_DATE_RE = re.compile(rf"(?i){NAMED_DATE}")
 
 
 def _is_calendar_date(day: int, month: int, year: str | None) -> bool:
@@ -175,6 +183,14 @@ def _is_calendar_date(day: int, month: int, year: str | None) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_named_calendar_date(match: re.Match[str]) -> bool:
+    return _is_calendar_date(
+        int(match.group("date_day")),
+        MONTH_NUMBERS.get(match.group("month").casefold(), 0),
+        match.group("year") or match.group("literal_year"),
+    )
 
 
 def _supports_numeric_token(raw: str) -> bool:
@@ -413,8 +429,7 @@ def normalize_german_text(text: str) -> str:
         day = int(match.group("date_day"))
         month = match.group("month")
         year = match.group("year")
-        calendar_year = year or match.group("literal_year")
-        if not _is_calendar_date(day, MONTH_NUMBERS.get(month.casefold(), 0), calendar_year):
+        if not _is_named_calendar_date(match):
             return match.group(0)
 
         day_word = ordinal_to_words(day)
@@ -453,6 +468,10 @@ def normalize_german_text(text: str) -> str:
         next_word = re.match(r"\w+", following)
         before_capital = next_word is not None and next_word.group(0)[0].isupper()
         before_lowercase = next_word is not None and next_word.group(0)[0].islower()
+        following_date = NAMED_DATE_RE.match(following)
+        if following_date is not None and _is_named_calendar_date(following_date):
+            # The same pass speaks that date as a lowercase ordinal word.
+            before_capital, before_lowercase = False, True
 
         if not prefix_full:
             if before_lowercase:
@@ -511,9 +530,8 @@ def normalize_german_text(text: str) -> str:
     text = re.sub(
         r"(?i)(?<!\w)(?<!\d[.:])(?:"
         r"(?P<date_prefix>am\s+|der\s+|die\s+|das\s+|den\s+|zum\s+|vom\s+|dem\s+|bis\s+zum\s+|jeden\s+)?"
-        rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})"
-        r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?=\s|[.,!?]|$)))?(?=\s|[.,!?]|$)"
-        r"|(?P<ordinal_prefix>am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
+        + NAMED_DATE
+        + r"|(?P<ordinal_prefix>am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
         r"eine\s+|einer\s+|einen\s+|einem\s+|jeden\s+|jedem\s+|jede\s+|jeder\s+|"
         r"nach\s+der\s+(?:gefühlt\s+)?)?"
         # An ordinal prefix such as "im" can begin before a named date.
