@@ -167,9 +167,11 @@ MAX_NUMERIC_TOKEN_DIGITS = 64
 
 
 def _is_calendar_date(day: int, month: int, year: str | None) -> bool:
+    calendar_year = int(year) if year is not None else 0
     try:
-        # A yearless 29 February can refer to a leap year.
-        date(int(year) if year is not None else 2000, month, day)
+        # A yearless 29 February can refer to a leap year; year 0000 (not
+        # representable by datetime) is checked like a missing year.
+        date(calendar_year or 2000, month, day)
     except ValueError:
         return False
     return True

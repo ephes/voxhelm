@@ -66,11 +66,15 @@ def test_normalize_german_text_numbers(text: str, expected: str) -> None:
         "Am 29.2.2100.",
         "Am 29.2. 2100 war es.",
         "Am 31. April 1990 war es.",
-        "Am 3.4.1990.",
-        "Am 3.4.3000.",
     ],
 )
 def test_invalid_german_dates_remain_literal(text: str) -> None:
+    assert normalize_german_text(text) == text
+
+
+@pytest.mark.parametrize("text", ["Am 3.4.1990.", "Am 3.4.3000."])
+def test_glued_non_20xx_years_are_not_expanded(text: str) -> None:
+    # The numeric date rule only accepts a directly attached 20xx year.
     assert normalize_german_text(text) == text
 
 
@@ -90,6 +94,7 @@ def test_invalid_german_dates_remain_literal(text: str) -> None:
         # Years outside 2000-2099 are not spoken, but still validate the day.
         ("Am 1. Mai 1990 war es.", "Am ersten Mai 1990 war es."),
         ("Am 1. Mai 0012 war es.", "Am ersten Mai 0012 war es."),
+        ("Am 1.5. 0000 war es.", "Am ersten fünften 0000 war es."),
         ("Am 29. Februar 1996 war es.", "Am neunundzwanzigsten Februar 1996 war es."),
         ("Am 29.2. 1996 war es.", "Am neunundzwanzigsten zweiten 1996 war es."),
     ],
