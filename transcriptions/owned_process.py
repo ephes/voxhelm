@@ -62,7 +62,12 @@ def process_output_directory(*, prefix: str) -> Iterator[str]:
             else:
                 # delete=False disables automatic cleanup, including on GC; explicit
                 # cleanup is safe only after the process has retired.
-                temporary.cleanup()
+                try:
+                    temporary.cleanup()
+                except BaseException:
+                    if primary is None:
+                        raise
+                    primary.add_note("Could not remove native writable scratch.")
 
 
 @dataclass(frozen=True)

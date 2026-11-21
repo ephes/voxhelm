@@ -2,6 +2,7 @@
 
 import subprocess
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -196,6 +197,35 @@ def test_temporary_output_is_retained_only_for_uncertain_process_ownership(tmp_p
             except OSError as exc:
                 raise RuntimeError("wrapper") from exc
     assert output is not None and output.exists() is uncertain
+
+
+@pytest.mark.parametrize("outcome", ["retired", "uncertain", "success"])
+def test_scratch_cleanup_failure_preserves_native_error(monkeypatch, outcome):
+    native_error = subprocess.CalledProcessError(1, ["synthetic"])
+    cleanup_error = PermissionError("synthetic private path")
+    temporary = MagicMock()
+    temporary.__enter__.return_value = "synthetic-scratch"
+    temporary.cleanup.side_effect = cleanup_error
+    monkeypatch.setattr(owned_process.tempfile, "TemporaryDirectory", lambda **kwargs: temporary)
+    if outcome == "uncertain":
+        native_error.add_note(owned_process.PROCESS_OWNERSHIP_UNCERTAIN)
+
+    with pytest.raises((subprocess.CalledProcessError, PermissionError)) as caught:
+        with owned_process.process_output_directory(prefix="synthetic-"):
+            if outcome != "success":
+                raise native_error
+
+    if outcome == "uncertain":
+        temporary.cleanup.assert_not_called()
+        assert caught.value is native_error
+        assert native_error.__notes__ == [owned_process.PROCESS_OWNERSHIP_UNCERTAIN]
+    else:
+        temporary.cleanup.assert_called_once_with()
+        if outcome == "success":
+            assert caught.value is cleanup_error
+        else:
+            assert caught.value is native_error
+            assert native_error.__notes__ == ["Could not remove native writable scratch."]
 
 
 def test_whisper_scratch_survives_uncertain_retirement(monkeypatch, tmp_path):

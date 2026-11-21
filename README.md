@@ -49,6 +49,9 @@ reaping and a signal-0 probe confirms the process group is gone; otherwise
 retirement is uncertain and the operation fails, even if the leader exited.
 Uncertain retirement adds a fixed exception note and retains writable scratch
 and partial exports, without accepting their output or retrying in that scratch.
+When retirement is confirmed, a scratch removal failure adds a fixed note to an
+existing native error. A scratch removal failure after a successful run fails
+the operation.
 Operators must stop/verify the remaining process group before removing retained
 `voxhelm-whispercpp-*`, `voxhelm-parakeet-*`, `voxhelm-window-*`,
 `voxhelm-chapter-windows-*` scratch or partial `voxhelm-speech-export-*` speech

@@ -5,6 +5,9 @@
 - Remove incomplete synchronous transcription upload copies after copy or close
   failures and preserve the original error if cleanup also fails.
 
+- Preserve native transcription errors and add a fixed diagnostic when writable
+  scratch removal also fails after confirmed process retirement.
+
 - Limit expired final attempts reconciled per worker claim request to 16, then
   scan for runnable work even when the expired backlog has rows left.
 
