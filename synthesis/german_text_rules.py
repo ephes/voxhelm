@@ -169,7 +169,7 @@ MAX_NUMERIC_TOKEN_DIGITS = 64
 # decides whether the day exists.
 NAMED_DATE = (
     rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})"
-    r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?=\s|[.,!?]|$)))?(?=\s|[.,!?]|$)"
+    r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?!\d)))?(?=\s|[.,!?]|$)"
 )
 NAMED_DATE_RE = re.compile(rf"(?i){NAMED_DATE}")
 
@@ -517,7 +517,7 @@ def normalize_german_text(text: str) -> str:
         r"(?i)(?<!\w)(?<!\d[.:])(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
         # Only 20xx years are spoken; another four-digit year stays literal
         # but still decides whether the day exists.
-        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(20\d{2})|(?=\s*(\d{4})(?=\s|[.,!?]|$)))?"
+        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(20\d{2})|(?=\s*(\d{4})(?!\d)))?"
         r"(?!\.\d)(?=\s|[.,!?]|$)",
         replace_numeric_date,
         text,

@@ -66,6 +66,10 @@ def test_normalize_german_text_numbers(text: str, expected: str) -> None:
         "Am 29.2.2100.",
         "Am 29.2. 2100 war es.",
         "Am 31. April 1990 war es.",
+        # A year followed by other punctuation still decides the check.
+        "Am 29. Februar 1900; danach.",
+        "Am 29. Februar 2023; danach.",
+        "Am 29.2. 2023; danach.",
     ],
 )
 def test_invalid_german_dates_remain_literal(text: str) -> None:
@@ -109,6 +113,7 @@ def test_glued_non_20xx_years_are_not_expanded(text: str) -> None:
         ("Am 1.5. 0000 war es.", "Am ersten fünften 0000 war es."),
         ("Am 29. Februar 1996 war es.", "Am neunundzwanzigsten Februar 1996 war es."),
         ("Am 29.2. 1996 war es.", "Am neunundzwanzigsten zweiten 1996 war es."),
+        ("Am 29. Februar 2024; danach.", "Am neunundzwanzigsten Februar 2024; danach."),
     ],
 )
 def test_valid_german_dates_are_spoken(text: str, expected: str) -> None:
