@@ -397,7 +397,7 @@ def normalize_german_text(text: str) -> str:
         day = int(match.group(2))
         month = int(match.group(3))
         year = match.group(4)
-        if not _is_calendar_date(day, month, year):
+        if not _is_calendar_date(day, month, year or match.group(5)):
             return match.group(0)
 
         result = f"{prefix}{ordinal_dative(day)} {ordinal_dative(month)}"
@@ -411,7 +411,8 @@ def normalize_german_text(text: str) -> str:
         day = int(match.group("date_day"))
         month = match.group("month")
         year = match.group("year")
-        if not _is_calendar_date(day, MONTH_NUMBERS.get(month.casefold(), 0), year):
+        calendar_year = year or match.group("literal_year")
+        if not _is_calendar_date(day, MONTH_NUMBERS.get(month.casefold(), 0), calendar_year):
             return match.group(0)
 
         day_word = ordinal_to_words(day)
@@ -493,7 +494,10 @@ def normalize_german_text(text: str) -> str:
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
     text = re.sub(
         r"(?i)(?<!\w)(?<!\d[.:])(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
-        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(\d{4}))?(?!\.\d)(?=\s|[.,!?]|$)",
+        # Only 20xx years are spoken; another four-digit year stays literal
+        # but still decides whether the day exists.
+        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(20\d{2})|(?=\s*(\d{4})(?=\s|[.,!?]|$)))?"
+        r"(?!\.\d)(?=\s|[.,!?]|$)",
         replace_numeric_date,
         text,
     )
@@ -505,7 +509,8 @@ def normalize_german_text(text: str) -> str:
     text = re.sub(
         r"(?i)(?<!\w)(?<!\d[.:])(?:"
         r"(?P<date_prefix>am\s+|der\s+|die\s+|das\s+|den\s+|zum\s+|vom\s+|dem\s+|bis\s+zum\s+|jeden\s+)?"
-        rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})(?:\s+(?P<year>\d{{4}}))?(?=\s|[.,!?]|$)"
+        rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})"
+        r"(?:\s+(?P<year>20\d{2})|(?=\s+(?P<literal_year>\d{4})(?=\s|[.,!?]|$)))?(?=\s|[.,!?]|$)"
         r"|(?P<ordinal_prefix>am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
         r"eine\s+|einer\s+|einen\s+|einem\s+|jeden\s+|jedem\s+|jede\s+|jeder\s+|"
         r"nach\s+der\s+(?:gefühlt\s+)?)?"

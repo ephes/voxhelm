@@ -62,8 +62,12 @@ def test_normalize_german_text_numbers(text: str, expected: str) -> None:
         "Am 30. Februar.",
         "Im 31. April 2024.",
         "Nach der 31. April 2024.",
-        "Am 29. Februar 1900.",
+        "Am 29. Februar 1900 war es.",
         "Am 29.2.2100.",
+        "Am 29.2. 2100 war es.",
+        "Am 31. April 1990 war es.",
+        "Am 3.4.1990.",
+        "Am 3.4.3000.",
     ],
 )
 def test_invalid_german_dates_remain_literal(text: str) -> None:
@@ -83,6 +87,11 @@ def test_invalid_german_dates_remain_literal(text: str) -> None:
         ),
         ("Am 29.2. geht es los.", "Am neunundzwanzigsten zweiten geht es los."),
         ("Am 29. Februar geht es los.", "Am neunundzwanzigsten Februar geht es los."),
+        # Years outside 2000-2099 are not spoken, but still validate the day.
+        ("Am 1. Mai 1990 war es.", "Am ersten Mai 1990 war es."),
+        ("Am 1. Mai 0012 war es.", "Am ersten Mai 0012 war es."),
+        ("Am 29. Februar 1996 war es.", "Am neunundzwanzigsten Februar 1996 war es."),
+        ("Am 29.2. 1996 war es.", "Am neunundzwanzigsten zweiten 1996 war es."),
     ],
 )
 def test_valid_german_dates_are_spoken(text: str, expected: str) -> None:

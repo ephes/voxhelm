@@ -6,7 +6,7 @@
   midnight. Preserve out-of-range and multi-component colon notation.
 
 - Validate German synthesis dates against the Gregorian calendar and keep
-  invalid date candidates literal.
+  invalid date candidates literal. Spoken years stay limited to 2000–2099.
 
 - Return retryable HTTP 503 for malformed S3 errors during artifact downloads.
 

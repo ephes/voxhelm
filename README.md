@@ -249,9 +249,11 @@ sentence punctuation without reserving internal marker text; literal input such
 as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.
 
 German date expansion checks the Gregorian calendar for both numeric and
-named-month dates. An explicit four-digit year determines whether February 29
-is valid. Without a year, February 29 is accepted. Invalid date candidates stay
-literal through date and ordinal normalization.
+named-month dates. A following four-digit year determines whether February 29
+is valid; without a year, February 29 is accepted. Only years from 2000 to 2099
+are spoken as part of the date: any other four-digit year still takes part in
+the check but is left to the remaining rules, as before. Invalid date candidates stay literal
+through date and ordinal normalization.
 
 German clock expansion accepts hours 0–23 and two-digit minutes 00–59.
 Midnight `00:00` becomes `null Uhr`. Out-of-range values and longer colon
