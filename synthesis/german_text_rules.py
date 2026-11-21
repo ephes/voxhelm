@@ -25,9 +25,11 @@
 # - year_to_words reads 1100-1999 as spoken years ("neunzehnhundertneunzig").
 # - Numeric substitutions preserve tokens above 64 digits without conversion.
 # - Cardinal labels emit their punctuation directly; no text markers are reserved.
+# - Date expansions require valid Gregorian calendar components.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 ABBREVIATIONS = (
     (r"\bLfd\.\s*Nr\.", "laufende Nummer"),
@@ -158,8 +160,18 @@ SENTENCE_STARTERS = frozenset(
     ).split()
 )
 
-MONTHS = r"(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)"
+MONTHS = "januar|februar|märz|april|mai|juni|juli|august|september|oktober|november|dezember"
+MONTH_NUMBERS = {month: number for number, month in enumerate(MONTHS.split("|"), start=1)}
 MAX_NUMERIC_TOKEN_DIGITS = 64
+
+
+def _is_calendar_date(day: int, month: int, year: str | None) -> bool:
+    try:
+        # A yearless 29 February can refer to a leap year.
+        date(int(year) if year is not None else 2000, month, day)
+    except ValueError:
+        return False
+    return True
 
 
 def _supports_numeric_token(raw: str) -> bool:
@@ -384,6 +396,8 @@ def normalize_german_text(text: str) -> str:
         day = int(match.group(2))
         month = int(match.group(3))
         year = match.group(4)
+        if not _is_calendar_date(day, month, year):
+            return match.group(0)
 
         result = f"{prefix}{ordinal_dative(day)} {ordinal_dative(month)}"
         if year:
@@ -391,11 +405,13 @@ def normalize_german_text(text: str) -> str:
         return result
 
     def replace_text_date(match: re.Match[str]) -> str:
-        prefix_full = match.group(1) or ""
+        prefix_full = match.group("date_prefix") or ""
         prefix = prefix_full.strip().lower()
-        day = int(match.group(2))
-        month = match.group(3)
-        year = match.group(4)
+        day = int(match.group("date_day"))
+        month = match.group("month")
+        year = match.group("year")
+        if not _is_calendar_date(day, MONTH_NUMBERS.get(month.casefold(), 0), year):
+            return match.group(0)
 
         day_word = ordinal_to_words(day)
         if prefix in {"am", "den", "zum", "dem", "vom", "bis zum", "jeden"}:
@@ -416,10 +432,15 @@ def normalize_german_text(text: str) -> str:
             return f"{hour_word} Uhr"
         return f"{hour_word} Uhr {number_to_words(minute)}"
 
-    def replace_ordinal(match: re.Match[str]) -> str:
-        prefix_full = match.group(1) or ""
+    def replace_text_date_or_ordinal(match: re.Match[str]) -> str:
+        if match.group("month") is not None:
+            # Consume the whole candidate even when invalid, so its day cannot
+            # be rewritten as a standalone ordinal.
+            return replace_text_date(match)
+
+        prefix_full = match.group("ordinal_prefix") or ""
         prefix = prefix_full.strip().lower()
-        raw_number = match.group(2)
+        raw_number = match.group("ordinal_number")
         number = int(raw_number)
 
         following = match.string[match.end() :].lstrip()
@@ -468,24 +489,23 @@ def normalize_german_text(text: str) -> str:
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°\s*[Cc]\b", replace_temperature, text)
     text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
     text = re.sub(
-        r"(?i)(?<!\w)(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
-        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(20\d{2}))?(?=\s|[.,!?]|$)",
+        r"(?i)(?<!\w)(?<!\d\.)(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
+        r"(\d{1,2})\.(\d{1,2})\.(?:\s*(\d{4}))?(?!\.\d)(?=\s|[.,!?]|$)",
         replace_numeric_date,
-        text,
-    )
-    text = re.sub(
-        r"(?i)(?<!\w)(am\s+|der\s+|die\s+|das\s+|den\s+|zum\s+|vom\s+|dem\s+|bis\s+zum\s+|jeden\s+)?"
-        r"(\d{1,2})\.\s*" + MONTHS + r"(?:\s+(20\d{2}))?(?=\s|[.,!?]|$)",
-        replace_text_date,
         text,
     )
     text = re.sub(r"(?<!\w)(\d{1,2}):(\d{2})(?:\s*[Uu]hr)?(?=\s|[.,!?]|$)", replace_time, text)
     text = re.sub(
-        r"(?i)(?<!\w)(am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
+        r"(?i)(?<!\w)(?<!\d\.)(?:"
+        r"(?P<date_prefix>am\s+|der\s+|die\s+|das\s+|den\s+|zum\s+|vom\s+|dem\s+|bis\s+zum\s+|jeden\s+)?"
+        rf"(?P<date_day>\d{{1,2}})\.\s*(?P<month>{MONTHS})(?:\s+(?P<year>\d{{4}}))?(?=\s|[.,!?]|$)"
+        r"|(?P<ordinal_prefix>am\s+|im\s+|zum\s+|vom\s+|dem\s+|den\s+|der\s+|die\s+|das\s+|"
         r"eine\s+|einer\s+|einen\s+|einem\s+|jeden\s+|jedem\s+|jede\s+|jeder\s+|"
         r"nach\s+der\s+(?:gefühlt\s+)?)?"
-        r"(\d{1,6})\.(?=\s+\w|$)",
-        replace_ordinal,
+        # An ordinal prefix such as "im" can begin before a named date.
+        rf"(?!\d{{1,2}}\.\s*(?:{MONTHS})(?=\s|[.,!?]|$))"
+        r"(?P<ordinal_number>\d{1,6})\.(?=\s+\w|$))",
+        replace_text_date_or_ordinal,
         text,
     )
     text = re.sub(r"(?i)\bHbf\b\.?", "Hauptbahnhof", text)

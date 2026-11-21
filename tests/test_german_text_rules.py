@@ -49,6 +49,47 @@ def test_normalize_german_text_numbers(text: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Version 1.13.2024.",
+        "Version 1.2.3.4.",
+        "Am 0.12.2024.",
+        "Am 1.0.",
+        "Am 31.4.2024.",
+        "Am 29.2.2023.",
+        "Am 31. April 2024.",
+        "Am 29. FEBRUAR 2023.",
+        "Am 30. Februar.",
+        "Im 31. April 2024.",
+        "Nach der 31. April 2024.",
+        "Am 29. Februar 1900.",
+        "Am 29.2.2100.",
+    ],
+)
+def test_invalid_german_dates_remain_literal(text: str) -> None:
+    assert normalize_german_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Am 29.2.2024 geht es los.",
+            "Am neunundzwanzigsten zweiten zweitausendvierundzwanzig geht es los.",
+        ),
+        (
+            "Am 29. FeBrUaR 2024 geht es los.",
+            "Am neunundzwanzigsten FeBrUaR zweitausendvierundzwanzig geht es los.",
+        ),
+        ("Am 29.2. geht es los.", "Am neunundzwanzigsten zweiten geht es los."),
+        ("Am 29. Februar geht es los.", "Am neunundzwanzigsten Februar geht es los."),
+    ],
+)
+def test_valid_german_dates_are_spoken(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
+
+
+@pytest.mark.parametrize(
     ("year", "expected"),
     [
         (1990, "neunzehnhundertneunzig"),

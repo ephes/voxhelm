@@ -248,6 +248,11 @@ Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their
 sentence punctuation without reserving internal marker text; literal input such
 as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.
 
+German date expansion checks the Gregorian calendar for both numeric and
+named-month dates. An explicit four-digit year determines whether February 29
+is valid. Without a year, February 29 is accepted. Invalid date candidates stay
+literal through date and ordinal normalization.
+
 Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
 a single mono batch `(1, samples)`. Invalid output fails synthesis before WAV
 publication. Valid samples keep the existing clipping and 16-bit PCM conversion.

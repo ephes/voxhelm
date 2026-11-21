@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Validate German synthesis dates against the Gregorian calendar and keep
+  invalid date candidates literal.
+
 - Return retryable HTTP 503 for malformed S3 errors during artifact downloads.
 
 - List each exposed operator transcript artifact with a name-specific download
