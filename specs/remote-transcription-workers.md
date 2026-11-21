@@ -735,6 +735,11 @@ bypass the idempotent-completion branch; each must fail its named oracle.
 
 ### Bounded remote claim scans
 
+Each claim request first reconciles up to 16 expired final attempts, ordered by
+lease expiry and job ID. It then scans for runnable work even if expired final
+attempts remain. Later polls continue to drain the backlog. A second scan after
+a lost claim race uses the same request's reconciliation window.
+
 `Worker.claim_scan_cursor` stores the worker's current sweep: the
 (priority rank, `created_at`, job ID) of the last job the sweep rejected before
 its first eligible candidate, the time the sweep started (minus a 30-second

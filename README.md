@@ -768,9 +768,9 @@ uploads. Each candidate uses the maintenance deletion policy in its own locked
 transaction, with an expiry/claim recheck, a key ownership check and protection
 for objects still referenced by another row. The separate profile backstop runs
 during maintenance.
-A refusal or deletion failure retains the candidate for retry
-and the pass continues the bounded pass so a healthy new upload can proceed. Warnings log
-only the upload ID, without storage keys or raw exception details. Expiry removal
+A refusal or deletion failure retains the candidate for retry, and the bounded
+pass continues so a healthy new upload can proceed. Warnings log only the upload
+ID, without storage keys or raw exception details. Expiry removal
 is eventual; maintenance retries failures. A failed candidate's `expires_at` moves to
 the time of the failure: it stays expired, but later passes reach older healthy
 uploads first, so repeatedly failing rows cannot starve the bounded pass.
@@ -1228,6 +1228,10 @@ share one grouped active/recent Job count query instead of per-peer counts. Capa
 lease expiry use the admission time sampled after acquiring the worker write lock,
 so lock contention does not consume the issued lease.
 
+Before scanning, each worker poll reconciles up to 16 expired final attempts in
+lease-expiry and job-ID order. The poll can lease runnable work while later polls
+drain the remaining expired attempts.
+
 Claim scans are bounded and priority-correct. Each scan hydrates and validates at
 most 100 queued/expired jobs in priority/creation-time/job-ID order; a poll runs
 a second scan only after losing a conditional-claim race. A worker-owned cursor
@@ -1247,8 +1251,7 @@ sweep. Each claimable-job change at or before the cursor restarts the sweep, so
 while such changes keep arriving faster than a sweep takes, scans favour the head
 of the queue (priority first). Only the Python-side hydration and validation is
 bounded; the database still evaluates and orders the claimable set (served by the
-`(execution_mode, state, priority, created_at)` index). An unchanged cursor is
-not rewritten, so idle polls do not write.
+`(execution_mode, state, priority, created_at)` index). An unchanged cursor requires no write.
 
 Configure `VOXHELM_WORKER_BASE_URL` (or `VOXHELM_BASE_URL`) with the canonical
 worker API origin (the final

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Limit expired final attempts reconciled per worker claim request to 16, then
+  scan for runnable work even when the expired backlog has rows left.
+
 - Commit exhausted remote lease failure and staged upload claim release together
   so a failed claim release can be retried.
 

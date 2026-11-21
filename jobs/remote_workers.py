@@ -183,6 +183,7 @@ CLAIM_UPDATE_CANDIDATE_LIMIT = 10
 # CLAIM_SCAN_ROUNDS scans (a second only after losing a conditional-claim race).
 CLAIM_SCAN_LIMIT = 100
 CLAIM_SCAN_ROUNDS = 2
+EXHAUSTED_LEASE_RECONCILIATION_LIMIT = 16
 # A job changed shortly before a sweep started still counts as changed during it: a
 # requeue samples its timestamp before waiting for the SQLite write lock (busy
 # timeout 5 s) and commits after the sweep's read. 30 s covers that wait plus the
@@ -346,9 +347,9 @@ def claim_remote_work(*, worker_id: str, payload: dict[str, Any]) -> RemoteClaim
     if max_jobs < 1:
         raise ApiError("max_jobs must be at least 1.")
     capabilities = optional_object(payload.get("capabilities"), "capabilities")
+    expire_exhausted_remote_leases(timezone.now())
     for _ in range(CLAIM_SCAN_ROUNDS):
         now = timezone.now()
-        expire_exhausted_remote_leases(now)
         candidates = remote_claim_candidates(
             worker_id=worker_id, now=now, capabilities=capabilities
         )
@@ -1843,13 +1844,13 @@ def storage_key_is_under_attempt_prefix(storage_key: str, *, prefix: str) -> boo
     return len(storage_key) > len(prefix)
 
 
-def expire_exhausted_remote_leases(now: object) -> None:
+def expire_exhausted_remote_leases(now: datetime) -> None:
     exhausted_jobs = Job.objects.filter(
         execution_mode=Job.ExecutionMode.REMOTE_PULL,
         state=Job.State.RUNNING,
         lease_expires_at__lt=now,
         attempt_count__gte=F("max_attempts"),
-    )
+    ).order_by("lease_expires_at", "pk")[:EXHAUSTED_LEASE_RECONCILIATION_LIMIT]
     for job in exhausted_jobs:
         reconcile_remote_job_state(job)
 

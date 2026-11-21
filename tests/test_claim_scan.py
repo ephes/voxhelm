@@ -149,6 +149,42 @@ def test_bounded_claims_preserve_compatible_priority_and_fifo(client, settings):
 
 
 @pytest.mark.django_db
+def test_claim_reconciles_only_one_window_of_exhausted_leases(client, settings):
+    prepare(client, settings)
+    runnable = compatible(client, settings, task_ref="synthetic-runnable")
+    expired_at = timezone.now() - timedelta(minutes=1)
+    # Insert the most recent expiries first to exercise lease ordering.
+    exhausted = Job.objects.bulk_create(
+        [
+            Job(
+                producer="synthetic",
+                job_type=Job.JobType.TRANSCRIBE,
+                execution_mode=Job.ExecutionMode.REMOTE_PULL,
+                state=Job.State.RUNNING,
+                input_data={"kind": "url", "url": SYNTHETIC_URL},
+                attempt_count=1,
+                max_attempts=1,
+                lease_expires_at=expired_at - timedelta(seconds=index),
+            )
+            for index in range(33)
+        ]
+    )
+    remaining = Job.objects.filter(
+        pk__in=[job.pk for job in exhausted],
+        state=Job.State.RUNNING,
+    )
+
+    assert claimed_id(claim_one(client)) == str(runnable.pk)
+    assert set(remaining.values_list("pk", flat=True)) == {job.pk for job in exhausted[:17]}
+
+    assert claimed_id(claim_one(client)) is None
+    assert list(remaining.values_list("pk", flat=True)) == [exhausted[0].pk]
+
+    assert claimed_id(claim_one(client)) is None
+    assert not remaining.exists()
+
+
+@pytest.mark.django_db
 def test_expired_lease_before_the_cursor_restarts_the_sweep(client, settings):
     prepare(client, settings)
     early = compatible(client, settings, task_ref="early-high", priority="high")
