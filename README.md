@@ -570,8 +570,10 @@ on the username, the command refuses with a retry instruction; rerun it explicit
 
 The operator login form also preserves password whitespace. Earlier versions
 trimmed bootstrap passwords: rerunning bootstrap now replaces that trimmed
-credential with the exact supplied value. Remove unintended whitespace (such as
-a trailing newline from a secret file) before bootstrapping. For browser sign-in,
+credential with the exact supplied value. `--password-stdin` already removes the
+single LF or CRLF line terminator. For `--password` or the environment variable,
+and for any whitespace beyond that terminator, remove unintended whitespace (such
+as a trailing newline from a secret file) before bootstrapping. For browser sign-in,
 avoid passwords containing line breaks, which password inputs remove.
 
 Deploy-time note: the deployment layer should call the same in-app command with the real secret rather than creating the operator directly in a separate repo.
