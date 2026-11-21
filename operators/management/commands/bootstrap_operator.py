@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -20,21 +21,37 @@ class Command(BaseCommand):
             default=os.getenv("VOXHELM_BOOTSTRAP_OPERATOR_USERNAME", "jochen"),
         )
         parser.add_argument("--email", default=os.getenv("VOXHELM_BOOTSTRAP_OPERATOR_EMAIL", ""))
-        parser.add_argument(
-            "--password",
-            default=os.getenv("VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD", ""),
+        password_source = parser.add_mutually_exclusive_group()
+        password_source.add_argument("--password", help="Pass the password as an argument.")
+        password_source.add_argument(
+            "--password-stdin",
+            action="store_true",
+            help="Read the password from one line of stdin.",
         )
 
     def handle(self, *args, **options) -> None:
         del args
         username = str(options["username"]).strip()
         email = str(options["email"]).strip()
-        password = str(options["password"])
         if not username:
             raise CommandError("A username is required.")
+        password_option = options["password"]
+        if options["password_stdin"]:
+            # call_command() keyword options bypass argparse's mutual exclusion.
+            if password_option is not None:
+                raise CommandError("--password and --password-stdin cannot be used together.")
+            password = sys.stdin.readline()
+            if password.endswith("\n"):
+                password = password[:-1].removesuffix("\r")
+            if not password:
+                raise CommandError("A password is required on stdin.")
+        elif password_option is None:
+            password = os.getenv("VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD", "")
+        else:
+            password = str(password_option)
         if not password:
             raise CommandError(
-                "A password is required. Pass --password or set "
+                "A password is required. Pass --password-stdin or --password, or set "
                 "VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD."
             )
 

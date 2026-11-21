@@ -532,20 +532,35 @@ export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
 
-Bootstrap the initial operator account after migrations:
+Bootstrap the initial operator account after migrations. Use `--password-stdin`
+to read a password from a secret file or a secret provider's output:
 
 ```bash
-uv run python manage.py bootstrap_operator --username jochen --password "replace-me"
+uv run python manage.py bootstrap_operator --username operator --password-stdin < /path/to/operator-password
 ```
 
-Passwords supplied through `--password` or `VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD`
-are preserved exactly, including leading and trailing whitespace, when creating
-or updating an account. An empty password is rejected; whitespace-only passwords
-are preserved. Use shell quoting for intentional spaces, for example
-`--password ' passphrase '`. Bootstrap trims surrounding whitespace from usernames
-and email addresses. It validates the username against the user model and the
-login form's 150-character limit, and validates any nonblank email against the
-user model, before hashing the password or looking up the account.
+For interactive entry in Bash, use a silent read and pipe the password to the command:
+
+```bash
+if IFS= read -r -s -p "Operator password: " operator_password; then
+  printf '\n'
+  printf '%s\n' "$operator_password" |
+    uv run python manage.py bootstrap_operator --username operator --password-stdin
+fi
+unset operator_password
+```
+
+Stdin mode reads the first line, removes its LF or CRLF terminator if present,
+and preserves all other whitespace. EOF before any value or an empty first
+line fails. Use either `--password-stdin` or `--password`. When neither flag is
+present, bootstrap uses `VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD`. Passwords supplied
+through the argument or environment variable are preserved exactly. An empty
+password is rejected in every mode. Whitespace-only passwords are preserved.
+
+Bootstrap trims surrounding whitespace from usernames and email addresses.
+It validates the username against the user model and the login form's
+150-character limit, and validates any nonblank email against the user model,
+before hashing the password or looking up the account.
 
 Bootstrap hashes before publishing any fields, then locks/reloads and saves the
 complete credential set in one transaction. Hash/save failures leave both new and

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Read operator bootstrap passwords from stdin with `--password-stdin`,
+  preserving whitespace apart from the line terminator.
+
 - Validate operator bootstrap usernames and nonblank emails before hashing
   credentials or looking up the account. Blank emails preserve the existing address.
 

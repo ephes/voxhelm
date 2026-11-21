@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
@@ -311,6 +312,54 @@ def test_bootstrap_operator_rejects_empty_password(existing):
         assert user_model.objects.get(username="fictional-operator").check_password("old")
     else:
         assert not user_model.objects.filter(username="fictional-operator").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", ""])
+def test_bootstrap_operator_preserves_stdin_password_exactly(monkeypatch, terminator):
+    credential = " \tfictional passphrase  "
+    stdin = StringIO(credential + terminator + ("ignored\n" if terminator else ""))
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setenv("VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD", "environment-password")
+
+    call_command("bootstrap_operator", "--password-stdin", username="fictional-operator")
+
+    user = get_user_model().objects.get(username="fictional-operator")
+    assert user.check_password(credential)
+    assert not user.check_password(credential.strip())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(
+    ("stdin", "explicit_options", "message"),
+    [
+        ("", {}, "A password is required"),
+        ("\n", {}, "A password is required"),
+        ("\r\n", {}, "A password is required"),
+        ("stdin-password\n", {"password": "argument-password"}, "cannot be used together"),
+        ("stdin-password\n", {"password": ""}, "cannot be used together"),
+    ],
+)
+def test_bootstrap_operator_rejects_missing_or_conflicting_stdin_password(
+    monkeypatch, existing, stdin, explicit_options, message
+):
+    users = get_user_model().objects
+    if existing:
+        users.create_user(username="fictional-operator", password="old", is_active=False)
+    before = list(users.values())
+    monkeypatch.setattr("sys.stdin", StringIO(stdin))
+    monkeypatch.setenv("VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD", "environment-password")
+
+    with pytest.raises(CommandError, match=message):
+        call_command(
+            "bootstrap_operator",
+            username="fictional-operator",
+            password_stdin=True,
+            **explicit_options,
+        )
+
+    assert list(users.values()) == before
 
 
 @pytest.mark.django_db
