@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from botocore.exceptions import BotoCoreError, ClientError
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
@@ -20,10 +22,11 @@ def artifact_response(request: HttpRequest, artifact: JobArtifact) -> HttpRespon
         )
         return reader_response(request, reader, content_type=artifact.content_type)
     except (OSError, BotoCoreError, ClientError, ValueError, RuntimeError) as exc:
-        missing = isinstance(exc, FileNotFoundError) or (
-            isinstance(exc, ClientError)
-            and exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "NotFound", "404"}
-        )
+        missing = isinstance(exc, FileNotFoundError)
+        if isinstance(exc, ClientError) and isinstance(exc.response, Mapping):
+            error = exc.response.get("Error")
+            code = error.get("Code") if isinstance(error, Mapping) else None
+            missing = isinstance(code, str) and code in {"NoSuchKey", "NotFound", "404"}
         return openai_error_response(
             "Artifact object is missing."
             if missing

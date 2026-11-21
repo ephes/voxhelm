@@ -12,7 +12,7 @@ class PrivateJobResponsesMiddleware(MiddlewareMixin):
         if name in {"uploads-collection", "jobs-collection", "job-detail", "job-artifact"}:
             add_never_cache_headers(response)
             patch_vary_headers(response, ("Authorization",))
-        elif name in {"root", "operator-artifact"}:
+        elif name in {"root", "operator-artifact", "operator-artifact-by-name"}:
             add_never_cache_headers(response)
             patch_vary_headers(response, ("Cookie",))
         return response

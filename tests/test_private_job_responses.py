@@ -90,12 +90,13 @@ def test_same_bearer_cannot_reuse_cached_private_response(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("revocation", ["staff", "ownership", "exposed", "session"])
+@pytest.mark.parametrize("suffix", ["text", "by-name/transcript.txt"])
 def test_operator_download_rechecks_access_with_same_cookie(
-    cached_responses, private_job, revocation
+    cached_responses, private_job, revocation, suffix
 ):
     user, job, artifact = private_job
     cached_responses.force_login(user)
-    url = f"/transcripts/{job.id}/artifacts/text"
+    url = f"/transcripts/{job.id}/artifacts/{suffix}"
     first = cached_responses.get(url)
     assert first.status_code == 200
     assert b"private synthetic transcript" in b"".join(first.streaming_content)

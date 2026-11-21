@@ -688,13 +688,22 @@ S3 must report a matching nonnegative integer `ContentLength`. Missing, invalid
 or mismatched size metadata closes the reader and returns HTTP 503 before any
 artifact bytes are sent. Closing or cancelling a streaming response closes its
 reader once the active read settles. Authorization, private cache headers and
-recorded content types still apply. A missing stored object returns HTTP 404. Other
-supported storage and configuration failures before response headers return
-HTTP 503 with a bounded JSON error and no storage details. If closing the
-filesystem parent directory fails after opening the reader, Voxhelm closes the
-reader and reports the directory error through the same storage error boundary.
+recorded content types still apply. A missing stored object returns HTTP 404.
+S3 missing-object codes are recognized only as strings in a valid error mapping.
+Malformed S3 error envelopes and other supported storage and configuration failures
+before response headers return HTTP 503 with a bounded JSON error and no storage
+details. If closing the filesystem parent directory fails after opening the
+reader, Voxhelm closes the reader and reports the directory error through the
+same storage error boundary.
 Rows are kept for diagnosis and retry. A read failure after headers have been
 sent terminates the stream with the status already sent.
+
+The operator console lists each exposed artifact in the supported transcript
+formats for a completed job. Links use the exact artifact name and include that
+name in the label when several artifacts share a format. Downloads require a
+staff session that owns the transcript job and an exposed artifact. Older
+format-only links work when exactly one exposed artifact matches the format.
+Missing or ambiguous matches return HTTP 404.
 
 Local Django Tasks execution atomically claims a queued job for its expected
 task ID. Replayed, already running, terminal, or stale-task invocations return

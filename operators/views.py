@@ -9,7 +9,13 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
-from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseRedirect
+from django.http import (
+    Http404,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseForbidden,
+    HttpResponseRedirect,
+)
 from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -117,12 +123,21 @@ def logout_view(request: HttpRequest) -> HttpResponse:
 
 @login_required(login_url="/")
 @require_GET
-def operator_artifact(request: HttpRequest, job_id: UUID, format_name: str) -> HttpResponseBase:
+def operator_artifact(
+    request: HttpRequest, job_id: UUID, *, name: str | None = None, format_name: str | None = None
+) -> HttpResponseBase:
     if not request.user.is_staff:
         return operator_access_forbidden()
     operator = cast(Any, request.user)
     job = get_object_or_404(Job, id=job_id, operator=operator, job_type=Job.JobType.TRANSCRIBE)
-    artifact = get_object_or_404(JobArtifact, job=job, format=format_name, exposed=True)
+    exposed_artifacts = job.artifacts.filter(exposed=True)
+    if name is not None:
+        artifact = get_object_or_404(exposed_artifacts, name=name)
+    else:
+        try:
+            artifact = get_object_or_404(exposed_artifacts, format=format_name)
+        except JobArtifact.MultipleObjectsReturned as exc:
+            raise Http404("Artifact format is ambiguous.") from exc
     return artifact_response(request, artifact)
 
 
@@ -198,25 +213,28 @@ def handle_submission(*, request: HttpRequest, form: TranscriptSubmissionForm) -
 def build_download_links(job: Job | None) -> list[dict[str, str]]:
     if job is None or job.state != Job.State.SUCCEEDED:
         return []
-    order = ["text", "json", "vtt", "dote", "podlove"]
-    artifacts_by_format = {
-        artifact.format: artifact for artifact in job.artifacts.filter(exposed=True)
+    artifacts_by_format: dict[str, list[JobArtifact]] = {
+        format_name: [] for format_name in OPERATOR_TRANSCRIPTION_OUTPUT_FORMATS
     }
+    for artifact in job.artifacts.filter(exposed=True, format__in=artifacts_by_format).order_by(
+        "name"
+    ):
+        artifacts_by_format[artifact.format].append(artifact)
+
     downloads: list[dict[str, str]] = []
-    for format_name in order:
-        artifact = artifacts_by_format.get(format_name)
-        if artifact is None:
-            continue
-        downloads.append(
-            {
-                "format": format_name,
-                "label": format_name.upper() if format_name != "podlove" else "Podlove",
-                "url": reverse(
-                    "operator-artifact",
-                    kwargs={"job_id": job.id, "format_name": artifact.format},
-                ),
-            }
-        )
+    for format_name, matching_artifacts in artifacts_by_format.items():
+        label = "Podlove" if format_name == "podlove" else format_name.upper()
+        for artifact in matching_artifacts:
+            downloads.append(
+                {
+                    "format": format_name,
+                    "label": f"{label} ({artifact.name})" if len(matching_artifacts) > 1 else label,
+                    "url": reverse(
+                        "operator-artifact-by-name",
+                        kwargs={"job_id": job.id, "name": artifact.name},
+                    ),
+                }
+            )
     return downloads
 
 

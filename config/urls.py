@@ -8,6 +8,11 @@ urlpatterns = [
     path("", root, name="root"),
     path("logout", logout_view, name="logout"),
     path(
+        "transcripts/<uuid:job_id>/artifacts/by-name/<path:name>",
+        operator_artifact,
+        name="operator-artifact-by-name",
+    ),
+    path(
         "transcripts/<uuid:job_id>/artifacts/<str:format_name>",
         operator_artifact,
         name="operator-artifact",

@@ -107,16 +107,20 @@ def artifact_fixture(user=None):
     return job, artifact
 
 
+# False selects the bearer API route; strings select an operator console route.
+OPERATOR_ROUTES = [False, "text", "by-name/transcript.txt"]
+
+
 def artifact_url(job, operator):
     return (
-        f"/transcripts/{job.id}/artifacts/text"
+        f"/transcripts/{job.id}/artifacts/{operator}"
         if operator
         else f"/v1/jobs/{job.id}/artifacts/transcript.txt"
     )
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 @pytest.mark.parametrize("backend", ["filesystem", "s3"])
 @pytest.mark.parametrize(
     "data,recorded_size,status",
@@ -223,7 +227,7 @@ def test_s3_download_requires_valid_size_metadata(client, monkeypatch, size_meta
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 @pytest.mark.parametrize("early_close", [False, True])
 def test_download_streams_bounded_chunks_and_closes(
     client, django_user_model, monkeypatch, operator, early_close
@@ -257,7 +261,7 @@ def test_download_streams_bounded_chunks_and_closes(
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 def test_asgi_download_remains_async_and_closes_on_cancellation(
     django_user_model, monkeypatch, operator
 ):
@@ -292,13 +296,23 @@ def test_asgi_download_remains_async_and_closes_on_cancellation(
     asyncio.run(request())
 
 
+def client_error_with_malformed_response(response):
+    # botocore formats the error at construction time using a valid envelope.
+    error = ClientError({"Error": {"Code": "SyntheticError"}}, "GetObject")
+    error.response = response
+    return error
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 @pytest.mark.parametrize(
     "error,status",
     [
         (FileNotFoundError("synthetic-private-marker"), 404),
         (OSError("synthetic-private-marker"), 503),
+        (client_error_with_malformed_response(None), 503),
+        (client_error_with_malformed_response({"Error": ["synthetic-private-marker"]}), 503),
+        (client_error_with_malformed_response({"Error": {"Code": ["NoSuchKey"]}}), 503),
         (
             ClientError(
                 {"Error": {"Code": "NoSuchKey", "Message": "synthetic-private-marker"}}, "GetObject"
@@ -376,7 +390,7 @@ def test_job_post_keeps_valid_speed_boundaries(client, settings, speed):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 def test_download_denial_never_opens_storage(client, django_user_model, monkeypatch, operator):
     owner = django_user_model.objects.create_user(username="synthetic-owner", is_staff=True)
     job, _ = artifact_fixture(owner)
@@ -392,7 +406,7 @@ def test_download_denial_never_opens_storage(client, django_user_model, monkeypa
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("operator", [False, True])
+@pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 def test_midstream_error_closes_reader_and_keeps_metadata(
     client, django_user_model, monkeypatch, operator
 ):

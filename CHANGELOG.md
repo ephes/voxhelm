@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Return retryable HTTP 503 for malformed S3 errors during artifact downloads.
+
+- List each exposed operator transcript artifact with a name-specific download
+  link. Keep format-only links when they identify a single exposed artifact.
+
 - Require matching S3 `ContentLength` metadata for recorded artifact downloads.
   Reject missing or invalid lengths with HTTP 503 and close the response body.
 

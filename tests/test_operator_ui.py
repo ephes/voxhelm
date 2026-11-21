@@ -106,8 +106,8 @@ def test_uploaded_audio_submission_runs_sync_path(client, monkeypatch):
     assert job.input_data["kind"] == "upload"
     body = response.content.decode()
     assert "Operator transcript" in body
-    assert f"/transcripts/{job.id}/artifacts/dote" in body
-    assert f"/transcripts/{job.id}/artifacts/podlove" in body
+    assert f"/transcripts/{job.id}/artifacts/by-name/transcript.dote.json" in body
+    assert f"/transcripts/{job.id}/artifacts/by-name/transcript.podlove.json" in body
 
 
 @pytest.mark.django_db
@@ -337,9 +337,61 @@ def test_operator_artifact_rejects_other_operator_job(client):
     )
     client.force_login(jochen)
 
-    response = client.get(f"/transcripts/{job.id}/artifacts/text")
+    assert client.get(f"/transcripts/{job.id}/artifacts/text").status_code == 404
+    assert client.get(f"/transcripts/{job.id}/artifacts/by-name/transcript.txt").status_code == 404
 
-    assert response.status_code == 404
+
+@pytest.mark.django_db
+def test_operator_download_links_select_each_exposed_artifact_by_name(client, settings):
+    operator = get_user_model().objects.create_user(username="synthetic-operator", is_staff=True)
+    client.force_login(operator)
+    job = Job.objects.create(
+        producer="__operator_ui__",
+        operator=operator,
+        job_type=Job.JobType.TRANSCRIBE,
+        input_data={},
+        state=Job.State.SUCCEEDED,
+    )
+    visible_names = ["text", "alternate transcript.txt"]
+    hidden_name = "hidden.txt"
+    for filename in [*visible_names, hidden_name]:
+        storage_key = f"voxhelm/jobs/{job.id}/{filename}"
+        artifact_path = settings.VOXHELM_ARTIFACT_ROOT / storage_key
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        data = filename.encode()
+        artifact_path.write_bytes(data)
+        JobArtifact.objects.create(
+            job=job,
+            name=filename,
+            kind=JobArtifact.Kind.TRANSCRIPT_TEXT,
+            format="text",
+            storage_backend="filesystem",
+            storage_key=storage_key,
+            content_type="text/plain",
+            size_bytes=len(data),
+            exposed=filename != hidden_name,
+        )
+
+    console = client.get(f"/?job={job.id}")
+    assert console.status_code == 200
+    downloads = console.context["selected_job_artifacts"]
+    assert len(downloads) == 2
+    assert len({download["label"] for download in downloads}) == 2
+    downloaded = set()
+    for download in downloads:
+        assert f'href="{download["url"]}"' in console.content.decode()
+        response = client.get(download["url"])
+        assert response.status_code == 200
+        downloaded.add(b"".join(response.streaming_content).decode())
+    assert downloaded == set(visible_names)
+
+    prefix = f"/transcripts/{job.id}/artifacts"
+    assert client.get(f"{prefix}/by-name/{hidden_name}").status_code == 404
+    assert client.get(f"{prefix}/text").status_code == 404
+    JobArtifact.objects.filter(job=job, name=visible_names[1]).update(exposed=False)
+    legacy = client.get(f"{prefix}/text")
+    assert legacy.status_code == 200
+    assert b"".join(legacy.streaming_content) == visible_names[0].encode()
 
 
 @pytest.mark.django_db
