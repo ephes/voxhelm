@@ -123,6 +123,12 @@ def test_glued_non_20xx_years_are_not_expanded(text: str) -> None:
         # A named date ends at any non-word character after the month.
         ("Am 3. Mai: danach.", "Am dritten Mai: danach."),
         ("(3. Mai) war gut.", "(dritter Mai) war gut."),
+        # A number glued to letters is not a year.
+        (
+            "Am 29. Februar 2023er Riesling verkosten.",
+            "Am neunundzwanzigsten Februar 2023er Riesling verkosten.",
+        ),
+        ("Am 29.2. 2023er Riesling.", "Am neunundzwanzigsten zweiten 2023er Riesling."),
     ],
 )
 def test_valid_german_dates_are_spoken(text: str, expected: str) -> None:
