@@ -102,23 +102,26 @@ class FilesystemArtifactStore:
             raise ValueError("Artifact objects must be regular files, not aliases or directories.")
 
     def open_reader(self, *, key: str, expected_size_bytes: int | None = None) -> BinaryIO:
-        with self._parent(key) as (directory, name):
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            try:
-                raw = io.FileIO(fd, "rb", closefd=True)
-            except BaseException:
-                os.close(fd)
-                raise
-            try:
-                metadata = os.fstat(raw.fileno())
+        reader: BinaryIO | None = None
+        try:
+            with self._parent(key) as (directory, name):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                try:
+                    reader = io.FileIO(fd, "rb", closefd=True)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                metadata = os.fstat(reader.fileno())
                 if not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("Artifact objects must be regular files.")
                 if expected_size_bytes is not None and metadata.st_size != expected_size_bytes:
                     raise ValueError("Artifact object size differs from the recorded size.")
-                return io.BufferedReader(raw)
-            except BaseException:
-                _close_rejected_reader(raw)
-                raise
+                reader = io.BufferedReader(reader)
+            return reader
+        except BaseException:
+            if reader is not None:
+                _close_rejected_reader(reader)
+            raise
 
     @contextmanager
     def _reader(self, key: str) -> Iterator[BinaryIO]:

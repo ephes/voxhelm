@@ -689,9 +689,11 @@ artifact bytes. Closing or cancelling a streaming response closes its reader onc
 the active read settles. Authorization, private cache headers and recorded
 content types still apply. A missing stored object returns HTTP 404. Other
 supported storage and configuration failures before response headers return
-HTTP 503 with a bounded JSON error and no storage details. Rows are kept for
-diagnosis and retry. A read failure after headers have been sent terminates the
-stream with the status already sent.
+HTTP 503 with a bounded JSON error and no storage details. If closing the
+filesystem parent directory fails after opening the reader, Voxhelm closes the
+reader and reports the directory error through the same storage error boundary.
+Rows are kept for diagnosis and retry. A read failure after headers have been
+sent terminates the stream with the status already sent.
 
 Local Django Tasks execution atomically claims a queued job for its expected
 task ID. Replayed, already running, terminal, or stale-task invocations return

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Close the filesystem artifact reader if closing its parent directory fails
+  before handoff, preserving the directory error.
+
 - Preserve local transcription outcomes when cleanup fails and continue
   cleaning the remaining resources.
 

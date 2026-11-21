@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
+import io
 import os
 import stat
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -177,6 +180,42 @@ def test_reader_factory_closes_descriptor_on_initialization_failure(monkeypatch,
     finally:
         for replacement in replacements:
             replacement.close()
+
+
+def test_reader_closes_when_parent_close_fails(tmp_path, monkeypatch):
+    (tmp_path / "artifact").write_bytes(b"synthetic")
+    store = FilesystemArtifactStore(root=tmp_path)
+    real_close = os.close
+    parent_error = OSError("synthetic parent close failure")
+    readers: list[tuple[io.BufferedReader, int]] = []
+
+    def track_reader(raw):
+        reader = io.BufferedReader(raw)
+        readers.append((reader, reader.fileno()))
+        return reader
+
+    def fail_parent_close(fd):
+        assert stat.S_ISDIR(os.fstat(fd).st_mode)
+        real_close(fd)
+        raise parent_error
+
+    monkeypatch.setattr(
+        "jobs.artifacts.io", SimpleNamespace(FileIO=io.FileIO, BufferedReader=track_reader)
+    )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "close", fail_parent_close)
+            with pytest.raises(OSError) as caught:
+                store.open_reader(key="artifact")
+        assert caught.value is parent_error
+        [(reader, fd)] = readers
+        assert reader.closed
+        with pytest.raises(OSError) as descriptor_error:
+            os.fstat(fd)
+        assert descriptor_error.value.errno == errno.EBADF
+    finally:
+        for opened, _ in readers:
+            opened.close()
 
 
 @pytest.mark.parametrize("primary", ["write", "fsync", "replace"])
