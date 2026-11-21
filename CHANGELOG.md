@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Require matching S3 `ContentLength` metadata for recorded artifact downloads.
+  Reject missing or invalid lengths with HTTP 503 and close the response body.
+
 - Close the filesystem artifact reader if closing its parent directory fails
   before handoff, preserving the directory error.
 

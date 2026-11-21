@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -176,6 +177,49 @@ def test_artifact_download_admits_opened_object_size(
         response.close()
     assert opened[0].closed
     assert JobArtifact.objects.get(pk=artifact.pk).size_bytes == recorded_size
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "size_metadata,status",
+    [
+        ({}, 503),
+        ({"ContentLength": None}, 503),
+        ({"ContentLength": True}, 503),
+        ({"ContentLength": 1.0}, 503),
+        ({"ContentLength": "1"}, 503),
+        ({"ContentLength": -1}, 503),
+        ({"ContentLength": 1}, 200),
+    ],
+    ids=["missing", "null", "bool", "float", "string", "negative", "matching"],
+)
+def test_s3_download_requires_valid_size_metadata(client, monkeypatch, size_metadata, status):
+    job, artifact = artifact_fixture()
+    artifact.size_bytes = 1
+    artifact.save(update_fields=["size_bytes"])
+    raw = io.BytesIO(b"x")
+    body = StreamingBody(raw, 1)
+    close = Mock(wraps=body.close)
+    monkeypatch.setattr(body, "close", close)
+    store = object.__new__(S3ArtifactStore)
+    store.bucket = "synthetic"
+    store.client = SimpleNamespace(get_object=lambda **kwargs: {"Body": body, **size_metadata})
+    install_store(monkeypatch, lambda identity: store)
+
+    response = client.get(artifact_url(job, False), HTTP_AUTHORIZATION="Bearer test-token")
+    try:
+        assert response.status_code == status
+        if status == 200:
+            assert b"".join(response.streaming_content) == b"x"
+        else:
+            assert not response.streaming
+            assert response.json()["error"]["type"] == "server_error"
+            close.assert_called_once_with()
+            assert raw.closed
+    finally:
+        response.close()
+    close.assert_called_once_with()
+    assert raw.closed
 
 
 @pytest.mark.django_db

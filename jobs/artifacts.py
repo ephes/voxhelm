@@ -35,7 +35,7 @@ class ArtifactStore(Protocol):
     def put_bytes(self, *, key: str, data: bytes, content_type: str) -> StoredArtifact: ...
 
     def open_reader(self, *, key: str, expected_size_bytes: int | None = None) -> BinaryIO:
-        """Open an object, rejecting a known size mismatch if a size is supplied."""
+        """Open an object, requiring matching size metadata if a size is supplied."""
         ...
 
     def read_bytes(self, *, key: str) -> bytes: ...
@@ -285,9 +285,11 @@ class S3ArtifactStore:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         body = response["Body"]
         size = response.get("ContentLength")
-        if expected_size_bytes is not None and size is not None and size != expected_size_bytes:
+        if expected_size_bytes is not None and (
+            type(size) is not int or size < 0 or size != expected_size_bytes
+        ):
             _close_rejected_reader(body)
-            raise ValueError("Artifact object size differs from the recorded size.")
+            raise ValueError("Artifact object size does not match the recorded size metadata.")
         return body
 
     def read_bytes(self, *, key: str) -> bytes:

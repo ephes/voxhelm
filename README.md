@@ -684,10 +684,11 @@ Producer and operator artifact downloads stream bounded reads from the artifact'
 recorded filesystem/S3 store, including asynchronous reads under ASGI. Before
 sending download headers, Voxhelm compares the recorded artifact size with the
 open file descriptor's size or the S3 GET response's reported `ContentLength`.
-A known mismatch closes the reader and returns HTTP 503 without streaming any
-artifact bytes. Closing or cancelling a streaming response closes its reader once
-the active read settles. Authorization, private cache headers and recorded
-content types still apply. A missing stored object returns HTTP 404. Other
+S3 must report a matching nonnegative integer `ContentLength`. Missing, invalid
+or mismatched size metadata closes the reader and returns HTTP 503 before any
+artifact bytes are sent. Closing or cancelling a streaming response closes its
+reader once the active read settles. Authorization, private cache headers and
+recorded content types still apply. A missing stored object returns HTTP 404. Other
 supported storage and configuration failures before response headers return
 HTTP 503 with a bounded JSON error and no storage details. If closing the
 filesystem parent directory fails after opening the reader, Voxhelm closes the
