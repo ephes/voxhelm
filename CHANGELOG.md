@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Validate operator bootstrap usernames and nonblank emails before hashing
+  credentials or looking up the account. Blank emails preserve the existing address.
+
 - Remove incomplete synchronous transcription upload copies after copy or close
   failures and preserve the original error if cleanup also fails.
 

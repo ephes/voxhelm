@@ -542,8 +542,10 @@ Passwords supplied through `--password` or `VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD`
 are preserved exactly, including leading and trailing whitespace, when creating
 or updating an account. An empty password is rejected; whitespace-only passwords
 are preserved. Use shell quoting for intentional spaces, for example
-`--password ' passphrase '`. Usernames and email addresses still have surrounding
-whitespace removed.
+`--password ' passphrase '`. Bootstrap trims surrounding whitespace from usernames
+and email addresses. It validates the username against the user model and the
+login form's 150-character limit, and validates any nonblank email against the
+user model, before hashing the password or looking up the account.
 
 Bootstrap hashes before publishing any fields, then locks/reloads and saves the
 complete credential set in one transaction. Hash/save failures leave both new and

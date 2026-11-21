@@ -3,9 +3,12 @@ from __future__ import annotations
 import os
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import IntegrityError, transaction
 from django.db.models import F
+
+from operators.forms import LoginForm
 
 
 class Command(BaseCommand):
@@ -36,8 +39,19 @@ class Command(BaseCommand):
             )
 
         user_model = get_user_model()
-        # Hash before taking the writer lock or publishing any account fields.
         prepared = user_model(username=username)
+        try:
+            LoginForm.base_fields["username"].clean(username)
+            user_model._meta.get_field("username").clean(username, prepared)
+        except ValidationError as exc:
+            raise CommandError("Invalid operator username: " + " ".join(exc.messages)) from exc
+        if email:
+            try:
+                user_model._meta.get_field("email").clean(email, prepared)
+            except ValidationError as exc:
+                raise CommandError("Invalid operator email: " + " ".join(exc.messages)) from exc
+
+        # Hash before taking the writer lock or publishing any account fields.
         prepared.set_password(password)
         try:
             with transaction.atomic():

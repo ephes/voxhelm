@@ -231,6 +231,31 @@ def test_bootstrap_operator_command_creates_jochen_account():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("username", "email", "existing", "field"),
+    [
+        ("x" * 151, "", False, "username"),
+        ("invalid username", "", False, "username"),
+        ("fictional-operator", "invalid-email", False, "email"),
+        ("fictional-operator", "invalid-email", True, "email"),
+        ("fictional-operator", "x" * 250 + "@example.test", True, "email"),
+    ],
+)
+def test_bootstrap_operator_rejects_invalid_login_fields(
+    username, email, existing, field, django_assert_num_queries
+):
+    users = get_user_model().objects
+    if existing:
+        users.create_user(username=username, email="original@example.test", password="old")
+    before = list(users.values())
+
+    with django_assert_num_queries(0), pytest.raises(CommandError, match=field):
+        call_command("bootstrap_operator", username=username, email=email, password="new")
+
+    assert list(users.values()) == before
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("from_environment", [False, True])
 @pytest.mark.parametrize("credential", [" passphrase ", "\tpassphrase\n", "   "])
@@ -258,18 +283,17 @@ def test_bootstrap_operator_preserves_password_exactly(
 @pytest.mark.django_db
 @pytest.mark.parametrize("credential", [" passphrase ", "   "])
 def test_bootstrap_operator_password_works_through_login(client, credential):
-    call_command("bootstrap_operator", username="fictional-operator", password=credential)
+    username = "x" * 150
+    call_command("bootstrap_operator", username=username, password=credential)
 
-    response = client.post(
-        "/", data={"username": "fictional-operator", "password": credential.strip()}
-    )
+    response = client.post("/", data={"username": username, "password": credential.strip()})
     assert response.status_code == 200
     assert "_auth_user_id" not in client.session
 
-    response = client.post("/", data={"username": "fictional-operator", "password": credential})
+    response = client.post("/", data={"username": username, "password": credential})
     assert response.status_code == 302
     assert response.headers["Location"] == "/"
-    user = get_user_model().objects.get(username="fictional-operator")
+    user = get_user_model().objects.get(username=username)
     assert client.session["_auth_user_id"] == str(user.pk)
 
 
@@ -457,13 +481,17 @@ def test_form_rejects_multiple_inputs(client):
 
 
 @pytest.mark.django_db
-def test_bootstrap_operator_command_updates_existing_password():
+def test_bootstrap_operator_command_updates_existing_password(monkeypatch):
+    monkeypatch.delenv("VOXHELM_BOOTSTRAP_OPERATOR_EMAIL", raising=False)
     user_model = get_user_model()
-    user_model.objects.create_user(username="jochen", password="old", is_staff=False)
+    user_model.objects.create_user(
+        username="fictional-operator", email="original@example.test", password="old", is_staff=False
+    )
 
-    call_command("bootstrap_operator", username="jochen", password="new")
+    call_command("bootstrap_operator", username="fictional-operator", password="new")
 
-    user = user_model.objects.get(username="jochen")
+    user = user_model.objects.get(username="fictional-operator")
+    assert user.email == "original@example.test"
     assert user.is_staff is True
     assert user.check_password("new") is True
 
