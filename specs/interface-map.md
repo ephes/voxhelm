@@ -157,9 +157,10 @@ Larger URL-driven inputs can be handled through this interface or through the ba
 
 After authentication, submission and worker-control JSON use the same envelope:
 object root, at most 2 MiB encoded bytes and 128 object/array nesting levels,
-unique members at every level and finite numbers. Invalid JSON, duplicate keys
-and decoder resource failures return a fixed HTTP 400 before state changes;
-oversized bodies return 413. Unexpected submission/upload backend RuntimeError
+unique members at every level, finite numbers, and Unicode scalar values in all
+keys and strings. Invalid JSON, including lone surrogate escapes, duplicate keys
+and decoder resource failures, returns a fixed HTTP 400 before fingerprinting or
+state changes. Oversized bodies return 413. Unexpected submission/upload backend RuntimeError
 returns HTTP 500 `Batch processing failed.` with fixed diagnostic categories;
 staging compensation and its retained retry records remain in effect.
 

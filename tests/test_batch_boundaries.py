@@ -230,6 +230,54 @@ def test_duplicate_task_identity_cannot_create_job(client, settings):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"language": "en\ud800"},
+        {"context": {"items": [{"\udfff": "synthetic"}]}},
+        {"context": {"items": ["\udfff"]}},
+    ],
+)
+def test_task_ref_submission_rejects_lone_surrogates(client, settings, overrides):
+    from tests.test_remote_workers import build_job_payload, enable_remote_workers
+
+    enable_remote_workers(settings)
+    payload = build_job_payload()
+    payload.update(overrides)
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(payload),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Request body was not valid JSON."
+    assert not Job.objects.exists()
+    assert not DBTaskResult.objects.exists()
+
+
+@pytest.mark.django_db
+def test_task_ref_submission_accepts_supplementary_unicode(client, settings):
+    from tests.test_remote_workers import build_job_payload, enable_remote_workers
+
+    enable_remote_workers(settings)
+    payload = build_job_payload()
+    payload["language"] = "en\U0001f680"
+    for ensure_ascii, status in [(True, 201), (False, 200)]:
+        response = client.post(
+            "/v1/jobs",
+            data=json.dumps(payload, ensure_ascii=ensure_ascii).encode("utf-8"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer test-token",
+        )
+        assert response.status_code == status
+    job = Job.objects.get()
+    assert job.language == payload["language"]
+    assert job.request_fingerprint
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("operation", ["heartbeat", "complete"])
 def test_ambiguous_payload_cannot_mutate_owned_lease(client, settings, operation):
     from tests.test_remote_workers import (

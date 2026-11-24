@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject lone Unicode surrogate escapes in batch and worker-control JSON before
+  fingerprinting or state changes, while accepting valid supplementary characters.
+
 - Invalidate the window transcription CLI version cache when the executable is
   replaced, even if its modification time is preserved. Discard versions probed
   while the executable changes.

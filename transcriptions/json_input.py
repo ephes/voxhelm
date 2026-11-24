@@ -2,7 +2,10 @@
 
 import json
 import math
+import re
 from typing import Any
+
+SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 def check_json_depth(raw: bytes) -> None:
@@ -25,6 +28,20 @@ def check_json_depth(raw: bytes) -> None:
                 raise ValueError("JSON nesting exceeds 128 levels")
         elif byte in (93, 125):
             depth -= 1
+
+
+def check_json_unicode(value: object) -> None:
+    """Walk decoded JSON after the caller has bounded its size and depth."""
+    if isinstance(value, str):
+        if SURROGATE_RE.search(value):
+            raise ValueError("JSON string contains a lone surrogate")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            check_json_unicode(key)
+            check_json_unicode(child)
+    elif isinstance(value, list):
+        for child in value:
+            check_json_unicode(child)
 
 
 def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

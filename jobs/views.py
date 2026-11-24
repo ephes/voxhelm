@@ -28,6 +28,7 @@ from jobs.staging import serialize_staged_media, stage_uploaded_audio
 from transcriptions.errors import ApiError
 from transcriptions.json_input import (
     check_json_depth,
+    check_json_unicode,
     finite_json_float,
     reject_json_constant,
     unique_json_object,
@@ -171,6 +172,8 @@ def parse_json_object_request(request: HttpRequest, context: str) -> dict[str, o
             parse_constant=reject_json_constant,
             parse_float=finite_json_float,
         )
+        if isinstance(payload, dict):
+            check_json_unicode(payload)
     except (ValueError, RecursionError) as exc:
         raise ApiError("Request body was not valid JSON.") from exc
     if not isinstance(payload, dict):

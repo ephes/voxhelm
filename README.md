@@ -1911,9 +1911,11 @@ model data.
 
 Batch submission and every worker-control JSON request require an object, at most
 2 MiB of encoded bytes and 128 nested object/array levels. Duplicate members at any
-level, nonfinite numbers, integer conversion limits and decoder resource failures
-return a fixed HTTP 400 invalid-JSON error before job, worker or lease writes;
-oversized bodies return 413. Authentication runs before reading/decoding the body.
+level, lone Unicode surrogates in keys or string values, nonfinite numbers, integer
+conversion limits and decoder resource failures return a fixed HTTP 400 invalid-JSON
+error before job fingerprinting or job, worker or lease writes. Supplementary Unicode
+characters are accepted as UTF-8 or paired JSON escapes. Oversized bodies return 413.
+Authentication runs before reading/decoding the body.
 The endpoint reads at most the byte ceiling plus one. Below that, the ASGI entry
 point bounds what the transport may deliver at all (see "Request body ceilings").
 
