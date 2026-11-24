@@ -37,7 +37,6 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from functools import lru_cache
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any
@@ -52,7 +51,11 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django_tasks_db.models import DBTaskResult
 
-from jobs.artifacts import current_artifact_store_identity, get_artifact_store_for_identity
+from jobs.artifacts import (
+    FilesystemArtifactStore,
+    current_artifact_store_identity,
+    get_artifact_store_for_identity,
+)
 from jobs.models import (
     Job,
     JobArtifact,
@@ -74,6 +77,7 @@ TERMINAL_JOB_STATES: frozenset[str] = frozenset(
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 ObjectLocation = tuple[Any, ...]
+RetentionIdentity = dict[str, Any] | FilesystemArtifactStore | None
 
 
 @dataclass
@@ -98,9 +102,18 @@ class RefusedDeletion(Exception):
     """The object is not one voxhelm generated for the job; it is left in place."""
 
 
-@lru_cache(maxsize=64)
-def resolved_filesystem_root(root: str) -> str:
-    return str(Path(root).expanduser().resolve()) if root else ""
+def pin_retention_identity(identity: RetentionIdentity) -> dict[str, Any] | FilesystemArtifactStore:
+    """Bind a filesystem candidate to one store for checks and deletion."""
+    if isinstance(identity, FilesystemArtifactStore):
+        return identity
+    if not identity and settings.VOXHELM_ARTIFACT_BACKEND == "filesystem":
+        return FilesystemArtifactStore(root=settings.VOXHELM_ARTIFACT_ROOT)
+    resolved = identity or current_artifact_store_identity()
+    if resolved.get("backend") == "filesystem":
+        root = resolved.get("root")
+        if isinstance(root, str) and root:
+            return FilesystemArtifactStore(root=Path(root))
+    return resolved
 
 
 def canonical_endpoint(endpoint_url: object) -> str:
@@ -120,7 +133,7 @@ def canonical_endpoint(endpoint_url: object) -> str:
     return f"{scheme}://{host}{parts.path.rstrip('/')}"
 
 
-def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocation:
+def object_location(*, identity: RetentionIdentity, key: str) -> ObjectLocation:
     """Resolve where an object physically lives.
 
     An empty identity means "the current store" (see
@@ -130,11 +143,10 @@ def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocat
     ``a/b`` are the same file); S3 keys are literal, the endpoint URL is
     canonicalized.
     """
-    resolved = identity or current_artifact_store_identity()
+    resolved = pin_retention_identity(identity)
+    if isinstance(resolved, FilesystemArtifactStore):
+        return ("filesystem", os.path.realpath(resolved.root / key))
     backend = resolved.get("backend")
-    if backend == "filesystem":
-        root = resolved_filesystem_root(str(resolved.get("root") or ""))
-        return ("filesystem", os.path.realpath(Path(root) / key))
     if backend == "s3":
         return ("s3", canonical_endpoint(resolved.get("endpoint_url")), resolved.get("bucket"), key)
     return (str(backend), repr(sorted(resolved.items())), key)
@@ -142,7 +154,7 @@ def object_location(*, identity: dict[str, Any] | None, key: str) -> ObjectLocat
 
 def job_key_is_deletable(
     *,
-    identity: dict[str, Any] | None,
+    identity: RetentionIdentity,
     key: str,
     job_id: object,
     name: str | None = None,
@@ -178,7 +190,7 @@ def job_key_is_deletable(
 
 def staged_key_is_deletable(
     *,
-    identity: dict[str, Any] | None,
+    identity: RetentionIdentity,
     key: str,
     staged_id: object,
     filename: str,
@@ -211,22 +223,16 @@ def attempt_prefix_is_deletable(*, prefix: str, job_id: object, attempt: int) ->
     return len(parts) >= 3 and parts[-3:] == ["jobs", str(job_id), f"attempt-{attempt}"]
 
 
-def stored_object_is_plain(*, identity: dict[str, Any] | None, parts: list[str]) -> bool:
+def stored_object_is_plain(*, identity: RetentionIdentity, parts: list[str]) -> bool:
     """S3 objects are literal; a filesystem object must be a plain file under the root.
 
     On the filesystem the resolved real path must equal the literal path under the
     resolved root (no symlinks anywhere) and the file must not be hard-linked.
     """
-    resolved = identity or current_artifact_store_identity()
-    backend = resolved.get("backend")
-    if backend == "s3":
-        return True
-    if backend != "filesystem":
-        return False
-    root = resolved_filesystem_root(str(resolved.get("root") or ""))
-    if not root:
-        return False
-    literal = os.path.join(root, *parts)
+    resolved = pin_retention_identity(identity)
+    if not isinstance(resolved, FilesystemArtifactStore):
+        return resolved.get("backend") == "s3"
+    literal = os.path.join(resolved.root, *parts)
     if os.path.realpath(literal) != literal:
         return False
     try:
@@ -240,7 +246,7 @@ def stored_object_is_plain(*, identity: dict[str, Any] | None, parts: list[str])
 
 def object_is_referenced(
     *,
-    identity: dict[str, Any] | None,
+    identity: RetentionIdentity,
     key: str,
     exclude_artifact_pk: UUID | None = None,
     exclude_staged_pk: UUID | None = None,
@@ -284,11 +290,15 @@ def filesystem_stat(location: ObjectLocation) -> os.stat_result | None:
         return None
 
 
-def delete_stored_object(*, identity: dict[str, Any] | None, key: str) -> None:
+def delete_stored_object(*, identity: RetentionIdentity, key: str) -> None:
     """Delete one stored object; a missing object counts as deleted."""
     if not key:
         return
-    store = get_artifact_store_for_identity(identity)
+    store = (
+        identity
+        if isinstance(identity, FilesystemArtifactStore)
+        else get_artifact_store_for_identity(identity)
+    )
     try:
         store.delete(key=key)
     except FileNotFoundError:
@@ -342,19 +352,20 @@ def prune_artifact(*, artifact_pk: UUID, now: datetime | None) -> JobArtifact | 
         )
         if artifact is None:
             return None
+        identity = pin_retention_identity(artifact.storage_identity)
         if not job_key_is_deletable(
-            identity=artifact.storage_identity,
+            identity=identity,
             key=artifact.storage_key,
             job_id=artifact.job_id,
             name=artifact.name,
         ):
             raise RefusedDeletion(artifact.storage_key)
         if not object_is_referenced(
-            identity=artifact.storage_identity,
+            identity=identity,
             key=artifact.storage_key,
             exclude_artifact_pk=artifact.pk,
         ):
-            delete_stored_object(identity=artifact.storage_identity, key=artifact.storage_key)
+            delete_stored_object(identity=identity, key=artifact.storage_key)
         JobArtifact.objects.filter(pk=artifact.pk).delete()
         return artifact
 
@@ -369,7 +380,9 @@ def expired_profile_jobs(*, now: datetime | None = None) -> QuerySet[Job]:
     )
 
 
-def attempt_prefix_keys(record: RemoteAttemptPrefix) -> list[str]:
+def attempt_prefix_keys(
+    record: RemoteAttemptPrefix, *, identity: RetentionIdentity = None
+) -> list[str]:
     """Every stored object below a recorded attempt prefix.
 
     Raises ``RefusedDeletion`` when the prefix or any object below it is outside the
@@ -379,15 +392,21 @@ def attempt_prefix_keys(record: RemoteAttemptPrefix) -> list[str]:
         prefix=record.prefix, job_id=record.job_id, attempt=record.attempt
     ):
         raise RefusedDeletion(record.prefix)
+    identity = pin_retention_identity(record.storage_identity if identity is None else identity)
     prefix = record.prefix.rstrip("/") + "/"
     try:
-        keys = get_artifact_store_for_identity(record.storage_identity).list_keys(prefix=prefix)
+        store = (
+            identity
+            if isinstance(identity, FilesystemArtifactStore)
+            else get_artifact_store_for_identity(identity)
+        )
+        keys = store.list_keys(prefix=prefix)
     except Exception as error:  # noqa: BLE001 - any listing failure (filesystem or S3)
         # A prefix that cannot be listed completely keeps its record for a retry.
         raise RefusedDeletion(prefix) from error
     for key in keys:
         if not key.startswith(prefix) or not job_key_is_deletable(
-            identity=record.storage_identity, key=key, job_id=record.job_id
+            identity=identity, key=key, job_id=record.job_id
         ):
             raise RefusedDeletion(key)
     return keys
@@ -408,9 +427,10 @@ def clean_attempt_prefix(*, record_pk: int) -> None:
             return
         if Job.objects.filter(id=record.job_id).exclude(state__in=TERMINAL_JOB_STATES).exists():
             return
-        for key in attempt_prefix_keys(record):
-            if not object_is_referenced(identity=record.storage_identity, key=key):
-                delete_stored_object(identity=record.storage_identity, key=key)
+        identity = pin_retention_identity(record.storage_identity)
+        for key in attempt_prefix_keys(record, identity=identity):
+            if not object_is_referenced(identity=identity, key=key):
+                delete_stored_object(identity=identity, key=key)
         record.delete()
 
 
@@ -430,19 +450,20 @@ def delete_claimed_staged_upload(*, staged_pk: UUID, job_id: UUID) -> None:
         )
         if staged is None:
             return
+        identity = pin_retention_identity(staged.storage_identity)
         if not staged_key_is_deletable(
-            identity=staged.storage_identity,
+            identity=identity,
             key=staged.storage_key,
             staged_id=staged.id,
             filename=staged.original_filename,
         ):
             raise RefusedDeletion(staged.storage_key)
         if not object_is_referenced(
-            identity=staged.storage_identity,
+            identity=identity,
             key=staged.storage_key,
             exclude_staged_pk=staged.pk,
         ):
-            delete_stored_object(identity=staged.storage_identity, key=staged.storage_key)
+            delete_stored_object(identity=identity, key=staged.storage_key)
         staged.delete()
 
 
@@ -459,19 +480,20 @@ def delete_expired_staged_upload(
         )
         if staged is None:
             return
+        identity = pin_retention_identity(staged.storage_identity)
         if not staged_key_is_deletable(
-            identity=staged.storage_identity,
+            identity=identity,
             key=staged.storage_key,
             staged_id=staged.pk,
             filename=staged.original_filename,
         ):
             raise RefusedDeletion(staged.storage_key)
         if not object_is_referenced(
-            identity=staged.storage_identity,
+            identity=identity,
             key=staged.storage_key,
             exclude_staged_pk=staged.pk,
         ):
-            delete_stored_object(identity=staged.storage_identity, key=staged.storage_key)
+            delete_stored_object(identity=identity, key=staged.storage_key)
         staged.delete()
 
 
@@ -754,14 +776,15 @@ def queue_replaced_intermediate_objects(
     for artifact in replaced:
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS:
             continue
+        identity = pin_retention_identity(artifact.storage_identity)
         if not job_key_is_deletable(
-            identity=artifact.storage_identity,
+            identity=identity,
             key=artifact.storage_key,
             job_id=artifact.job_id,
             name=artifact.name,
         ):
             continue
-        location = object_location(identity=artifact.storage_identity, key=artifact.storage_key)
+        location = object_location(identity=identity, key=artifact.storage_key)
         if location in protected:
             continue
         if location[0] == "filesystem":
@@ -778,7 +801,9 @@ def queue_replaced_intermediate_objects(
                 storage_key=artifact.storage_key,
                 # Pin the resolved store so a later store change cannot redirect
                 # the retry at a different backend or root.
-                storage_identity=artifact.storage_identity or current_artifact_store_identity(),
+                storage_identity={"backend": "filesystem", "root": str(identity.root)}
+                if isinstance(identity, FilesystemArtifactStore)
+                else identity,
             )
         )
     return queued
@@ -798,16 +823,17 @@ def process_pending_artifact_deletion(pending_pk: int) -> str:
             )
             if pending is None:
                 return "resolved"
+            identity = pin_retention_identity(pending.storage_identity)
             if not job_key_is_deletable(
-                identity=pending.storage_identity, key=pending.storage_key, job_id=pending.job_id
+                identity=identity, key=pending.storage_key, job_id=pending.job_id
             ):
                 logger.warning(
                     "Refusing queued deletion of %s: not a voxhelm-generated job key.",
                     pending.storage_key,
                 )
                 return "refused"
-            if not object_is_referenced(identity=pending.storage_identity, key=pending.storage_key):
-                delete_stored_object(identity=pending.storage_identity, key=pending.storage_key)
+            if not object_is_referenced(identity=identity, key=pending.storage_key):
+                delete_stored_object(identity=identity, key=pending.storage_key)
             pending.delete()
     except Exception:
         logger.exception("Could not delete queued artifact object %s; will retry.", pending_pk)
@@ -939,19 +965,20 @@ def delete_job_artifact(*, artifact_pk: UUID) -> None:
         artifact = JobArtifact.objects.select_for_update().filter(pk=artifact_pk).first()
         if artifact is None:
             return
+        identity = pin_retention_identity(artifact.storage_identity)
         if not job_key_is_deletable(
-            identity=artifact.storage_identity,
+            identity=identity,
             key=artifact.storage_key,
             job_id=artifact.job_id,
             name=artifact.name,
         ):
             raise RefusedDeletion(artifact.storage_key)
         if not object_is_referenced(
-            identity=artifact.storage_identity,
+            identity=identity,
             key=artifact.storage_key,
             exclude_artifact_pk=artifact.pk,
         ):
-            delete_stored_object(identity=artifact.storage_identity, key=artifact.storage_key)
+            delete_stored_object(identity=identity, key=artifact.storage_key)
         artifact.delete()
 
 

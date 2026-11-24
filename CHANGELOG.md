@@ -5,6 +5,9 @@
 - Keep IPv6 endpoint addresses and ports distinct when retention compares S3
   object references.
 
+- Resolve filesystem retention roots afresh for each deletion and reuse that
+  root for admission, reference checks and object removal.
+
 - Read operator bootstrap passwords from stdin with `--password-stdin`,
   preserving whitespace apart from the line terminator.
 

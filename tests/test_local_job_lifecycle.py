@@ -8,7 +8,7 @@ from django.utils import timezone
 from django_tasks.base import TaskResultStatus
 
 from jobs import services
-from jobs.artifacts import get_artifact_store
+from jobs.artifacts import FilesystemArtifactStore, get_artifact_store
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion
 from synthesis.service import SynthesisResult
@@ -413,11 +413,12 @@ def test_failed_cleanup_retries_against_recorded_store(settings, monkeypatch, tm
     store = get_artifact_store()
     old_root = settings.VOXHELM_ARTIFACT_ROOT
 
-    def fail_delete(**kwargs):
+    def fail_delete(self, **kwargs):
         raise OSError("synthetic deletion failure")
 
-    monkeypatch.setattr(store, "delete", fail_delete)
-    new = publish(job, b"NEW")
+    with monkeypatch.context() as patch:
+        patch.setattr(FilesystemArtifactStore, "delete", fail_delete)
+        new = publish(job, b"NEW")
     assert PendingArtifactDeletion.objects.filter(storage_key=old_key).exists()
     assert store.read_bytes(key=old_key) == b"OLD"
     settings.VOXHELM_ARTIFACT_ROOT = tmp_path / "other-store"

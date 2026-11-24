@@ -9,7 +9,12 @@ import pytest
 from django.core.management import CommandError, call_command
 from django.utils import timezone
 
-from jobs.artifacts import current_artifact_store_identity, get_artifact_store
+from jobs import retention
+from jobs.artifacts import (
+    FilesystemArtifactStore,
+    current_artifact_store_identity,
+    get_artifact_store,
+)
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia
 from jobs.retention import (
     drain_pending_artifact_deletions,
@@ -200,13 +205,10 @@ def test_failed_object_deletion_keeps_row_and_fails_command(settings, monkeypatc
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
     source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
 
-    class BrokenStore:
-        def delete(self, *, key: str) -> None:
-            raise RuntimeError("S3 unavailable")
+    def broken_delete(self, *, key: str) -> None:
+        raise OSError("store unavailable")
 
-    monkeypatch.setattr(
-        "jobs.retention.get_artifact_store_for_identity", lambda identity: BrokenStore()
-    )
+    monkeypatch.setattr(FilesystemArtifactStore, "delete", broken_delete)
 
     with pytest.raises(CommandError):
         call_command("prune_job_artifacts", stdout=StringIO())
@@ -278,14 +280,11 @@ def test_queued_deletion_failure_is_retried_by_prune(settings, monkeypatch):
         storage_identity=current_artifact_store_identity(),
     )
 
-    class BrokenStore:
-        def delete(self, *, key: str) -> None:
-            raise RuntimeError("S3 unavailable")
+    def broken_delete(self, *, key: str) -> None:
+        raise OSError("store unavailable")
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            "jobs.retention.get_artifact_store_for_identity", lambda identity: BrokenStore()
-        )
+        patch.setattr(FilesystemArtifactStore, "delete", broken_delete)
         with pytest.raises(CommandError):
             call_command("prune_job_artifacts", stdout=StringIO())
     assert PendingArtifactDeletion.objects.filter(pk=pending.pk).exists()
@@ -375,6 +374,56 @@ def test_s3_references_distinguish_ipv6_host_groups_from_ports():
     retained.storage_identity = {**identity, "endpoint_url": "https://[2001:db8::1]:9000"}
     retained.save(update_fields=["storage_identity"])
     assert not referenced()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("retarget_during_check", [False, True])
+def test_retention_keeps_admission_and_delete_under_one_root(
+    settings, tmp_path, monkeypatch, retarget_during_check
+):
+    settings.VOXHELM_SOURCE_ARTIFACT_RETENTION_SECONDS = 60
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
+    old_path = object_path(settings, source)
+    new_root = tmp_path / "replacement"
+    new_path = new_root / source.storage_key
+    new_path.parent.mkdir(parents=True)
+    new_path.write_bytes(b"replacement")
+    os.link(new_path, new_root / "keep.mp3")
+
+    alias = tmp_path / "store"
+    alias.symlink_to(settings.VOXHELM_ARTIFACT_ROOT, target_is_directory=True)
+    source.storage_identity = {"backend": "filesystem", "root": str(alias)}
+    source.save(update_fields=["storage_identity"])
+    assert object_location(identity=source.storage_identity, key=source.storage_key) == (
+        "filesystem",
+        str(old_path.resolve()),
+    )
+
+    def retarget():
+        alias.unlink()
+        alias.symlink_to(new_root, target_is_directory=True)
+
+    if retarget_during_check:
+        original = retention.object_is_referenced
+
+        def retarget_then_check(**kwargs):
+            retarget()
+            return original(**kwargs)
+
+        monkeypatch.setattr(retention, "object_is_referenced", retarget_then_check)
+    else:
+        retarget()
+
+    result = prune_job_artifacts()
+
+    assert new_path.exists()
+    if retarget_during_check:
+        assert [artifact.pk for artifact in result.deleted] == [source.pk]
+        assert not old_path.exists()
+    else:
+        assert [artifact.pk for artifact in result.refused] == [source.pk]
+        assert old_path.exists()
 
 
 @pytest.mark.django_db
@@ -707,13 +756,10 @@ def test_job_whose_intermediates_cannot_be_deleted_keeps_its_metadata(settings, 
     job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
     source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE)
 
-    class BrokenStore:
-        def delete(self, *, key: str) -> None:
-            raise RuntimeError("S3 unavailable")
+    def broken_delete(self, *, key: str) -> None:
+        raise OSError("store unavailable")
 
-    monkeypatch.setattr(
-        "jobs.retention.get_artifact_store_for_identity", lambda identity: BrokenStore()
-    )
+    monkeypatch.setattr(FilesystemArtifactStore, "delete", broken_delete)
 
     with pytest.raises(CommandError):
         call_command("prune_job_artifacts", stdout=StringIO())
