@@ -15,6 +15,7 @@ from jobs.retention import (
     drain_pending_artifact_deletions,
     expired_job_metadata,
     job_key_is_deletable,
+    object_is_referenced,
     object_location,
     prune_artifact,
     prune_job_artifacts,
@@ -348,6 +349,32 @@ def test_object_location_canonicalizes_s3_endpoint_but_keeps_exact_keys():
     assert object_location(identity=s3("https://s3.example.com"), key="a/./b") != (
         object_location(identity=s3("https://s3.example.com"), key="a/b")
     )
+
+
+@pytest.mark.django_db
+def test_s3_references_distinguish_ipv6_host_groups_from_ports():
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=1))
+    source = make_artifact(job, name="input.mp3", kind=JobArtifact.Kind.SOURCE, write_object=False)
+    retained = make_artifact(
+        job, name="retained.mp3", kind=JobArtifact.Kind.SOURCE, write_object=False
+    )
+    identity = {"backend": "s3", "endpoint_url": "https://[2001:db8::1:9000]", "bucket": "media"}
+    source.storage_backend = retained.storage_backend = "s3"
+    source.storage_identity = identity
+    source.save(update_fields=["storage_backend", "storage_identity"])
+    retained.storage_key = source.storage_key
+    retained.storage_identity = {**identity, "endpoint_url": "https://[2001:db8::1:9000]:443/"}
+    retained.save(update_fields=["storage_backend", "storage_identity", "storage_key"])
+
+    def referenced():
+        return object_is_referenced(
+            identity=source.storage_identity, key=source.storage_key, exclude_artifact_pk=source.pk
+        )
+
+    assert referenced()
+    retained.storage_identity = {**identity, "endpoint_url": "https://[2001:db8::1]:9000"}
+    retained.save(update_fields=["storage_identity"])
+    assert not referenced()
 
 
 @pytest.mark.django_db

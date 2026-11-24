@@ -870,7 +870,9 @@ and move behind entries with fewer attempts. The maintenance command uses its
 saved per-phase cursor. An allowed object that another artifact row or
 staged upload still references after resolution (store identity, real path
 and inode, canonical S3 endpoint and exact key) is also kept; only its row
-goes.
+goes. S3 endpoints with an explicit default port compare equal to those without
+it. IPv6 hosts retain their brackets when compared, so the port and the last
+address group stay distinct.
 
 The command deletes the stored object (filesystem or S3/MinIO) first and then
 the row; an already-missing object counts as deleted. If an object cannot be

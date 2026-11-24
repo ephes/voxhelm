@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep IPv6 endpoint addresses and ports distinct when retention compares S3
+  object references.
+
 - Read operator bootstrap passwords from stdin with `--password-stdin`,
   preserving whitespace apart from the line terminator.
 

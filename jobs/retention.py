@@ -113,6 +113,8 @@ def canonical_endpoint(endpoint_url: object) -> str:
         return raw.lower().rstrip("/")
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
     if port is not None and port != DEFAULT_PORTS.get(scheme):
         host = f"{host}:{port}"
     return f"{scheme}://{host}{parts.path.rstrip('/')}"
