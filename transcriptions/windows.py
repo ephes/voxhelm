@@ -416,6 +416,7 @@ def window_identity(executable: str) -> dict[str, Any]:
 
 
 def model_generation(stat: os.stat_result) -> tuple[int, ...]:
+    """File metadata used to identify model and runtime generations."""
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
@@ -476,15 +477,14 @@ def _model_sha256(path: str, generation: tuple[int, ...]) -> str:
 def whispercpp_version(executable: str) -> str:
     path = Path(executable)
     try:
-        mtime_ns = path.stat().st_mtime_ns
-    except OSError:
-        mtime_ns = 0
-    return _whispercpp_version(str(path), mtime_ns)
+        return _whispercpp_version(str(path), model_generation(path.stat()))
+    except (OSError, RuntimeError) as exc:
+        LOGGER.warning("whisper.cpp version check failed executable=%s error=%s", executable, exc)
+        return ""
 
 
 @lru_cache(maxsize=4)
-def _whispercpp_version(executable: str, mtime_ns: int) -> str:
-    del mtime_ns
+def _whispercpp_version(executable: str, generation: tuple[int, ...]) -> str:
     try:
         completed = run_cancellable_process(
             [executable, "--version"], cancel_event=None, timeout_seconds=30
@@ -492,6 +492,8 @@ def _whispercpp_version(executable: str, mtime_ns: int) -> str:
     except (OSError, RuntimeError) as exc:
         LOGGER.warning("whisper.cpp version check failed executable=%s error=%s", executable, exc)
         return ""
+    if model_generation(Path(executable).stat()) != generation:
+        raise RuntimeError("Executable changed during the version probe.")
     match = _VERSION.search(f"{completed.stdout}\n{completed.stderr}")
     return match.group(1) if match else ""
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Invalidate the window transcription CLI version cache when the executable is
+  replaced, even if its modification time is preserved. Discard versions probed
+  while the executable changes.
+
 - Keep IPv6 endpoint addresses and ports distinct when retention compares S3
   object references.
 

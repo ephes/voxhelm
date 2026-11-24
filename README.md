@@ -2032,3 +2032,8 @@ models without returning output. Publish complete model replacements while worke
 are stopped; in-place writes during native inference cannot be prevented by the
 reader, but detected changes discard the result. Metadata must reliably identify
 changes; restart workers on filesystems that do not provide this guarantee.
+
+Window and chapter transcription record the `whisper-cli` version using a
+cache keyed by executable path, device, inode, size, and nanosecond modification
+and change times. A probe discards its result if the executable changes while
+it runs.

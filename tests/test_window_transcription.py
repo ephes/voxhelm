@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sys
 import tempfile
 import threading
@@ -230,6 +231,45 @@ def assert_nothing_left(runtime: Any) -> None:
     assert JobArtifact.objects.count() == 0
     assert StagedMedia.objects.count() == 0
     assert DBTaskResult.objects.count() == 0
+
+
+def write_version_cli(path: Path, version: str) -> None:
+    path.write_text(f"#!/bin/sh\nprintf 'whisper.cpp version: {version}\\n'\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_window_version_cache_expires_after_executable_replacement(tmp_path):
+    cli = tmp_path / "whisper-cli"
+    write_version_cli(cli, "1.9.5")
+    assert windows.window_identity(str(cli))["cli_version"] == "1.9.5"
+
+    replacement = tmp_path / "replacement"
+    write_version_cli(replacement, "1.9.6")
+    original = cli.stat()
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    replacement.replace(cli)
+    assert cli.stat().st_mtime_ns == original.st_mtime_ns
+
+    assert windows.window_identity(str(cli))["cli_version"] == "1.9.6"
+
+
+def test_window_version_discards_probe_after_executable_changes(tmp_path, monkeypatch):
+    cli = tmp_path / "whisper-cli"
+    write_version_cli(cli, "1.9.5")
+    replacement = tmp_path / "replacement"
+    write_version_cli(replacement, "1.9.6")
+    run = windows.run_cancellable_process
+
+    def replace_before_return(*args, **kwargs):
+        result = run(*args, **kwargs)
+        replacement.replace(cli)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(windows, "run_cancellable_process", replace_before_return)
+        assert windows.window_identity(str(cli))["cli_version"] == ""
+
+    assert windows.window_identity(str(cli))["cli_version"] == "1.9.6"
 
 
 @pytest.mark.django_db
