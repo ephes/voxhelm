@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -19,7 +20,7 @@ from django_tasks_db.models import DBTaskResult
 from jobs.models import Job, JobArtifact, StagedMedia
 from lane_scheduler import InferenceCancelled
 from transcriptions import windows
-from transcriptions.service import BackendUnavailableError
+from transcriptions.service import BackendUnavailableError, ChildProcessTimeout
 from transcriptions.windows import (
     WINDOW_SETTINGS,
     detected_language,
@@ -270,6 +271,36 @@ def test_window_version_discards_probe_after_executable_changes(tmp_path, monkey
         assert windows.window_identity(str(cli))["cli_version"] == ""
 
     assert windows.window_identity(str(cli))["cli_version"] == "1.9.6"
+
+
+@pytest.mark.parametrize("failure", ["timeout", "launch", "unparseable"])
+def test_window_version_retries_unknown_and_caches_success(tmp_path, monkeypatch, failure):
+    cli = tmp_path / "whisper-cli"
+    write_version_cli(cli, "1.9.5")
+    attempts = 0
+
+    def probe(args, *, cancel_event, timeout_seconds):
+        nonlocal attempts
+        assert args == [str(cli), "--version"]
+        assert cancel_event is None
+        assert timeout_seconds == 30
+        attempts += 1
+        if attempts == 1:
+            if failure == "timeout":
+                raise ChildProcessTimeout("probe timed out")
+            if failure == "launch":
+                raise OSError("probe could not start")
+            return subprocess.CompletedProcess(args, 0, "unknown", "")
+        return subprocess.CompletedProcess(args, 0, "", "whisper.cpp version: 1.9.5")
+
+    monkeypatch.setattr(windows, "run_cancellable_process", probe)
+
+    assert windows.window_identity(str(cli))["cli_version"] == ""
+    assert attempts == 1
+    assert windows.window_identity(str(cli))["cli_version"] == "1.9.5"
+    assert attempts == 2
+    assert windows.window_identity(str(cli))["cli_version"] == "1.9.5"
+    assert attempts == 2
 
 
 @pytest.mark.django_db

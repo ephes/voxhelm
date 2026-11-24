@@ -6,6 +6,9 @@
   replaced, even if its modification time is preserved. Discard versions probed
   while the executable changes.
 
+- Retry failed window transcription CLI version probes on the next call and
+  cache only successful versions.
+
 - Keep IPv6 endpoint addresses and ports distinct when retention compares S3
   object references.
 

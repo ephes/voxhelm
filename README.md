@@ -2036,4 +2036,5 @@ changes; restart workers on filesystems that do not provide this guarantee.
 Window and chapter transcription record the `whisper-cli` version using a
 cache keyed by executable path, device, inode, size, and nanosecond modification
 and change times. A probe discards its result if the executable changes while
-it runs.
+it runs. Failed probes leave the version empty for that call and are retried
+on a later call.

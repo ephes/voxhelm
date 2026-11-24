@@ -475,6 +475,7 @@ def _model_sha256(path: str, generation: tuple[int, ...]) -> str:
 
 
 def whispercpp_version(executable: str) -> str:
+    """Return a verified version or an uncached empty string."""
     path = Path(executable)
     try:
         return _whispercpp_version(str(path), model_generation(path.stat()))
@@ -485,17 +486,15 @@ def whispercpp_version(executable: str) -> str:
 
 @lru_cache(maxsize=4)
 def _whispercpp_version(executable: str, generation: tuple[int, ...]) -> str:
-    try:
-        completed = run_cancellable_process(
-            [executable, "--version"], cancel_event=None, timeout_seconds=30
-        )
-    except (OSError, RuntimeError) as exc:
-        LOGGER.warning("whisper.cpp version check failed executable=%s error=%s", executable, exc)
-        return ""
+    completed = run_cancellable_process(
+        [executable, "--version"], cancel_event=None, timeout_seconds=30
+    )
     if model_generation(Path(executable).stat()) != generation:
         raise RuntimeError("Executable changed during the version probe.")
     match = _VERSION.search(f"{completed.stdout}\n{completed.stderr}")
-    return match.group(1) if match else ""
+    if match is None:
+        raise RuntimeError("Executable did not report a whisper.cpp version.")
+    return match.group(1)
 
 
 def _log_tail(completed: Any) -> str:

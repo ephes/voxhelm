@@ -114,11 +114,12 @@ Result (`WindowTranscription.as_record()`):
      "max_len": 60, "token_timestamps": true}}}
 ```
 
-`cli_version` comes from `whisper-cli --version`. The cache keys each binary
-path by device, inode, size, and nanosecond modification and change times.
-If the named binary changes during the probe, the version is discarded and
-reported as an empty string. The version is provenance only (as with
-`parakeet-mlx` in D-26).
+`cli_version` comes from `whisper-cli --version`. The cache keys successful
+results by binary path, device, inode, size, and nanosecond modification and
+change times. Each cache miss makes at most one probe with a 30-second deadline.
+A failed probe, unparseable version, or binary change during the probe yields
+an empty string. The next caller can probe again. The version is provenance
+only (as with `parakeet-mlx` in D-26).
 
 Nothing outlives the call: the temporary directory is removed on success,
 failure, timeout (`VOXHELM_WINDOW_TIMEOUT_SECONDS`, default 120) and
