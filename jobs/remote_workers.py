@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
+from sys import float_info
 from typing import Any, cast
 from uuid import UUID
 
@@ -125,6 +126,7 @@ REMOTE_RESULT_METADATA_NUMBER_KEYS: set[str] = {
     "covered_seconds",
 }
 REMOTE_METADATA_STRING_MAX_LENGTH = 256
+REMOTE_METADATA_INTEGER_MAX = int(float_info.max)
 PROFILE_IDENTITY_STRING_KEYS: set[str] = {
     "profile",
     "backend",
@@ -1593,6 +1595,8 @@ def safe_worker_metadata_string(value: object) -> str | None:
 def safe_worker_metadata_number(value: object) -> int | float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return value if 0 <= value <= REMOTE_METADATA_INTEGER_MAX else None
     if value < 0 or not math.isfinite(value):
         return None
     return value

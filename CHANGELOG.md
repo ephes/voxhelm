@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Complete remote jobs and omit optional numeric diagnostics that exceed the
+  finite double-precision range, including oversized JSON integers.
+
 - Reject lone Unicode surrogate escapes in batch and worker-control JSON before
   fingerprinting or state changes, while accepting valid supplementary characters.
 

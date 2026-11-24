@@ -1420,10 +1420,11 @@ mode; use URL reference audio. Jobs stored before that check still fail before
 remote claim. Completion metadata stores only type-checked scalar worker fields plus
 server-derived source, worker, attempt, and request metadata. URL completions
 keep the server-owned job input URL as `source_url` and ignore worker-supplied
-redirect URLs. URL-shaped strings, nested values, negative or non-finite
-timings/summary metrics, and private known-speaker reference
-URLs/ranges are not echoed through producer-visible job metadata. Speaker
-sidecars are accepted only for known-speaker jobs.
+redirect URLs. Voxhelm omits optional timings and floating-point summary metrics
+that are negative, nonfinite, or above the largest finite double-precision value.
+It also omits URL-shaped strings and nested values from scalar fields and keeps
+known-speaker reference URLs/ranges private. Speaker sidecars are accepted only
+for known-speaker jobs.
 
 Run a manual worker on a trusted macOS host with an env file containing the
 worker token (`VOXHELM_WORKER_TOKEN`), Voxhelm URL, shared artifact credentials, local STT/model cache

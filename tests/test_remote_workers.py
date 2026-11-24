@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from pathlib import Path
+from sys import float_info
 from typing import Any
 
 import pytest
@@ -951,6 +952,44 @@ def test_worker_claim_rescans_after_prefiltered_candidate_loses_race(
     assert response.status_code == 200
     assert response.json()["job"]["id"] == str(second.id)
     assert calls == 2
+
+
+@pytest.mark.django_db
+def test_remote_completion_omits_out_of_range_integer_diagnostics(client, settings):
+    job = submit_remote_job(client, settings)
+    claim = claim_one(client).json()["job"]
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+    max_metric = int(float_info.max)
+    response = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        data=json.dumps(
+            {
+                "worker_id": "atlas",
+                "lease_token": claim["lease_token"],
+                "result_text": "synthetic transcript",
+                "result_metadata": {
+                    "processing_seconds": 10**400,
+                    "duration_seconds": max_metric + 1,
+                    "media_duration_seconds": max_metric,
+                    "covered_seconds": 1.25,
+                },
+                "artifacts": manifest,
+            }
+        ),
+        content_type="application/json",
+        **worker_headers(),
+    )
+
+    assert response.status_code == 200
+    job.refresh_from_db()
+    assert job.state == Job.State.SUCCEEDED
+    for metadata in (job.result_metadata, response.json()["result"]["metadata"]):
+        assert "processing_seconds" not in metadata
+        assert "duration_seconds" not in metadata
+        assert metadata["media_duration_seconds"] == max_metric
+        assert isinstance(metadata["media_duration_seconds"], int)
+        assert metadata["covered_seconds"] == 1.25
 
 
 @pytest.mark.django_db

@@ -448,7 +448,14 @@ Completion rules:
 - Known-speaker jobs must include the `transcript_speakers` artifact (`transcript.speakers.json`) and `result_metadata.diarization.known_speaker_summary` when the request strategy is `pyannote_known_speaker`.
 - `transcript_speakers` artifacts are rejected for jobs that did not request `pyannote_known_speaker`.
 - The `speakers` sidecar remains private/reviewable consumer state; public DOTe/Podlove/VTT labeling behavior must stay consistent with `specs/known-speaker-diarization.md` and django-cast's review/apply policy.
-- Worker-supplied `result_metadata` is allowlisted and type-checked before it becomes producer-visible: backend/model/language/source-name strings must be non-empty, non-URL strings; URL-input jobs always keep the server-owned job input URL as producer-visible `source_url` and ignore worker-supplied redirect URLs; duration fields and known-speaker numeric summary fields must be finite non-negative numbers; server-derived source kind, worker, attempt, execution-mode, requested-model, and normalized diarization metadata override worker values.
+- Voxhelm allowlists and type-checks worker-supplied `result_metadata` before exposing it to the producer.
+  It omits empty or URL-like backend, model, language, and source-name strings.
+  URL-input jobs use the server-owned job input URL as `source_url`.
+  Optional timings and floating-point summary metrics accept nonnegative integers
+  and floats up to the largest finite double-precision value. Voxhelm omits
+  out-of-range diagnostics and can still complete the job. Server-derived source
+  kind, worker, attempt, execution mode, requested model, and normalized
+  diarization metadata override worker values.
 - On success, the server sets `state=succeeded`, `finished_at`, `result_text`, `result_metadata`, and creates `JobArtifact` rows.
 - For staged uploads, after a successful source artifact copy is recorded, `studio` deletes the staged object/row as part of completion cleanup.
 - Losing attempts may leave orphaned attempt-scoped objects; cleanup can be a later retention/sweep task and must not affect the manifest-selected winning attempt.
