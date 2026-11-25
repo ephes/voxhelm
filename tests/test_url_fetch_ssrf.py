@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
+from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
@@ -158,6 +159,36 @@ ENTRY_POINTS = [
     pytest.param(_fetch_media, id="jobs.media.download_allowed_media"),
     pytest.param(_fetch_input, id="transcriptions.download_allowed_url_to_tempfile"),
 ]
+
+
+@pytest.mark.parametrize("status, error_class", [(503, media.TransientFetchError), (404, ApiError)])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_fetch_closes_http_error_response(
+    local_allowlist, monkeypatch, caplog, status, error_class, close_fails
+):
+    url = "http://127.0.0.1/file.mp3"
+
+    body = io.BytesIO(b"unread error body")
+    error = HTTPError(url, status, "synthetic reason", Message(), body)
+    close_response = error.close
+
+    def close():
+        assert body.tell() == 0
+        close_response()
+        if close_fails:
+            raise OSError("synthetic-private-close-detail")
+
+    monkeypatch.setattr(error, "close", close)
+    monkeypatch.setattr(media, "open_allowed_url", Mock(side_effect=error))
+
+    with pytest.raises(error_class, match=f"URL fetch failed with HTTP {status}") as excinfo:
+        _fetch_media(url)
+
+    assert type(excinfo.value) is error_class
+    assert excinfo.value.__cause__ is error
+    assert body.closed
+    assert ("URL fetch cleanup failed: HTTP error response close." in caplog.text) == close_fails
+    assert "synthetic-private-close-detail" not in caplog.text
 
 
 @pytest.mark.parametrize("fetch", ENTRY_POINTS)

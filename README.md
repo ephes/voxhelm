@@ -1784,6 +1784,10 @@ media file or starting inference. A complete nonempty response without
 `Content-Length` remains supported; redirects retain the same allowlist and
 resolved-address checks.
 
+When an HTTP status raises an error, Voxhelm closes the error response without
+reading its body. A close failure logs a fixed warning and preserves the status
+and its retry classification.
+
 Fetch cleanup attempts every watchdog socket close and always restores the
 caller's previous deadline context. A cleanup failure preserves an existing
 fetch error or cancellation. If the transfer otherwise succeeded, it refuses

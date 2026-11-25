@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Close URL fetch HTTP error responses without reading their bodies and retain
+  the original status and retry classification if close fails.
+
 - Reject unsupported remote transcript output formats before downloading or
   processing the input. Claims that omit formats still use text and JSON.
 

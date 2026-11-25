@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -407,6 +408,12 @@ class FetchedUrl:
     final_url: str
 
 
+def _warn_fetch_cleanup(stage: str) -> None:
+    # A failing log sink must preserve the fetch outcome too.
+    with suppress(Exception):
+        LOGGER.warning("URL fetch cleanup failed: %s.", stage)
+
+
 def fetch_allowed_url_to_tempfile(
     *,
     source_url: str,
@@ -476,6 +483,10 @@ def fetch_allowed_url_to_tempfile(
         completed = True
         return fetched
     except HTTPError as exc:
+        try:
+            exc.close()
+        except Exception:
+            _warn_fetch_cleanup("HTTP error response close")
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         error_class = TransientFetchError if exc.code in _TRANSIENT_HTTP_STATUSES else ApiError
