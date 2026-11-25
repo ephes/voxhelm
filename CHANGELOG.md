@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recheck remote lease ownership after rendering each transcript format and
+  stop before upload if the lease was lost.
+
 - Skip Piper configs that change during discovery and refuse synthesis with
   stale config metadata before loading or reusing a model.
 

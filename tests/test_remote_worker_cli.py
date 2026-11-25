@@ -625,12 +625,13 @@ def test_heartbeater_exit_cancels_active_http(monkeypatch, body_error):
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
-@pytest.mark.parametrize("loss_phase", ["transcribe", "during_inference"])
+@pytest.mark.parametrize("loss_phase", ["transcribe", "during_inference", "during_render"])
 def test_claim_stops_after_lease_loss(monkeypatch, settings, tmp_path, status, loss_phase):
     configure_filesystem_store(settings, tmp_path / "artifacts")
     install_fake_download(monkeypatch, tmp_path)
     client = RecordingClient()
     inferred = []
+    rendered = []
     uploaded = []
     revoked = threading.Event()
 
@@ -657,21 +658,32 @@ def test_claim_stops_after_lease_loss(monkeypatch, settings, tmp_path, status, l
     monkeypatch.setattr(worker_cli.LeaseHeartbeater, "__enter__", enter)
     monkeypatch.setattr(client, "heartbeat_job", beat)
     monkeypatch.setattr(worker_cli, "transcribe_claim_audio", infer)
-    original_upload = worker_cli.upload_transcript_artifacts
+    original_render = worker_cli.render_transcript_artifact
+
+    def render(output_format, result):
+        rendered.append(output_format)
+        if loss_phase == "during_render":
+            revoked.set()
+            active[0]._beat_once()
+        return original_render(output_format, result)
+
+    monkeypatch.setattr(worker_cli, "render_transcript_artifact", render)
+    original_upload = worker_cli.upload_bytes_artifact
 
     def upload(**kwargs):
         uploaded.append(True)
         return original_upload(**kwargs)
 
-    monkeypatch.setattr(worker_cli, "upload_transcript_artifacts", upload)
+    monkeypatch.setattr(worker_cli, "upload_bytes_artifact", upload)
     if status == 503:
         worker_cli.process_claim(base_claim(), config=client.config, client=client)
         assert client.completed is not None
-        assert inferred and uploaded
+        assert inferred and rendered and uploaded
     else:
         with pytest.raises(worker_cli.WorkerError, match="revoked"):
             worker_cli.process_claim(base_claim(), config=client.config, client=client)
-        assert bool(inferred) == (loss_phase == "during_inference")
+        assert bool(inferred) == (loss_phase != "transcribe")
+        assert rendered == (["text"] if loss_phase == "during_render" else [])
         assert not uploaded
         assert client.completed is None
 

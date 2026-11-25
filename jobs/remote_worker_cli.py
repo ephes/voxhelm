@@ -953,11 +953,13 @@ def upload_transcript_artifacts(
             name, kind, content_type = TRANSCRIPT_ARTIFACTS_BY_FORMAT[output_format]
         except KeyError as exc:
             raise WorkerError(f"Unsupported transcript output format '{output_format}'.") from exc
+        data = render_transcript_artifact(output_format, result)
+        check_ownership()
         artifacts.append(
             upload_bytes_artifact(
                 store=store,
                 artifact_prefix=artifact_prefix,
-                data=render_transcript_artifact(output_format, result),
+                data=data,
                 name=name,
                 kind=kind,
                 format_name=output_format,

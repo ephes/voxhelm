@@ -1353,6 +1353,10 @@ artifact object existence and size before the short settlement transaction so a
 slow object store does not hold SQLite's write lock. The committed artifact rows
 keep the winning store identity so producer downloads continue to read from the
 store that accepted the completion manifest.
+The remote worker checks lease ownership before rendering each requested
+transcript format and again before uploading it. If a heartbeat detects lease
+loss during rendering, the worker discards the rendered bytes.
+
 Workers must advertise supported transcript `output_formats`, concrete STT
 backend names, and concrete STT model names when claiming work. `auto`,
 `whisper-1`, and `gpt-4o-mini-transcribe` match the configured default backend
