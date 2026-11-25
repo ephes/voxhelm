@@ -587,7 +587,7 @@ def discover_installed_voices(
     for voice_name in voice_names:
         model_path = voice_dir / f"{voice_name}.onnx"
         config_path = voice_dir / f"{voice_name}.onnx.json"
-        if not model_path.exists():
+        if not model_path.is_file():
             continue
         if not os.path.lexists(config_path):
             # A model without its config is an incomplete install, not an
@@ -688,7 +688,7 @@ def load_piper_voice(voice: InstalledVoice):
         except OSError as exc:
             raise BackendUnavailableError("Piper config changed since discovery; retry.") from exc
         identity = (
-            piper_artifact_identity(voice.model_path),
+            piper_artifact_identity(voice.model_path, require_regular=True),
             config_identity,
         )
         cached = _PIPER_VOICE_CACHE.get(identity)
@@ -708,9 +708,12 @@ def load_piper_voice(voice: InstalledVoice):
         return loaded_voice
 
 
-def piper_artifact_identity(path: Path) -> ArtifactIdentity:
+def piper_artifact_identity(path: Path, *, require_regular: bool = False) -> ArtifactIdentity:
     resolved = path.resolve(strict=True)
-    return (resolved, *_file_generation(resolved.stat()))
+    metadata = resolved.stat()
+    if require_regular and not stat.S_ISREG(metadata.st_mode):
+        raise BackendUnavailableError("Piper model must resolve to a regular file.")
+    return (resolved, *_file_generation(metadata))
 
 
 def _file_generation(metadata: os.stat_result) -> FileGeneration:

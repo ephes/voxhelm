@@ -1907,9 +1907,12 @@ regular file, and limits declared/actual config bytes to 1 MiB. The byte count
 must match the admitted size, and both the descriptor and pathname must still
 identify the same generation after reading. FIFO, symlink, changing, oversized
 and malformed configs are skipped independently, leaving other voices available.
-A model without a config is skipped quietly. Discovery never loads model data.
+Model paths must resolve to regular files during discovery and again before
+Piper loads them. Symlinks to regular models are supported. A model without a
+config is skipped quietly. Discovery never loads model data.
 If a config changes between discovery and synthesis loading, synthesis fails
-with a retryable backend error. A new request rediscovers the voice metadata.
+with a backend error asking the caller to retry. A new request rediscovers the
+voice metadata.
 
 ### Batch request and polling boundaries
 

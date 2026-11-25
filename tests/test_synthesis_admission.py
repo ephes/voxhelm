@@ -111,6 +111,44 @@ def test_style_metadata_refused_before_numpy_load(tmp_path, monkeypatch, kind):
     assert instance._voicepack(pack, "synthetic").shape == (512, 1, 256)
 
 
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+@pytest.mark.parametrize("replace_after_discovery", [False, True])
+def test_piper_refuses_nonregular_models(tmp_path, monkeypatch, kind, replace_after_discovery):
+    model, _ = write_voice_fixture(tmp_path, "invalid")
+    alias, _ = write_voice_fixture(tmp_path, "stable")
+    regular = alias.rename(tmp_path / "shared-model")
+    alias.symlink_to(regular)
+    calls = []
+
+    def load(model_path, **kwargs):
+        calls.append(model_path)
+        return object()
+
+    monkeypatch.setitem(
+        sys.modules, "piper", SimpleNamespace(PiperVoice=SimpleNamespace(load=load))
+    )
+
+    def discover():
+        return service.discover_installed_voices(
+            voice_dir=tmp_path, configured_voices=["invalid", "stable"]
+        )
+
+    voices = discover() if replace_after_discovery else None
+    model.unlink()
+    if kind == "directory":
+        model.mkdir()
+    else:
+        os.mkfifo(model)
+    if voices is None:
+        voices = discover()
+        assert list(voices) == ["stable"]
+    else:
+        with pytest.raises(service.BackendUnavailableError, match="regular file"):
+            service.load_piper_voice(voices["invalid"])
+    service.load_piper_voice(voices["stable"])
+    assert calls == [regular.resolve()]
+
+
 @pytest.mark.parametrize("kind", ["session", "voicepack", "piper-model", "piper-config"])
 def test_replaced_generation_is_not_returned_or_cached(tmp_path, monkeypatch, kind):
     instance, model, pack = backend(tmp_path)

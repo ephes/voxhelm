@@ -5,6 +5,9 @@
 - Skip Piper configs that change during discovery and refuse synthesis with
   stale config metadata before loading or reusing a model.
 
+- Skip nonregular Piper models during discovery and reject them before native
+  loading. Model symlinks to regular files still work.
+
 - Complete remote jobs and omit optional numeric diagnostics that exceed the
   finite double-precision range, including oversized JSON integers.
 
