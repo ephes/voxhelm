@@ -490,6 +490,9 @@ export VOXHELM_WYOMING_MAX_INFERENCE_THREADS="4"
 export VOXHELM_WYOMING_STT_WARMUP="true"
 # RMS level (dBFS) Wyoming TTS answers are scaled to; empty disables it.
 export VOXHELM_WYOMING_TTS_TARGET_DBFS="-19"
+# Temporary STT comparison: keep the newest N voice turns (WAV + transcript).
+export VOXHELM_WYOMING_STT_RECORD_DIR=""
+export VOXHELM_WYOMING_STT_RECORD_MAX="40"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"

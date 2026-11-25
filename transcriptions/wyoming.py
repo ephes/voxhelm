@@ -818,6 +818,12 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 )
                 return False
 
+            record_voice_turn(
+                audio_bytes,
+                text=result.text,
+                backend=result.backend_name,
+                language=self.request_language,
+            )
             emit_transcription_debug_log(
                 source="wyoming",
                 audio_shape=self.audio_shape.as_dict(),
@@ -965,6 +971,42 @@ def normalize_loudness(audio: bytes, *, width: int, target_dbfs: float | None) -
     if sys.byteorder != "little":
         scaled.byteswap()
     return scaled.tobytes()
+
+
+def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: str | None) -> None:
+    """Keep the turn's audio and transcript for an STT comparison, if enabled.
+
+    Off unless VOXHELM_WYOMING_STT_RECORD_DIR is set. The directory is made
+    owner-only, files are owner-only, and only the newest
+    VOXHELM_WYOMING_STT_RECORD_MAX turns are kept. Failures are logged and
+    never affect the voice turn.
+    """
+    directory = settings.VOXHELM_WYOMING_STT_RECORD_DIR
+    if not directory or not audio_bytes:
+        return
+    try:
+        root = Path(directory)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        stem = time.strftime("%Y%m%dT%H%M%S") + f"-{time.time_ns()}"
+        wav_path = root / f"{stem}.wav"
+        with open(os.open(wav_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as raw:
+            with wave.open(raw, "wb") as wav_file:
+                wav_file.setframerate(_CONVERTED_RATE)
+                wav_file.setsampwidth(_CONVERTED_WIDTH)
+                wav_file.setnchannels(_CONVERTED_CHANNELS)
+                wav_file.writeframes(audio_bytes)
+        meta = {"text": text, "backend": backend, "language": language}
+        with open(
+            os.open(root / f"{stem}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+        ) as handle:
+            json.dump(meta, handle, ensure_ascii=False)
+        keep = max(1, settings.VOXHELM_WYOMING_STT_RECORD_MAX)
+        for old_wav in sorted(root.glob("*.wav"))[:-keep]:
+            old_wav.unlink(missing_ok=True)
+            old_wav.with_suffix(".json").unlink(missing_ok=True)
+    except Exception:
+        _LOGGER.warning("Wyoming STT recording failed", exc_info=True)
 
 
 def needs_language_retry(text: str, language: str | None) -> bool:

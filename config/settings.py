@@ -511,6 +511,11 @@ _wyoming_tts_target_dbfs = os.getenv("VOXHELM_WYOMING_TTS_TARGET_DBFS", "-19").s
 VOXHELM_WYOMING_TTS_TARGET_DBFS = (
     float(_wyoming_tts_target_dbfs) if _wyoming_tts_target_dbfs else None
 )
+# Temporary STT comparison: keep each Wyoming turn's audio and transcript in
+# this owner-only directory (newest VOXHELM_WYOMING_STT_RECORD_MAX turns).
+# Empty (the default) records nothing. Household speech: delete after use.
+VOXHELM_WYOMING_STT_RECORD_DIR = os.getenv("VOXHELM_WYOMING_STT_RECORD_DIR", "").strip()
+VOXHELM_WYOMING_STT_RECORD_MAX = int(os.getenv("VOXHELM_WYOMING_STT_RECORD_MAX", "40"))
 VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024"))
 VOXHELM_WYOMING_MAX_CONNECTIONS = int(os.getenv("VOXHELM_WYOMING_MAX_CONNECTIONS", "16"))
 VOXHELM_WYOMING_MAX_INFERENCE_THREADS = int(os.getenv("VOXHELM_WYOMING_MAX_INFERENCE_THREADS", "4"))

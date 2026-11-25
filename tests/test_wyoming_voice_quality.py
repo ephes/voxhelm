@@ -166,3 +166,32 @@ def test_parakeet_warm_up_also_loads_whisper(monkeypatch, settings) -> None:
     )
     warm_up_stt(config)
     assert seen == ["parakeet-mlx", "mlx"]
+
+
+def test_record_voice_turn_is_off_by_default(settings, tmp_path) -> None:
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = ""
+    wyoming_module.record_voice_turn(bytes(320), text="x", backend="b", language="de")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_voice_turn_keeps_newest_owner_only(settings, tmp_path) -> None:
+    import json
+    import os
+    import stat
+    import wave
+
+    target = tmp_path / "rec"
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(target)
+    settings.VOXHELM_WYOMING_STT_RECORD_MAX = 2
+    for index in range(3):
+        wyoming_module.record_voice_turn(
+            bytes(320), text=f"t{index}", backend="parakeet-mlx", language="de"
+        )
+    wavs = sorted(target.glob("*.wav"))
+    assert len(wavs) == 2
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(wavs[0]).st_mode) == 0o600
+    texts = [json.loads(w.with_suffix(".json").read_text())["text"] for w in wavs]
+    assert texts == ["t1", "t2"]
+    with wave.open(str(wavs[0]), "rb") as wav_file:
+        assert wav_file.getframerate() == 16000

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Optional recording of Wyoming STT turns for model comparisons:
+  `VOXHELM_WYOMING_STT_RECORD_DIR` (empty = off, the default) keeps the
+  newest `VOXHELM_WYOMING_STT_RECORD_MAX` (40) turns as 16 kHz WAV plus a
+  JSON with transcript, backend and language, owner-only. Meant for short
+  test windows; household speech, delete afterwards.
+
 - Continue draining queued artifact deletions when diagnostic logging fails
   and keep unresolved entries eligible for retry.
 - Index protected filesystem objects by device and inode once per artifact
