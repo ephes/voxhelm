@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recheck inference cancellation after the lane control lock exits and retire
+  the pending holder if the request was cancelled before ticket handoff.
+- Preserve a replacement lane holder receipt on ticket release, close the
+  original handle, and report the identity mismatch.
+
 - Wyoming STT with `parakeet-mlx`: when the transcript is not in the
   requested language (de/en, judged with the TTS routing detector), the
   turn is transcribed again with mlx-whisper forced to that language.

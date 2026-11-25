@@ -570,6 +570,24 @@ def test_release_never_touches_another_holders_file(tmp_path: Path) -> None:
     assert holder_count(scheduler) == 1
 
 
+def test_release_preserves_replacement_at_ticket_path(tmp_path: Path) -> None:
+    import fcntl
+
+    scheduler = LaneScheduler(root_dir=tmp_path / "lanes", stale_seconds=60)
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    holder_path = scheduler.holders_dir / f"{ticket.token}.json"
+    original = holder_path.rename(tmp_path / "original.json")
+    holder_path.write_bytes(original.read_bytes())
+
+    with pytest.raises(RuntimeError, match="holder receipt changed"):
+        scheduler.release(ticket)
+
+    assert holder_path.read_bytes() == original.read_bytes()
+    assert ticket._holder_handle is not None and ticket._holder_handle.closed
+    with original.open("r+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def test_legacy_holder_json_counts_as_a_non_interactive_holder(tmp_path: Path) -> None:
     scheduler = LaneScheduler(
         root_dir=tmp_path, stale_seconds=1800, interactive_slots=1, non_interactive_slots=1
@@ -817,6 +835,27 @@ def test_age_warning_tracks_presence_and_ignores_young_holders(tmp_path: Path, c
         write_holder(scheduler, token="holder", age_seconds=120, path=path)
         assert scheduler._reclaim_holders()[0] == 1
     assert sum("retained old live holder" in record.message for record in caplog.records) == 2
+
+
+def test_cancel_during_holder_publication_retires_pending_ticket(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    cancel_event = threading.Event()
+    write_json = scheduler._write_json
+
+    def write_and_cancel(path, payload):
+        write_json(path, payload)
+        if path.parent == scheduler.holders_dir:
+            cancel_event.set()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scheduler, "_write_json", write_and_cancel)
+        with pytest.raises(InferenceCancelled):
+            scheduler.acquire(lane=LANE_NON_INTERACTIVE, cancel_event=cancel_event)
+
+    assert holder_count(scheduler) == 0
+    assert waiter_count(scheduler) == 0
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    scheduler.release(ticket)
 
 
 @pytest.mark.parametrize("failure", ["write", "unlink", "log"])

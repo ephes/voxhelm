@@ -243,6 +243,8 @@ class LaneScheduler:
 
                 if ticket is not None:
                     # Transfer ownership only after the control lock exits.
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InferenceCancelled("Local inference was cancelled before admission.")
                     with suppress(Exception):
                         _LOGGER.info(
                             "lane_scheduler admitted lane=%s wait_ms=%s pid=%s holders=%s/%s",
@@ -282,12 +284,30 @@ class LaneScheduler:
             failure.add_note("Could not close the pending lane holder.")
 
     def release(self, ticket: AdmissionTicket) -> None:
+        path = self._holder_path(ticket.token)
+        handle = ticket._holder_handle
         try:
             with self._control_lock():
-                self._holder_path(ticket.token).unlink(missing_ok=True)
-        finally:
-            if ticket._holder_handle is not None:
-                ticket._holder_handle.close()
+                with suppress(FileNotFoundError):
+                    if handle is not None:
+                        named_holder = path.stat(follow_symlinks=False)
+                        if handle.closed or not os.path.samestat(
+                            os.fstat(handle.fileno()), named_holder
+                        ):
+                            raise RuntimeError(
+                                "Lane scheduler holder receipt changed before release."
+                            )
+                    path.unlink(missing_ok=True)
+        except BaseException as exc:
+            if handle is not None:
+                try:
+                    handle.close()
+                except BaseException:
+                    exc.add_note("Could not close the lane holder.")
+            raise
+        else:
+            if handle is not None:
+                handle.close()
 
     def _ensure_layout(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)

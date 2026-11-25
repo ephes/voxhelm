@@ -1669,8 +1669,9 @@ Capacity is a small, bounded set of slots (decision D-24):
   then share the GPU, so the interactive request is slower than on an idle host
   but not blocked.
 - Holder publication and waiter removal run under the control lock. The
-  ticket transfers to the caller after the lock exits successfully. A failed
-  publication or lock exit attempts to remove only the pending holder before
+  ticket transfers to the caller after the lock exits successfully and a final
+  cancellation check passes. Cancellation at that check, a failed publication,
+  or a failed lock exit attempts to remove only the pending holder before
   closing its handle, preserving the original error. Waiter and holder
   receipts must be regular files of at most 64 KiB and are opened without
   following symlinks. A rejected receipt or state I/O failure refuses
@@ -1685,6 +1686,9 @@ Capacity is a small, bounded set of slots (decision D-24):
   including initial waiter registration. Cancellation removes only the attempt's
   waiter without waiting for that lock; no holder is published for it.
 - Each new ticket holds an OS file lock on its holder record until release.
+  Release checks that the receipt still names the locked inode. If another
+  inode has taken its place, release preserves that receipt, closes the
+  original handle, and reports an error.
   Process death releases that lock, so a later admission reclaims the abandoned
   holder even if its PID has been reused. Keep the returned ticket alive until
   inference ends and call `release` (normally via `admit_local_inference`).
