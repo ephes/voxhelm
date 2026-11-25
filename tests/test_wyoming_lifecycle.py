@@ -779,3 +779,58 @@ def test_slow_recording_keeps_listener_responsive_and_drains_admitted_work(monke
 
     asyncio.run(flow())
     assert writes == [bytes([index, 0]) for index in range(5)]
+
+
+def test_tts_measurement_keeps_listener_responsive_and_streams_one_gain(
+    monkeypatch, settings, tmp_path
+):
+    from wyoming.audio import AudioChunk
+
+    from tests.test_wyoming_voice_quality import tone
+
+    samples = tone(1500, 17000) + tone(12000, 17000)
+    path = tmp_path / "speech.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((2, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(samples)
+    settings.VOXHELM_WYOMING_SAMPLES_PER_CHUNK = 1024
+    settings.VOXHELM_WYOMING_TTS_TARGET_DBFS = -19
+
+    entered = threading.Event()
+    release = threading.Event()
+    read_sizes: list[int] = []
+    original_read = wave.Wave_read.readframes
+
+    def slow_first_read(reader, frames):
+        read_sizes.append(frames)
+        if not entered.is_set():
+            entered.set()
+            release.wait(1)
+        return original_read(reader, frames)
+
+    monkeypatch.setattr(wave.Wave_read, "readframes", slow_first_read)
+    writer = ClosingWriter()
+
+    async def flow():
+        speaker = make_handler(asyncio.StreamReader(), writer)
+        speech = asyncio.create_task(speaker._write_synthesized_audio(path))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            other = ClosingWriter()
+            await make_handler(asyncio.StreamReader(), other).handle_event(Describe().event())
+            assert decode_all_events(other)[0].type == "info"
+            assert not speech.done()
+        finally:
+            release.set()
+            await speech
+
+    asyncio.run(flow())
+    events = decode_all_events(writer)
+    assert events[0].type == "audio-start"
+    assert events[-1].type == "audio-stop"
+    chunks = [AudioChunk.from_event(event) for event in events[1:-1]]
+    assert all(chunk.channels == 2 and len(chunk.audio) <= 4096 for chunk in chunks)
+    assert b"".join(chunk.audio for chunk in chunks) == wyoming_module.normalize_loudness(
+        samples, width=2, target_dbfs=-19
+    )
+    assert max(read_sizes) < len(samples) // 4

@@ -912,6 +912,11 @@ class WyomingSttEventHandler(AsyncEventHandler):
             width = wav_reader.getsampwidth()
             channels = wav_reader.getnchannels()
 
+            target = settings.VOXHELM_WYOMING_TTS_TARGET_DBFS
+            gain = 1.0
+            if target is not None and width == 2:
+                gain = await asyncio.to_thread(_measure_wav_gain, audio_path, target)
+
             await self.write_event(
                 AudioStart(
                     rate=rate,
@@ -921,16 +926,10 @@ class WyomingSttEventHandler(AsyncEventHandler):
             )
 
             frames_per_chunk = settings.VOXHELM_WYOMING_SAMPLES_PER_CHUNK
-            audio = normalize_loudness(
-                wav_reader.readframes(wav_reader.getnframes()),
-                width=width,
-                target_dbfs=settings.VOXHELM_WYOMING_TTS_TARGET_DBFS,
-            )
-            step = frames_per_chunk * width * channels
-            for offset in range(0, len(audio), step):
+            while audio := wav_reader.readframes(frames_per_chunk):
                 await self.write_event(
                     AudioChunk(
-                        audio=audio[offset : offset + step],
+                        audio=_apply_pcm16_gain(audio, gain),
                         rate=rate,
                         width=width,
                         channels=channels,
@@ -997,33 +996,61 @@ _TTS_MAX_CUT_DB = 8.0
 _TTS_PEAK_CEILING = 0.89  # about -1 dBFS
 
 
-def normalize_loudness(audio: bytes, *, width: int, target_dbfs: float | None) -> bytes:
-    """Scale 16-bit PCM so its RMS level is ``target_dbfs``.
+_TTS_MEASUREMENT_BLOCK_BYTES = 64 * 1024
 
-    The voices differ by about 6 dB (Piper Thorsten, Kokoro Martin, Kokoro
-    af_heart), which made some Home Assistant answers sound much quieter than
-    others. The gain is limited to +/-8 dB and never lifts a peak above about
-    -1 dBFS. Other sample widths, silence and a disabled target pass unchanged.
-    """
-    if target_dbfs is None or width != 2 or len(audio) < 2:
-        return audio
+
+def _pcm16_samples(audio: bytes) -> array.array[int]:
     samples = array.array("h")
     samples.frombytes(audio[: len(audio) - len(audio) % 2])
     if sys.byteorder != "little":
         samples.byteswap()
-    peak = max((abs(sample) for sample in samples), default=0)
+    return samples
+
+
+def _loudness_gain(*, peak: int, squares: int, count: int, target_dbfs: float) -> float:
     if peak == 0:
-        return audio
-    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+        return 1.0
+    rms = math.sqrt(squares / count)
     gain_db = target_dbfs - 20 * math.log10(rms / 32768)
     gain_db = max(-_TTS_MAX_CUT_DB, min(_TTS_MAX_BOOST_DB, gain_db))
-    gain = min(10 ** (gain_db / 20), _TTS_PEAK_CEILING * 32767 / peak)
+    return min(10 ** (gain_db / 20), _TTS_PEAK_CEILING * 32767 / peak)
+
+
+def _measure_wav_gain(audio_path: Path, target_dbfs: float) -> float:
+    peak = squares = count = 0
+    # This reader belongs to the worker even if its awaiting client disconnects.
+    with wave.open(str(audio_path), "rb") as reader:
+        frames = max(1, _TTS_MEASUREMENT_BLOCK_BYTES // (2 * reader.getnchannels()))
+        while audio := reader.readframes(frames):
+            samples = _pcm16_samples(audio)
+            peak = max(peak, max(map(abs, samples), default=0))
+            squares += sum(sample * sample for sample in samples)
+            count += len(samples)
+    return _loudness_gain(peak=peak, squares=squares, count=count, target_dbfs=target_dbfs)
+
+
+def _apply_pcm16_gain(audio: bytes, gain: float) -> bytes:
     if abs(gain - 1.0) < 0.01:
         return audio
+    samples = _pcm16_samples(audio)
     scaled = array.array("h", (max(-32768, min(32767, round(sample * gain))) for sample in samples))
     if sys.byteorder != "little":
         scaled.byteswap()
     return scaled.tobytes()
+
+
+def normalize_loudness(audio: bytes, *, width: int, target_dbfs: float | None) -> bytes:
+    """Scale 16-bit PCM towards the target RMS, with the Wyoming gain and peak limits."""
+    if target_dbfs is None or width != 2:
+        return audio
+    samples = _pcm16_samples(audio)
+    gain = _loudness_gain(
+        peak=max(map(abs, samples), default=0),
+        squares=sum(sample * sample for sample in samples),
+        count=len(samples),
+        target_dbfs=target_dbfs,
+    )
+    return _apply_pcm16_gain(audio, gain)
 
 
 _TURN_NAME = re.compile(r"[0-9]{20}-[0-9a-f]{32}")

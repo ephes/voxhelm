@@ -8,6 +8,7 @@
   JSON with transcript, backend and language, owner-only. Meant for short
   test windows; household speech, delete afterwards.
 
+- Measure Wyoming TTS loudness off the listener loop and stream with a single gain.
 - Validate Wyoming TTS RMS targets as finite values from -96 to 0 dBFS.
 - Move optional Wyoming recordings to a bounded background writer.
 - Record raw and served Wyoming STT text and requested and result languages for comparisons.

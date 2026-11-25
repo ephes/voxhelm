@@ -543,6 +543,10 @@ export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
 
+Wyoming TTS measures RMS and peak in bounded blocks on a worker thread. One gain
+applies across the streamed reply, limited to ±8 dB with peak protection near
+−1 dBFS. An empty target skips measurement and streams the original PCM.
+
 Wyoming STT comparison recordings are opt-in. One background writer processes
 captures, with up to four additional turns queued. Further captures are dropped
 when the queue is full. Listener shutdown allows up to two seconds to drain the
