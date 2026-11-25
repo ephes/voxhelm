@@ -7,7 +7,9 @@ import json
 import logging
 import math
 import os
+import re
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -16,6 +18,7 @@ import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from uuid import uuid4
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -973,11 +976,30 @@ def normalize_loudness(audio: bytes, *, width: int, target_dbfs: float | None) -
     return scaled.tobytes()
 
 
+_TURN_NAME = re.compile(r"[0-9]{20}-[0-9a-f]{32}")
+_TURN_FILES = {"audio.wav", "metadata.json"}
+
+
+def _complete_turn(path: Path) -> bool:
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        return False
+    entries = {entry.name: entry for entry in path.iterdir()}
+    return entries.keys() == _TURN_FILES and all(
+        stat.S_ISREG(entry.lstat().st_mode) for entry in entries.values()
+    )
+
+
+def _remove_turn(path: Path) -> None:
+    for name in _TURN_FILES:
+        (path / name).unlink(missing_ok=True)
+    path.rmdir()
+
+
 def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: str | None) -> None:
     """Keep the turn's audio and transcript for an STT comparison, if enabled.
 
-    Off unless VOXHELM_WYOMING_STT_RECORD_DIR is set. The directory is made
-    owner-only, files are owner-only, and only the newest
+    Off unless VOXHELM_WYOMING_STT_RECORD_DIR is set. The recorder namespace and files are
+    owner-only, and only the newest
     VOXHELM_WYOMING_STT_RECORD_MAX turns are kept. Failures are logged and
     never affect the voice turn.
     """
@@ -985,11 +1007,14 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
     if not directory or not audio_bytes:
         return
     try:
-        root = Path(directory)
+        root = Path(directory) / "voxhelm-turns"
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise OSError("Invalid recording namespace")
         os.chmod(root, 0o700)
-        stem = time.strftime("%Y%m%dT%H%M%S") + f"-{time.time_ns()}"
-        wav_path = root / f"{stem}.wav"
+        turn = root / f"{time.time_ns():020d}-{uuid4().hex}"
+        turn.mkdir(mode=0o700)
+        wav_path = turn / "audio.wav"
         with open(os.open(wav_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as raw:
             with wave.open(raw, "wb") as wav_file:
                 wav_file.setframerate(_CONVERTED_RATE)
@@ -998,13 +1023,17 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
                 wav_file.writeframes(audio_bytes)
         meta = {"text": text, "backend": backend, "language": language}
         with open(
-            os.open(root / f"{stem}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+            os.open(turn / "metadata.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
         ) as handle:
             json.dump(meta, handle, ensure_ascii=False)
         keep = max(1, settings.VOXHELM_WYOMING_STT_RECORD_MAX)
-        for old_wav in sorted(root.glob("*.wav"))[:-keep]:
-            old_wav.unlink(missing_ok=True)
-            old_wav.with_suffix(".json").unlink(missing_ok=True)
+        complete = sorted(
+            path
+            for path in root.iterdir()
+            if _TURN_NAME.fullmatch(path.name) and _complete_turn(path)
+        )
+        for expired in complete[:-keep]:
+            _remove_turn(expired)
     except Exception:
         _LOGGER.warning("Wyoming STT recording failed", exc_info=True)
 

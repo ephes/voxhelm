@@ -542,6 +542,13 @@ export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
 
+Wyoming STT comparison recordings are opt-in. Each turn lives in a timestamped
+directory under `VOXHELM_WYOMING_STT_RECORD_DIR/voxhelm-turns/`, with owner-only
+`audio.wav` and `metadata.json` files. Count retention applies to complete pairs
+in this namespace. Legacy flat recordings and other files in the configured
+directory stay available for manual migration or removal.
+
+
 Bootstrap the initial operator account after migrations. Use `--password-stdin`
 to read a password from a secret file or a secret provider's output:
 

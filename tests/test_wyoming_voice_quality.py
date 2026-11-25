@@ -183,15 +183,30 @@ def test_record_voice_turn_keeps_newest_owner_only(settings, tmp_path) -> None:
     target = tmp_path / "rec"
     settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(target)
     settings.VOXHELM_WYOMING_STT_RECORD_MAX = 2
+    target.mkdir(mode=0o750)
+    (target / "legacy.wav").write_bytes(b"legacy audio")
+    (target / "legacy.json").write_text("legacy metadata")
+    root = target / "voxhelm-turns"
+    root.mkdir()
+    incomplete = root / "00000000000000000001-00000000000000000000000000000000"
+    incomplete.mkdir()
+    (incomplete / "audio.wav").write_bytes(b"incomplete")
+    (root / "other.wav").write_bytes(b"unrelated")
     for index in range(3):
         wyoming_module.record_voice_turn(
             bytes(320), text=f"t{index}", backend="parakeet-mlx", language="de"
         )
-    wavs = sorted(target.glob("*.wav"))
+    assert (target / "legacy.wav").read_bytes() == b"legacy audio"
+    assert (target / "legacy.json").read_text() == "legacy metadata"
+    assert (incomplete / "audio.wav").read_bytes() == b"incomplete"
+    assert (root / "other.wav").read_bytes() == b"unrelated"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o750
+    wavs = sorted(root.glob("*/metadata.json"))
+    wavs = [path.with_name("audio.wav") for path in wavs]
     assert len(wavs) == 2
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(wavs[0]).st_mode) == 0o600
-    texts = [json.loads(w.with_suffix(".json").read_text())["text"] for w in wavs]
+    texts = [json.loads(w.with_name("metadata.json").read_text())["text"] for w in wavs]
     assert texts == ["t1", "t2"]
     with wave.open(str(wavs[0]), "rb") as wav_file:
         assert wav_file.getframerate() == 16000
