@@ -629,3 +629,35 @@ def test_server_skips_warm_up_when_disabled(monkeypatch) -> None:
 
     asyncio.run(flow())
     assert server.stopped
+
+
+def test_recording_and_logging_failures_preserve_transcript(monkeypatch, settings, tmp_path):
+    import logging
+
+    class BrokenSink(logging.Handler):
+        def emit(self, record):
+            raise RuntimeError("synthetic logging failure")
+
+    root_file = tmp_path / "unwritable-directory"
+    root_file.touch()
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(root_file)
+    monkeypatch.setattr(
+        wyoming_module,
+        "transcribe_pcm",
+        lambda *args, **kwargs: SimpleNamespace(text="hello", language="en", backend_name="fake"),
+    )
+    writer = ClosingWriter()
+
+    async def flow():
+        handler = make_handler(asyncio.StreamReader(), writer)
+        handler.audio_buffer.write(ONE_SECOND_PCM)
+        await handler.handle_event(AudioStop().event())
+
+    sink = BrokenSink()
+    logger = wyoming_module._LOGGER
+    logger.addHandler(sink)
+    try:
+        asyncio.run(flow())
+    finally:
+        logger.removeHandler(sink)
+    assert [Transcript.from_event(event).text for event in decode_all_events(writer)] == ["hello"]

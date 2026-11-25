@@ -551,7 +551,8 @@ close. The writer retires interrupted staging directories on its next write.
 Retention scans newest first and keeps complete turns that fit both the count
 and aggregate WAV-plus-JSON budget (positive integer bytes, default 160 MiB).
 A turn larger than the entire budget is skipped before staging. Allow disk space
-for one staged turn during publication. Legacy flat recordings and other files in the configured
+for one staged turn during publication. Recorder failure warnings omit audio,
+transcripts, file paths and exception details. Legacy flat recordings and other files in the configured
 directory stay available for manual migration or removal.
 
 

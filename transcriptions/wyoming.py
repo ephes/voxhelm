@@ -17,6 +17,7 @@ import threading
 import time
 import wave
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
@@ -61,6 +62,12 @@ from .service import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _best_effort_warning(message: str) -> None:
+    with suppress(Exception):
+        _LOGGER.warning(message)
+
 
 # Audio is buffered after conversion to 16 kHz, 16-bit, mono PCM.
 _CONVERTED_RATE = 16000
@@ -1021,7 +1028,7 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
         finally:
             os.close(lock_fd)
     except Exception:
-        _LOGGER.warning("Wyoming STT recording failed", exc_info=True)
+        _best_effort_warning("Wyoming STT recording failed")
 
 
 _PENDING_PREFIX = ".pending-"
@@ -1040,7 +1047,7 @@ def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | 
     metadata_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
     budget = settings.VOXHELM_WYOMING_STT_RECORD_MAX_BYTES
     if _PCM_WAV_HEADER_BYTES + len(audio_bytes) + len(metadata_bytes) > budget:
-        _LOGGER.warning("Wyoming STT recording exceeds byte budget")
+        _best_effort_warning("Wyoming STT recording exceeds byte budget")
         _prune_recordings(root, budget)
         return
 
