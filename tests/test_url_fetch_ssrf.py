@@ -306,6 +306,56 @@ def test_incomplete_media_never_reaches_inference(
 
 
 @pytest.mark.parametrize("fetch", ENTRY_POINTS)
+@pytest.mark.parametrize("failure", ["read", "api", "cancel"])
+def test_temp_removal_failure_preserves_fetch_error(
+    fetch, failure, local_allowlist, isolated_tempdir, monkeypatch, caplog
+):
+    url = "http://127.0.0.1/file.mp3"
+    primary = {
+        "read": OSError("primary read failure"),
+        "api": ApiError("primary input failure", status=413),
+        "cancel": KeyboardInterrupt("primary cancellation"),
+    }[failure]
+    expected_class = media.TransientFetchError if failure == "read" else type(primary)
+    unlink_attempts = []
+
+    class Response(io.BytesIO):
+        status = 200
+        headers = Message()
+        headers["Content-Type"] = "audio/mpeg"
+
+        def geturl(self):
+            return url
+
+        def read1(self, size=-1):
+            if self.tell():
+                raise primary
+            return super().read1(size)
+
+    def fail_unlink(path, *, missing_ok=False):
+        assert missing_ok
+        assert path.parent == isolated_tempdir
+        assert path.read_bytes() == AUDIO_BYTES
+        unlink_attempts.append(path)
+        raise PermissionError("synthetic-private-unlink-detail")
+
+    monkeypatch.setattr(media, "open_allowed_url", lambda *a, **kw: Response(AUDIO_BYTES))
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail_unlink)
+        with pytest.raises(expected_class) as excinfo:
+            fetch(url)
+
+    assert type(excinfo.value) is expected_class
+    if failure == "read":
+        assert excinfo.value.__cause__ is primary
+    else:
+        assert excinfo.value is primary
+    assert len(unlink_attempts) == 1
+    assert list(isolated_tempdir.iterdir()) == unlink_attempts
+    assert caplog.messages == ["URL fetch cleanup failed: temporary media removal."]
+
+
+@pytest.mark.parametrize("fetch", ENTRY_POINTS)
 @pytest.mark.parametrize("failure", ["api", "read", "cancel", None])
 @pytest.mark.parametrize("nested", [False, True])
 def test_cleanup_attempts_all_closes_and_restores_the_callers_deadline(

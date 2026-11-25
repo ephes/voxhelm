@@ -487,13 +487,9 @@ def fetch_allowed_url_to_tempfile(
             exc.close()
         except Exception:
             _warn_fetch_cleanup("HTTP error response close")
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
         error_class = TransientFetchError if exc.code in _TRANSIENT_HTTP_STATUSES else ApiError
         raise error_class(f"URL fetch failed with HTTP {exc.code}.") from exc
     except URLError as exc:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
         if isinstance(exc.reason, ApiError):
             raise exc.reason from exc
         # A certificate the host presents now fails the same way on every try.
@@ -504,17 +500,7 @@ def fetch_allowed_url_to_tempfile(
         )
         raise error_class(f"URL fetch failed: {exc.reason}.") from exc
     except (OSError, http.client.HTTPException) as exc:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
         raise TransientFetchError(f"URL fetch failed: {exc}.") from exc
-    except ApiError:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise
-    except BaseException:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise
     finally:
         cleanup_failed = False
         try:
@@ -528,16 +514,16 @@ def fetch_allowed_url_to_tempfile(
         finally:
             _FETCH_DEADLINE.reset(marker)
         if cleanup_failed:
-            LOGGER.warning("URL fetch cleanup failed: socket close.")
-            # Keep an active fetch failure/cancellation. A successful transfer
-            # cannot be returned as clean when owned descriptors failed to close.
-            if completed:
-                if temp_path is not None:
-                    try:
-                        temp_path.unlink(missing_ok=True)
-                    except OSError:
-                        LOGGER.warning("URL fetch cleanup failed: temporary media removal.")
-                raise ApiError("URL fetch cleanup failed.", status=500, error_type="server_error")
+            _warn_fetch_cleanup("socket close")
+        if temp_path is not None and (not completed or cleanup_failed):
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                _warn_fetch_cleanup("temporary media removal")
+        # Keep an active fetch failure or cancellation. A completed transfer
+        # still fails when its owned socket descriptors could not be closed.
+        if completed and cleanup_failed:
+            raise ApiError("URL fetch cleanup failed.", status=500, error_type="server_error")
 
 
 def _retry_sleep(seconds: float) -> None:

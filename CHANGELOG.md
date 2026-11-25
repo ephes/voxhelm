@@ -5,6 +5,9 @@
 - Close URL fetch HTTP error responses without reading their bodies and retain
   the original status and retry classification if close fails.
 
+- Preserve the original fetch failure or cancellation when temporary media
+  removal fails and log a fixed cleanup warning.
+
 - Reject unsupported remote transcript output formats before downloading or
   processing the input. Claims that omit formats still use text and JSON.
 

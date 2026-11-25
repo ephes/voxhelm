@@ -1771,9 +1771,9 @@ concurrency remains outside that scheduler's direct control.
 elapsed budget for DNS, connection attempts, redirects, response headers and
 body download of a sync URL input (`POST /v1/audio/transcriptions` and the
 operator UI's sync route). Slow progress does not reset it. Expiry interrupts
-network sockets and removes partial temporary media; an OS DNS lookup may
-finish later in a daemon thread, which cannot open a connection or create a
-file. Sync URL inputs are limited to `VOXHELM_MAX_URL_DOWNLOAD_BYTES`
+network sockets and attempts to remove partial temporary media. An OS DNS
+lookup may finish later in a daemon thread, which cannot open a connection or
+create a file. Sync URL inputs are limited to `VOXHELM_MAX_URL_DOWNLOAD_BYTES`
 (default 128 MiB) and are fetched once. Any URL fetch whose body ends before
 its announced `Content-Length` fails instead of passing a truncated file on.
 
@@ -1788,14 +1788,14 @@ When an HTTP status raises an error, Voxhelm closes the error response without
 reading its body. A close failure logs a fixed warning and preserves the status
 and its retry classification.
 
-Fetch cleanup attempts every watchdog socket close and always restores the
-caller's previous deadline context. A cleanup failure preserves an existing
-fetch error or cancellation. If the transfer otherwise succeeded, it refuses
-the media, attempts to remove the temporary file and reports
-`URL fetch cleanup failed.` (HTTP 500 for sync callers) instead of starting
-inference. Cleanup logs contain fixed failure categories, never the socket
-error's details. A failure caused only by cleanup is not retried within a
-batch fetch.
+Fetch cleanup attempts every watchdog socket close, restores the caller's
+previous deadline context and attempts to remove temporary media on failure.
+Cleanup failures preserve an existing fetch error, its retry classification
+or a cancellation. If a socket close fails after a successful transfer, Voxhelm
+refuses the media, attempts to remove the temporary file and reports
+`URL fetch cleanup failed.` (HTTP 500 for sync callers). A failure caused only
+by cleanup is not retried within a batch fetch. Cleanup logs contain fixed
+failure categories without file paths or exception details.
 
 Batch media, meaning the URL input of a batch job and known-speaker reference
 audio, whether fetched by the Django Tasks worker or by a remote worker,
