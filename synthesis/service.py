@@ -9,7 +9,7 @@ import tempfile
 import wave
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
 from typing import Any, NamedTuple, Protocol
@@ -36,6 +36,7 @@ CONTENT_TYPES = {
     "mp3": "audio/mpeg",
     "ogg": "audio/ogg",
 }
+FileGeneration = tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class InstalledVoice:
     languages: tuple[str, ...]
     artifacts: dict[str, Path]
     speakers: tuple[str, ...] = ()
+    config_generation: FileGeneration | None = field(default=None, compare=False, repr=False)
 
     @property
     def model_path(self) -> Path:
@@ -624,6 +626,15 @@ def build_voice_metadata(*, voice_name: str, model_path: Path, config_path: Path
         data = source.read(MAX_PIPER_CONFIG_BYTES + 1)
         if len(data) > MAX_PIPER_CONFIG_BYTES:
             raise ValueError("Piper config exceeds the byte limit.")
+        generation = _file_generation(metadata)
+        named = config_path.lstat()
+        if (
+            len(data) != metadata.st_size
+            or _file_generation(os.fstat(descriptor)) != generation
+            or not stat.S_ISREG(named.st_mode)
+            or _file_generation(named) != generation
+        ):
+            raise ValueError("Piper config changed during discovery.")
     config = json.loads(data.decode("utf-8"))
     languages = parse_voice_languages(voice_name)
     speaker_id_map = config.get("speaker_id_map", {})
@@ -635,6 +646,7 @@ def build_voice_metadata(*, voice_name: str, model_path: Path, config_path: Path
         languages=languages,
         artifacts={"model": model_path, "config": config_path},
         speakers=speakers,
+        config_generation=generation,
     )
 
 
@@ -663,9 +675,21 @@ def load_piper_voice(voice: InstalledVoice):
         ) from exc
 
     with _PIPER_CACHE_LOCK:
+        try:
+            config_identity = piper_artifact_identity(voice.config_path)
+            if voice.config_generation is not None:
+                named = voice.config_path.lstat()
+                if (
+                    config_identity[1:] != voice.config_generation
+                    or not stat.S_ISREG(named.st_mode)
+                    or _file_generation(named) != voice.config_generation
+                ):
+                    raise BackendUnavailableError("Piper config changed since discovery; retry.")
+        except OSError as exc:
+            raise BackendUnavailableError("Piper config changed since discovery; retry.") from exc
         identity = (
             piper_artifact_identity(voice.model_path),
-            piper_artifact_identity(voice.config_path),
+            config_identity,
         )
         cached = _PIPER_VOICE_CACHE.get(identity)
         if cached is not None:
@@ -686,8 +710,17 @@ def load_piper_voice(voice: InstalledVoice):
 
 def piper_artifact_identity(path: Path) -> ArtifactIdentity:
     resolved = path.resolve(strict=True)
-    stat = resolved.stat()
-    return (resolved, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return (resolved, *_file_generation(resolved.stat()))
+
+
+def _file_generation(metadata: os.stat_result) -> FileGeneration:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def require_artifact_generation(

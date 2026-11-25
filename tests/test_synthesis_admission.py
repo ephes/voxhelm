@@ -1,6 +1,7 @@
 """Installed model admission uses synthetic files and fake loaders only."""
 
 import io
+import os
 import sys
 import zipfile
 from types import SimpleNamespace
@@ -21,6 +22,57 @@ def clear_caches():
     yield
     kokoro.reset_caches()
     service._PIPER_VOICE_CACHE.clear()
+
+
+@pytest.mark.parametrize("change", ["rewrite", "replace"])
+def test_piper_discovery_skips_config_changed_during_read(tmp_path, monkeypatch, change):
+    _, config = write_voice_fixture(tmp_path, "changing")
+    write_voice_fixture(tmp_path, "stable")
+    fdopen = os.fdopen
+
+    def open_and_change(fd, mode):
+        stream = fdopen(fd, mode)
+        if os.fstat(fd).st_ino == config.stat().st_ino:
+            updated = config if change == "rewrite" else config.with_suffix(".new")
+            updated.write_text('{"speaker_id_map": {"new_speaker": 0}}')
+            if change == "replace":
+                updated.replace(config)
+        return stream
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fdopen", open_and_change)
+        voices = service.discover_installed_voices(voice_dir=tmp_path, configured_voices=[])
+    assert list(voices) == ["stable"]
+
+
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_piper_load_requires_config_generation_from_discovery(tmp_path, monkeypatch, warm_cache):
+    _, config = write_voice_fixture(tmp_path, "synthetic")
+    voice = service.discover_installed_voices(voice_dir=tmp_path, configured_voices=[])["synthetic"]
+    replacement = config.with_suffix(".new")
+    replacement.write_text('{"speaker_id_map": {"new_speaker": 0}}')
+    replacement.replace(config)
+    voices = service.discover_installed_voices(voice_dir=tmp_path, configured_voices=[])
+    current = voices["synthetic"]
+    assert voice.speakers == ("speaker_0",)
+    assert current.speakers == ("new_speaker",)
+
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append(True)
+        return object()
+
+    monkeypatch.setitem(
+        sys.modules, "piper", SimpleNamespace(PiperVoice=SimpleNamespace(load=load))
+    )
+    if warm_cache:
+        service.load_piper_voice(current)
+    with pytest.raises(service.BackendUnavailableError, match="changed.*retry"):
+        service.load_piper_voice(voice)
+    assert len(calls) == int(warm_cache)
+    service.load_piper_voice(current)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("kind", ["compressed", "too-many-rows", "forged-shape", "truncated"])
@@ -73,9 +125,6 @@ def test_replaced_generation_is_not_returned_or_cached(tmp_path, monkeypatch, ki
 
     if kind.startswith("piper"):
         model, config = write_voice_fixture(tmp_path, "synthetic")
-        voice = service.build_voice_metadata(
-            voice_name="synthetic", model_path=model, config_path=config
-        )
         changed = model if kind == "piper-model" else config
 
         def load(*args, **kwargs):
@@ -89,6 +138,9 @@ def test_replaced_generation_is_not_returned_or_cached(tmp_path, monkeypatch, ki
         )
 
         def get():
+            voice = service.build_voice_metadata(
+                voice_name="synthetic", model_path=model, config_path=config
+            )
             return service.load_piper_voice(voice)
 
         cache = service._PIPER_VOICE_CACHE
