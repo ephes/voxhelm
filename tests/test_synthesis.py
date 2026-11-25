@@ -743,7 +743,9 @@ def test_piper_cache_tracks_artifact_identity(monkeypatch, tmp_path, changed_art
 
 
 @pytest.mark.parametrize("output_format", ["mp3", "ogg"])
-@pytest.mark.parametrize("failure", ["timeout", "startup", "nonzero", "success"])
+@pytest.mark.parametrize(
+    "failure", ["timeout", "startup", "nonzero", "empty", "symlink", "success"]
+)
 def test_export_audio_deadline_and_owned_cleanup(
     monkeypatch, tmp_path, settings, output_format, failure
 ):
@@ -767,13 +769,16 @@ def test_export_audio_deadline_and_owned_cleanup(
     body = {
         "timeout": "time.sleep(10)",
         "nonzero": "sys.stderr.write('failed'); raise SystemExit(1)",
+        "symlink": "target.unlink()\ntarget.symlink_to(sys.argv[sys.argv.index('-i') + 1])",
         "success": "pathlib.Path(sys.argv[-1]).write_bytes(b'converted')",
     }.get(failure, "")
+    partial = "target.write_bytes(b'partial')\n" if failure in {"timeout", "nonzero"} else ""
     fake_ffmpeg.write_text(
         f"#!{sys.executable}\n"
         "import pathlib, sys, time\n"
         f"open({str(calls)!r}, 'a').write('call\\n')\n"
-        "pathlib.Path(sys.argv[-1]).write_bytes(b'partial')\n"
+        "target = pathlib.Path(sys.argv[-1])\n"
+        f"{partial}"
         f"{body}\n"
     )
     fake_ffmpeg.chmod(0o755)

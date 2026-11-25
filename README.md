@@ -1851,11 +1851,13 @@ keep its output pipes open. stdout is discarded and stderr is drained with a
 64 KiB ceiling; overflow fails the export. Every exit attempts process-group
 retirement and bounded reaping. Uncertain retirement fails the export and retains
 its partial output for operator recovery under the native cleanup policy above.
-Timeout, startup, diagnostic-overflow and nonzero-exit failures with confirmed
-retirement remove the owned output and raise a synthesis error with a fixed
-message (HTTP 500 `server_error` on the sync API, failed batch job); at most 2 KiB of converter output is logged,
-never returned. Callers still own and clean up the source WAV. WAV passthrough
-does not invoke ffmpeg or use this deadline.
+After successful retirement, the output must be a nonempty regular file at the
+reserved path. Timeout, startup, diagnostic-overflow, nonzero-exit and invalid
+output failures with confirmed retirement attempt to remove the owned output
+and raise a synthesis error with a fixed message (HTTP 500 `server_error` on
+the sync API, failed batch job). Up to 2 KiB of converter output goes to the
+log. Callers still own and clean up the source WAV. WAV passthrough does not
+invoke ffmpeg or use this deadline.
 
 `POST /v1/audio/speech` admission and responses:
 

@@ -562,6 +562,12 @@ def export_audio(result: SynthesisResult, *, output_format: str) -> ExportedAudi
                 failure="Audio conversion failed.",
             ),
         )
+        try:
+            output = target_path.lstat()
+        except OSError as exc:
+            raise RuntimeError("Audio conversion output could not be inspected.") from exc
+        if not stat.S_ISREG(output.st_mode) or output.st_size <= 0:
+            raise RuntimeError("Audio conversion did not produce a nonempty regular file.")
     except BaseException as exc:
         # An unreaped converter may still be writing this reserved output.
         if not process_ownership_uncertain(exc):

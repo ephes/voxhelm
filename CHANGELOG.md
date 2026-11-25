@@ -11,6 +11,9 @@
 - Close speaker evaluation fingerprint descriptors when a file is rejected or
   the read stream cannot be opened.
 
+- Require a nonempty regular output after ffmpeg finishes an MP3 or Ogg export
+  and clean up the owned output on rejection.
+
 - Complete remote jobs and omit optional numeric diagnostics that exceed the
   finite double-precision range, including oversized JSON integers.
 
