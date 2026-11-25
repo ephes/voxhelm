@@ -16,7 +16,7 @@
 - Validate Wyoming TTS RMS targets as finite values from -96 to 0 dBFS.
 - Move optional Wyoming recordings to a bounded background writer.
 - Record raw and served Wyoming STT text and requested and result languages for comparisons.
-- Keep Wyoming transcripts available when recording and diagnostic logging fail.
+- Keep Wyoming transcripts available when the recorder or its failure logging fails.
 - Cap retained Wyoming recording audio and metadata at 160 MiB by default.
 - Publish Wyoming recording audio and metadata together and recover interrupted staging.
 
