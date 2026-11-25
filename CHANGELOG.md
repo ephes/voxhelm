@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Continue draining queued artifact deletions when diagnostic logging fails
+  and keep unresolved entries eligible for retry.
+- Index protected filesystem objects by device and inode once per artifact
+  replacement, preserving shared objects while queueing obsolete intermediates.
+
 - Recheck inference cancellation after the lane control lock exits and retire
   the pending holder if the request was cancelled before ticket handoff.
 - Preserve a replacement lane holder receipt on ticket release, close the

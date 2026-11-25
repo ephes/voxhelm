@@ -35,6 +35,7 @@ import logging
 import os
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -763,15 +764,14 @@ def queue_replaced_intermediate_objects(
         for artifact in replaced
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS
     )
-    # Filesystem aliases (case variants, symlinked directories) of a protected
-    # file are the same object; compare them by device and inode as well.
-    protected_stats = [
-        stat
-        for stat in (
-            filesystem_stat(location) for location in protected if location[0] == "filesystem"
-        )
-        if stat is not None
-    ]
+    # Filesystem aliases of a protected file share its device and inode.
+    protected_inodes: set[tuple[int, int]] = set()
+    for location in protected:
+        if location[0] != "filesystem":
+            continue
+        protected_stat = filesystem_stat(location)
+        if protected_stat is not None:
+            protected_inodes.add((protected_stat.st_dev, protected_stat.st_ino))
     queued: list[PendingArtifactDeletion] = []
     for artifact in replaced:
         if artifact.exposed or artifact.kind not in PRUNABLE_ARTIFACT_KINDS:
@@ -789,9 +789,7 @@ def queue_replaced_intermediate_objects(
             continue
         if location[0] == "filesystem":
             stat = filesystem_stat(location)
-            if stat is not None and any(
-                os.path.samestat(stat, protected_stat) for protected_stat in protected_stats
-            ):
+            if stat is not None and (stat.st_dev, stat.st_ino) in protected_inodes:
                 continue
         queued.append(
             PendingArtifactDeletion.objects.create(
@@ -827,16 +825,18 @@ def process_pending_artifact_deletion(pending_pk: int) -> str:
             if not job_key_is_deletable(
                 identity=identity, key=pending.storage_key, job_id=pending.job_id
             ):
-                logger.warning(
-                    "Refusing queued deletion of %s: not a voxhelm-generated job key.",
-                    pending.storage_key,
-                )
+                with suppress(Exception):
+                    logger.warning(
+                        "Refusing queued deletion of %s: not a voxhelm-generated job key.",
+                        pending.storage_key,
+                    )
                 return "refused"
             if not object_is_referenced(identity=identity, key=pending.storage_key):
                 delete_stored_object(identity=identity, key=pending.storage_key)
             pending.delete()
     except Exception:
-        logger.exception("Could not delete queued artifact object %s; will retry.", pending_pk)
+        with suppress(Exception):
+            logger.exception("Could not delete queued artifact object %s; will retry.", pending_pk)
         return "failed"
     return "resolved"
 
@@ -868,7 +868,8 @@ def drain_pending_artifact_deletions(
                 drain_attempts=F("drain_attempts") + 1
             )
         except DatabaseError:
-            logger.warning("Could not update queued artifact deletion retry order.")
+            with suppress(Exception):
+                logger.warning("Could not update queued artifact deletion retry order.")
     return counts
 
 

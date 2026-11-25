@@ -4,6 +4,7 @@ import os
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from django.core.management import CommandError, call_command
@@ -102,6 +103,38 @@ def test_default_pending_drain_advances_past_a_refused_page(settings):
     assert set(PendingArtifactDeletion.objects.values_list("pk", flat=True)) == {
         item.pk for item in blocked
     }
+
+
+@pytest.mark.django_db
+def test_pending_drain_continues_after_storage_and_logging_fail(settings, monkeypatch):
+    job = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(hours=2))
+    first = make_artifact(job, name="first.mp3", kind=JobArtifact.Kind.SOURCE)
+    second = make_artifact(job, name="second.mp3", kind=JobArtifact.Kind.SOURCE)
+    failed, resolved = queue_replaced_intermediate_objects(replaced=[first, second], kept=[])
+    first.delete()
+    second.delete()
+    delete_object = retention.delete_stored_object
+
+    def delete_with_failure(*, identity, key):
+        if key == failed.storage_key:
+            raise OSError("storage unavailable")
+        delete_object(identity=identity, key=key)
+
+    def log_failure(*args, **kwargs):
+        raise RuntimeError("logging sink unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(retention, "delete_stored_object", delete_with_failure)
+        patch.setattr(retention.logger, "exception", log_failure)
+        assert drain_pending_artifact_deletions() == {"resolved": 1, "refused": 0, "failed": 1}
+
+    failed.refresh_from_db()
+    assert failed.drain_attempts == 1
+    assert object_path(settings, first).exists()
+    assert not PendingArtifactDeletion.objects.filter(pk=resolved.pk).exists()
+    assert not object_path(settings, second).exists()
+    assert drain_pending_artifact_deletions() == {"resolved": 1, "refused": 0, "failed": 0}
+    assert not object_path(settings, first).exists()
 
 
 @pytest.mark.django_db
@@ -527,6 +560,52 @@ def test_replaced_source_aliasing_replaced_transcript_is_not_queued(settings):
 
     assert queue_replaced_intermediate_objects(replaced=[transcript, source], kept=[]) == []
     assert object_path(settings, transcript).exists()
+
+
+@pytest.mark.django_db
+def test_replacement_indexes_protected_inodes_and_preserves_hard_link(settings, monkeypatch):
+    job = make_job(state=Job.State.RUNNING, finished_ago=None)
+    protected = [
+        make_artifact(job, name=f"final-{i}.txt", kind=JobArtifact.Kind.TRANSCRIPT_TEXT)
+        for i in range(12)
+    ]
+    sources = [
+        make_artifact(job, name=f"source-{i}.mp3", kind=JobArtifact.Kind.SOURCE) for i in range(12)
+    ]
+    alias = make_artifact(job, name="alias.mp3", kind=JobArtifact.Kind.SOURCE, write_object=False)
+    object_path(settings, alias).hardlink_to(object_path(settings, protected[0]))
+    key_is_deletable = retention.job_key_is_deletable
+    filesystem_stat = retention.filesystem_stat
+    inode_operations = 0
+
+    def admit_alias(**kwargs):
+        # Exercise inode matching independently of the hard-link allowlist check.
+        return kwargs["key"] == alias.storage_key or key_is_deletable(**kwargs)
+
+    class CountedInode(int):
+        def __hash__(self):
+            nonlocal inode_operations
+            inode_operations += 1
+            return super().__hash__()
+
+        def __eq__(self, other):
+            nonlocal inode_operations
+            inode_operations += 1
+            return super().__eq__(other)
+
+    def count_inode_operations(location):
+        stat = filesystem_stat(location)
+        if stat is None:
+            return None
+        return SimpleNamespace(st_dev=stat.st_dev, st_ino=CountedInode(stat.st_ino))
+
+    monkeypatch.setattr(retention, "job_key_is_deletable", admit_alias)
+    monkeypatch.setattr(retention, "filesystem_stat", count_inode_operations)
+
+    queued = queue_replaced_intermediate_objects(replaced=[*protected, *sources, alias], kept=[])
+
+    assert [entry.storage_key for entry in queued] == [source.storage_key for source in sources]
+    assert inode_operations <= 3 * (len(protected) + len(sources) + 1)
 
 
 @pytest.mark.django_db

@@ -873,8 +873,10 @@ not be hard-linked. Anything else is refused: the row and object stay, and the
 command (and `--dry-run`) lists it as refused; refused queued deletions stay
 queued. A default drain takes at most 100 entries, ordered by the fewest prior
 default-drain attempts and then by ID. Refused and failed entries stay queued
-and move behind entries with fewer attempts. The maintenance command uses its
-saved per-phase cursor. An allowed object that another artifact row or
+and move behind entries with fewer attempts. Diagnostic logging is best effort.
+A logging failure leaves the deletion outcome intact and the drain proceeds
+to the next entry. The maintenance command uses its saved per-phase cursor.
+An allowed object that another artifact row or
 staged upload still references after resolution (store identity, real path
 and inode, canonical S3 endpoint and exact key) is also kept; only its row
 goes. S3 endpoints with an explicit default port compare equal to those without
@@ -892,8 +894,11 @@ remote completion replaces a job's artifact rows, the replaced non-exposed
 `source` / `extracted_audio` objects that pass the allowlist and that no kept
 or final artifact shares are queued (`PendingArtifactDeletion`, in the same
 transaction) and deleted right after the commit; a failed deletion stays queued
-and the next `prune_job_artifacts` run retries it. A completion retry from the
-same worker and lease still matches after pruning removed those intermediates.
+and the next `prune_job_artifacts` run retries it. On the filesystem, the swap
+checks exact locations and builds one device-and-inode index for existing
+protected objects so it can recognize aliases during queueing. A completion
+retry from the same worker and lease still matches after pruning removed those
+intermediates.
 Each deletion re-checks its candidate, the allowlist and the references under
 the database write lock, so overlapping runs are safe. If the cleanup process dies
 after object deletion but before commit, the ownership row rolls back; the next
