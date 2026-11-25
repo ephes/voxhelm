@@ -24,6 +24,12 @@ inode first. Queue polling skips waiter reads at full capacity and otherwise
 prunes dead waiters while selecting the minimum eligible lane, creation time
 and token in one pass. See the current README for operational details.
 
+**Control-lock amendment:** A contender verifies that the persistent regular
+lock file still names the inode it acquired before accessing the queue. A
+pending holder becomes a caller-owned ticket only after control-lock exit. If
+exit raises, the attempt retires its own holder before closing its handle and
+propagates the original failure.
+
 ## Verified results (2026-09-06, studio, content-free synthetic audio)
 
 Method: a 20-minute mono MP3 (48 kbps, 7.2 MB) generated locally with `say`

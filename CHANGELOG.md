@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Retire a pending inference holder if the control lock fails to exit before
+  the caller receives its ticket.
+
+- Reject nonregular inference control locks and refuse stale lock generations
+  before accessing the lane queue.
+
 - Select the next admissible inference waiter in one pass and skip queue
   reads while all inference slots are occupied.
 

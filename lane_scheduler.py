@@ -42,7 +42,7 @@ class InferenceCancelled(RuntimeError):
 
 
 def _open_regular_file(path: str, flags: int) -> int:
-    fd = os.open(path, flags | os.O_NONBLOCK | os.O_NOFOLLOW)
+    fd = os.open(path, flags | os.O_NONBLOCK | os.O_NOFOLLOW, 0o666)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("Lane scheduler file must be regular.")
@@ -187,12 +187,15 @@ class LaneScheduler:
             created_at=time.time(),
         )
         waiter_path = self._waiter_path(waiter.token)
-        acquired = False
+        holder_path = self._holder_path(waiter.token)
+        waiter_registration_started = False
         holder_handle: IO[str] | None = None
+        ticket: AdmissionTicket | None = None
         started_wait = time.monotonic()
 
         try:
             with self._control_lock(cancel_event):
+                waiter_registration_started = True
                 self._write_json(waiter_path, waiter.as_dict())
             while True:
                 if cancel_event is not None and cancel_event.is_set():
@@ -216,7 +219,6 @@ class LaneScheduler:
                             claimed_at=time.time(),
                             lock_owned=True,
                         )
-                        holder_path = self._holder_path(holder.token)
                         waited_ms = int((time.monotonic() - started_wait) * 1000)
                         if cancel_event is not None and cancel_event.is_set():
                             raise InferenceCancelled(
@@ -233,32 +235,51 @@ class LaneScheduler:
                             )
                             self._write_json(holder_path, holder.as_dict())
                             waiter_path.unlink(missing_ok=True)
-                        except BaseException:
-                            # Still under the control lock: compensate only this attempt,
-                            # including a partially written holder, before giving up.
-                            holder_path.unlink(missing_ok=True)
+                        except BaseException as exc:
+                            # Roll back partial publication under the control lock.
+                            self._retire_pending_holder(holder_path, holder_handle, exc)
+                            holder_handle = None
                             raise
-                        acquired = True
-                        # Logging cannot revoke an admitted ticket and orphan its slot.
-                        with suppress(Exception):
-                            _LOGGER.info(
-                                "lane_scheduler admitted lane=%s wait_ms=%s pid=%s holders=%s/%s",
-                                waiter.lane,
-                                waited_ms,
-                                waiter.pid,
-                                total + 1,
-                                self.total_slots,
-                            )
-                        return ticket
+
+                if ticket is not None:
+                    # Transfer ownership only after the control lock exits.
+                    with suppress(Exception):
+                        _LOGGER.info(
+                            "lane_scheduler admitted lane=%s wait_ms=%s pid=%s holders=%s/%s",
+                            waiter.lane,
+                            ticket.waited_ms,
+                            waiter.pid,
+                            total + 1,
+                            self.total_slots,
+                        )
+                    return ticket
 
                 time.sleep(_POLL_INTERVAL_SECONDS)
-        finally:
-            if not acquired:
-                if holder_handle is not None:
-                    holder_handle.close()
-                # Only this attempt publishes this UUID. Removing its waiter does
-                # not need the control lock, which may still be held by a peer.
-                waiter_path.unlink(missing_ok=True)
+        except BaseException as exc:
+            if holder_handle is not None:
+                self._retire_pending_holder(holder_path, holder_handle, exc)
+            if waiter_registration_started:
+                # The attempt owns its unique waiter even if control lock exit failed.
+                try:
+                    waiter_path.unlink(missing_ok=True)
+                except BaseException:
+                    exc.add_note("Could not remove the pending lane waiter.")
+            raise
+
+    @staticmethod
+    def _retire_pending_holder(path: Path, handle: IO[str], failure: BaseException) -> None:
+        # Keep the holder locked while retiring its receipt. Reacquiring the
+        # control lock could block after a failed exit.
+        try:
+            with suppress(FileNotFoundError):
+                if os.path.samestat(os.fstat(handle.fileno()), path.stat(follow_symlinks=False)):
+                    path.unlink(missing_ok=True)
+        except BaseException:
+            failure.add_note("Could not remove the pending lane holder.")
+        try:
+            handle.close()
+        except BaseException:
+            failure.add_note("Could not close the pending lane holder.")
 
     def release(self, ticket: AdmissionTicket) -> None:
         try:
@@ -272,11 +293,10 @@ class LaneScheduler:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.waiters_dir.mkdir(parents=True, exist_ok=True)
         self.holders_dir.mkdir(parents=True, exist_ok=True)
-        self.control_lock_path.touch(exist_ok=True)
 
     @contextmanager
     def _control_lock(self, cancel_event: threading.Event | None = None) -> Iterator[None]:
-        with self.control_lock_path.open("a+", encoding="utf-8") as handle:
+        with open(self.control_lock_path, "a+b", opener=_open_regular_file) as handle:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise InferenceCancelled(
@@ -293,6 +313,14 @@ class LaneScheduler:
             try:
                 if cancel_event is not None and cancel_event.is_set():
                     raise InferenceCancelled("Local inference was cancelled before admission.")
+                try:
+                    named_lock = self.control_lock_path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        "Lane scheduler control lock changed while waiting."
+                    ) from None
+                if not os.path.samestat(os.fstat(handle.fileno()), named_lock):
+                    raise RuntimeError("Lane scheduler control lock changed while waiting.")
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

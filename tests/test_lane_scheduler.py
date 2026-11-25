@@ -1194,3 +1194,154 @@ def test_unreadable_holder_directory_refuses_admission(tmp_path, monkeypatch):
 
     assert list(scheduler.holders_dir.iterdir()) == [holder]
     assert waiter_count(scheduler) == 0
+
+
+def test_contender_refuses_replaced_control_lock_before_registering(tmp_path, monkeypatch):
+    import lane_scheduler
+
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    scheduler._ensure_layout()
+    blocked = threading.Event()
+    queue_mutations = []
+    errors = []
+    original_flock = lane_scheduler.fcntl.flock
+    original_write = scheduler._write_json
+    original_unlink = Path.unlink
+
+    def acquire():
+        try:
+            ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+        except RuntimeError as exc:
+            errors.append(exc)
+        else:
+            scheduler.release(ticket)
+
+    contender = threading.Thread(target=acquire, daemon=True)
+
+    def flock(fd, operation):
+        try:
+            return original_flock(fd, operation)
+        except BlockingIOError:
+            if threading.current_thread() is contender:
+                blocked.set()
+            raise
+
+    def write(path, payload):
+        queue_mutations.append(path)
+        original_write(path, payload)
+
+    def unlink(path, *args, **kwargs):
+        if path.parent in (scheduler.waiters_dir, scheduler.holders_dir):
+            queue_mutations.append(path)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(lane_scheduler.fcntl, "flock", flock)
+    monkeypatch.setattr(scheduler, "_write_json", write)
+    with scheduler.control_lock_path.open("a+") as original:
+        original_flock(original.fileno(), lane_scheduler.fcntl.LOCK_EX)
+        contender.start()
+        assert blocked.wait(TIMEOUT)
+        scheduler.control_lock_path.rename(tmp_path / "retired.lock")
+        scheduler.control_lock_path.touch()
+    contender.join(TIMEOUT)
+
+    assert not contender.is_alive()
+    assert queue_mutations == []
+    assert len(errors) == 1
+    assert "Lane scheduler control lock changed" in str(errors[0])
+    assert waiter_count(scheduler) == holder_count(scheduler) == 0
+    assert scheduler.control_lock_path.is_file()
+
+
+def test_control_lock_refuses_symlink_without_touching_target(tmp_path):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    target = tmp_path / "target"
+    target.touch()
+    os.utime(target, (1, 1))
+    scheduler.control_lock_path.symlink_to(target)
+
+    with pytest.raises(OSError):
+        scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+
+    assert target.stat().st_mtime == 1
+    assert scheduler.control_lock_path.is_symlink()
+    assert waiter_count(scheduler) == holder_count(scheduler) == 0
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "failure_type"),
+    [("unlock", OSError), ("close", OSError), ("unlock", KeyboardInterrupt)],
+)
+def test_control_lock_exit_failure_retires_pending_ticket(
+    tmp_path, monkeypatch, failure_stage, failure_type
+):
+    import builtins
+
+    import lane_scheduler
+
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    other = write_holder(scheduler, token="other", lane=LANE_INTERACTIVE)
+    failure = failure_type("control lock exit failed")
+    original_flock = lane_scheduler.fcntl.flock
+    original_path_open = Path.open
+    original_unlink = Path.unlink
+    holder_handles = []
+
+    def open_path(path, mode="r", *args, **kwargs):
+        handle = original_path_open(path, mode, *args, **kwargs)
+        if mode == "x+" and path.parent == scheduler.holders_dir:
+            holder_handles.append(handle)
+        return handle
+
+    def unlink(path, *args, **kwargs):
+        if path.parent == scheduler.holders_dir:
+            assert not holder_handles[0].closed
+        return original_unlink(path, *args, **kwargs)
+
+    def flock(fd, operation):
+        if (
+            failure_stage == "unlock"
+            and operation == lane_scheduler.fcntl.LOCK_UN
+            and holder_handles
+        ):
+            raise failure
+        return original_flock(fd, operation)
+
+    class ControlHandle:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self.handle
+
+        def __exit__(self, *exc):
+            self.handle.close()
+            if holder_handles:
+                raise failure
+
+    def open_file(path, *args, **kwargs):
+        handle = builtins.open(path, *args, **kwargs)
+        return ControlHandle(handle) if path == scheduler.control_lock_path else handle
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", open_path)
+        patch.setattr(Path, "unlink", unlink)
+        patch.setattr(lane_scheduler.fcntl, "flock", flock)
+        if failure_stage == "close":
+            patch.setattr(lane_scheduler, "open", open_file, raising=False)
+        with pytest.raises(failure_type) as raised:
+            scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+        assert raised.value is failure
+        assert list(scheduler.holders_dir.iterdir()) == [other]
+        assert len(holder_handles) == 1
+        assert holder_handles[0].closed
+        assert waiter_count(scheduler) == 0
+
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    try:
+        with scheduler._control_lock():
+            assert scheduler._reclaim_holders() == (2, 1)
+    finally:
+        scheduler.release(ticket)
+    assert list(scheduler.holders_dir.iterdir()) == [other]

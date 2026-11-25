@@ -1661,13 +1661,19 @@ Capacity is a small, bounded set of slots (decision D-24):
   while one long HTTP transcription is inside `whisper-cli`; both
   then share the GPU, so the interactive request is slower than on an idle host
   but not blocked.
-- Holder publication and waiter removal run under the control lock. A failed
-  publication removes only that attempt's holder; admission logging cannot revoke
-  a returned ticket. Waiter and holder receipts must be regular files of at
-  most 64 KiB and are opened without following symlinks. A rejected receipt or
-  state I/O failure refuses admission and preserves the affected holder.
-  Malformed receipts within the limit can be reclaimed once the holder inode
-  can be locked. Fix filesystem access before retrying an I/O failure.
+- Holder publication and waiter removal run under the control lock. The
+  ticket transfers to the caller after the lock exits successfully. A failed
+  publication or lock exit attempts to remove only the pending holder before
+  closing its handle, preserving the original error. Waiter and holder
+  receipts must be regular files of at most 64 KiB and are opened without
+  following symlinks. A rejected receipt or state I/O failure refuses
+  admission and preserves the affected holder. Malformed receipts within
+  the limit can be reclaimed once the holder inode can be locked. Fix
+  filesystem access before retrying an I/O failure.
+- The persistent control lock must be a regular file. After acquiring it,
+  a contender checks that `control.lock` still names the locked inode before
+  accessing the queue. Stop all local inference consumers before replacing
+  the scheduler directory or its lock.
 - Queued cancellation is checked every 50 ms while waiting for the control lock,
   including initial waiter registration. Cancellation removes only the attempt's
   waiter without waiting for that lock; no holder is published for it.
