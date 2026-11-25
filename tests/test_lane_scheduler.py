@@ -19,6 +19,7 @@ from lane_scheduler import (
     AdmissionTicket,
     InferenceCancelled,
     LaneScheduler,
+    WaiterRecord,
     admit_local_inference,
 )
 
@@ -890,14 +891,14 @@ def test_unreadable_live_holder_refuses_admission(tmp_path, monkeypatch, caplog,
         scheduler, token="live", path=tmp_path / "holder.json" if legacy else None
     )
     before = holder.read_bytes()
-    original = Path.read_text
+    original = os.open
 
-    def read(path, *args, **kwargs):
-        if path == holder:
+    def open_state(path, flags, *args, **kwargs):
+        if path == os.fspath(holder):
             raise error
-        return original(path, *args, **kwargs)
+        return original(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(os, "open", open_state)
     with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
         scheduler.acquire(lane=LANE_NON_INTERACTIVE)
     assert holder.read_bytes() == before
@@ -1053,3 +1054,143 @@ def test_live_ticket_lock_protects_old_holder_independently_of_pid(tmp_path, cap
     finally:
         scheduler.release(ticket)
     assert not path.exists()
+
+
+def test_fifo_waiter_refuses_admission_without_blocking(tmp_path):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    scheduler._ensure_layout()
+    fifo = scheduler.waiters_dir / "fifo.json"
+    os.mkfifo(fifo)
+    script = tmp_path / "child.py"
+    script.write_text(CHILD_SCRIPT)
+    admitted = tmp_path / "admitted"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            str(REPO_ROOT),
+            str(tmp_path),
+            LANE_NON_INTERACTIVE,
+            str(admitted),
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
+    assert result.returncode != 0
+    assert "Cannot read lane scheduler state" in result.stderr
+    assert not admitted.exists()
+    assert fifo.exists()
+    assert waiter_count(scheduler) == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_oversized_holder_refuses_admission(tmp_path, legacy):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    holder = write_holder(
+        scheduler, token="oversized", path=tmp_path / "holder.json" if legacy else None
+    )
+    payload = b"{" + b" " * (64 * 1024)
+    holder.write_bytes(payload)
+
+    with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
+        scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+
+    assert holder.read_bytes() == payload
+    assert waiter_count(scheduler) == 0
+
+
+def test_malformed_locked_holder_refuses_admission_until_released(tmp_path):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    holder = scheduler.holders_dir / f"{ticket.token}.json"
+    holder.write_text("{malformed")
+    try:
+        with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
+            scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+        assert holder.read_text() == "{malformed"
+        assert waiter_count(scheduler) == 0
+    finally:
+        scheduler.release(ticket)
+
+
+@pytest.mark.parametrize("total, batch", [(0, 0), (1, 0), (1, 1), (2, 1)])
+def test_waiter_selection_matches_sorted_queue(tmp_path, total, batch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)
+    scheduler._ensure_layout()
+    waiters = [
+        WaiterRecord("batch", LANE_NON_INTERACTIVE, os.getpid(), 1),
+        WaiterRecord("z", LANE_INTERACTIVE, os.getpid(), 2),
+        WaiterRecord("a", LANE_INTERACTIVE, os.getpid(), 2),
+        WaiterRecord("later", LANE_INTERACTIVE, os.getpid(), 3),
+    ]
+    for waiter in waiters:
+        scheduler._write_json(scheduler._waiter_path(waiter.token), waiter.as_dict())
+    ordered = sorted(
+        waiters,
+        key=lambda waiter: (waiter.lane != LANE_INTERACTIVE, waiter.created_at, waiter.token),
+    )
+    expected = next(
+        (
+            waiter
+            for waiter in ordered
+            if total < scheduler.total_slots
+            and (waiter.lane == LANE_INTERACTIVE or batch < scheduler.non_interactive_slots)
+        ),
+        None,
+    )
+    with scheduler._control_lock():
+        actual = scheduler._select_next_waiter(total_holders=total, non_interactive_holders=batch)
+    assert actual == expected
+
+
+def test_acquire_skips_waiter_reads_when_all_slots_are_full(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
+    holder = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    cancel = threading.Event()
+    original_select = scheduler._select_next_waiter
+    original_read = scheduler._read_waiter
+    reads = []
+
+    def select(**counts):
+        assert counts == {"total_holders": 1, "non_interactive_holders": 1}
+        winner = original_select(**counts)
+        cancel.set()
+        return winner
+
+    def read(path):
+        reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(scheduler, "_select_next_waiter", select)
+    monkeypatch.setattr(scheduler, "_read_waiter", read)
+    try:
+        with pytest.raises(InferenceCancelled):
+            scheduler.acquire(lane=LANE_INTERACTIVE, cancel_event=cancel)
+        assert reads == []
+        assert waiter_count(scheduler) == 0
+    finally:
+        scheduler.release(holder)
+
+
+def test_unreadable_holder_directory_refuses_admission(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
+    holder = write_holder(scheduler, token="live")
+    original_scandir = os.scandir
+
+    def scandir(path="."):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == scheduler.holders_dir:
+            raise PermissionError("cannot enumerate holders")
+        return original_scandir(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", scandir)
+        with (
+            scheduler._control_lock(),
+            pytest.raises(PermissionError, match="cannot enumerate holders"),
+        ):
+            scheduler._reclaim_holders()
+
+    assert list(scheduler.holders_dir.iterdir()) == [holder]
+    assert waiter_count(scheduler) == 0

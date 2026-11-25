@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Select the next admissible inference waiter in one pass and skip queue
+  reads while all inference slots are occupied.
+
+- Bound lane scheduler receipt reads to 64 KiB, reject symlinks and nonregular
+  files, and preserve holders whose state or ownership cannot be verified.
+
 - Close URL fetch HTTP error responses without reading their bodies and retain
   the original status and retry classification if close fails.
 

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import stat
 import threading
 import time
 import uuid
@@ -28,6 +29,7 @@ _LANE_PRIORITY = {
     LANE_NON_INTERACTIVE: 1,
 }
 _POLL_INTERVAL_SECONDS = 0.05
+_MAX_STATE_BYTES = 64 * 1024
 
 
 class InferenceCancelled(RuntimeError):
@@ -37,6 +39,17 @@ class InferenceCancelled(RuntimeError):
     queued, and by the STT service at its cancellation checkpoints. It is not a
     backend-availability error, so it never triggers backend fallback.
     """
+
+
+def _open_regular_file(path: str, flags: int) -> int:
+    fd = os.open(path, flags | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("Lane scheduler file must be regular.")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _finite_timestamp(value: object, field: str) -> float:
@@ -187,7 +200,6 @@ class LaneScheduler:
                         f"Local inference was cancelled while waiting for lane '{waiter.lane}'."
                     )
                 with self._control_lock(cancel_event):
-                    self._cleanup_dead_waiters()
                     total, non_interactive = self._reclaim_holders()
                     if not waiter_path.exists():
                         self._write_json(waiter_path, waiter.as_dict())
@@ -285,21 +297,6 @@ class LaneScheduler:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def _cleanup_dead_waiters(self) -> None:
-        for waiter_path in self.waiters_dir.glob("*.json"):
-            waiter = self._read_waiter(waiter_path)
-            if waiter is None:
-                waiter_path.unlink(missing_ok=True)
-                continue
-            if not _pid_is_alive(waiter.pid):
-                _LOGGER.warning(
-                    "lane_scheduler removed dead waiter lane=%s pid=%s token=%s",
-                    waiter.lane,
-                    waiter.pid,
-                    waiter.token,
-                )
-                waiter_path.unlink(missing_ok=True)
-
     def _reclaim_holders(self) -> tuple[int, int]:
         """Reclaim unusable holder files and count the live ones.
 
@@ -308,7 +305,10 @@ class LaneScheduler:
         """
         total = 0
         non_interactive = 0
-        holder_paths = sorted(self.holders_dir.glob("*.json"))
+        # glob() suppresses directory I/O errors, which could hide live holders.
+        holder_paths = sorted(
+            path for path in self.holders_dir.iterdir() if path.name.endswith(".json")
+        )
         present_paths = set(holder_paths)
         if self.legacy_holder_path.exists():
             present_paths.add(self.legacy_holder_path)
@@ -328,41 +328,43 @@ class LaneScheduler:
 
     def _reclaim_holder(self, holder_path: Path) -> HolderRecord | None:
         """Return the live holder at ``holder_path``, or remove it and return None."""
-        payload = self._read_json(holder_path)
-        if payload is None:
-            if holder_path.exists():
+        with self._open_state(holder_path) as handle:
+            if handle is None:
+                return None
+            payload = self._read_json(handle)
+            holder = None
+            if payload is not None:
+                with suppress(KeyError, TypeError, ValueError):
+                    holder = HolderRecord.from_dict(payload)
+
+            if holder is None:
+                # Malformed receipts can still belong to a live ticket. Only
+                # remove them after locking the same inode we read.
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 _LOGGER.warning("lane_scheduler removed invalid holder state path=%s", holder_path)
                 holder_path.unlink(missing_ok=True)
-            return None
-        try:
-            holder = HolderRecord.from_dict(payload)
-        except KeyError, TypeError, ValueError:
-            _LOGGER.warning("lane_scheduler removed invalid holder state path=%s", holder_path)
-            holder_path.unlink(missing_ok=True)
-            return None
+                return None
 
-        if holder.lock_owned:
-            # The ticket keeps this inode locked until release/process death.
-            # A reused PID cannot keep an abandoned reservation alive.
-            with holder_path.open("r", encoding="utf-8") as handle:
+            if holder.lock_owned:
+                # A reused PID cannot keep an abandoned reservation alive.
                 try:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     live = True
                 else:
                     live = False
-        else:
-            # Preserve capacity for live pre-lock holders during upgrades.
-            live = _pid_is_alive(holder.pid)
-        if not live:
-            _LOGGER.warning(
-                "lane_scheduler reclaimed dead holder lane=%s pid=%s token=%s",
-                holder.lane,
-                holder.pid,
-                holder.token,
-            )
-            holder_path.unlink(missing_ok=True)
-            return None
+            else:
+                # Preserve capacity for live pre-lock holders during upgrades.
+                live = _pid_is_alive(holder.pid)
+            if not live:
+                _LOGGER.warning(
+                    "lane_scheduler reclaimed dead holder lane=%s pid=%s token=%s",
+                    holder.lane,
+                    holder.pid,
+                    holder.token,
+                )
+                holder_path.unlink(missing_ok=True)
+                return None
 
         age_seconds = time.time() - holder.claimed_at
         if age_seconds > self.stale_seconds and holder_path not in self._warned_old_holders:
@@ -383,43 +385,38 @@ class LaneScheduler:
         total_holders: int,
         non_interactive_holders: int,
     ) -> WaiterRecord | None:
-        """Return the first waiter, in priority order, that the slots admit."""
-        waiters: list[WaiterRecord] = []
+        """Prune stale waiters and select the best admissible one in one pass."""
+        if total_holders >= self.total_slots:
+            return None
+
+        batch_slot_available = non_interactive_holders < self.non_interactive_slots
+        winner: WaiterRecord | None = None
+        best_key: tuple[int, float, str] | None = None
         for waiter_path in self.waiters_dir.glob("*.json"):
             waiter = self._read_waiter(waiter_path)
-            if waiter is not None:
-                waiters.append(waiter)
-        waiters.sort(
-            key=lambda waiter: (
-                _LANE_PRIORITY[waiter.lane],
-                waiter.created_at,
-                waiter.token,
-            )
-        )
-        for waiter in waiters:
-            if self._is_admissible(
-                lane=waiter.lane,
-                total_holders=total_holders,
-                non_interactive_holders=non_interactive_holders,
-            ):
-                return waiter
-        return None
-
-    def _is_admissible(
-        self,
-        *,
-        lane: str,
-        total_holders: int,
-        non_interactive_holders: int,
-    ) -> bool:
-        if total_holders >= self.total_slots:
-            return False
-        if lane == LANE_NON_INTERACTIVE:
-            return non_interactive_holders < self.non_interactive_slots
-        return True
+            if waiter is None:
+                waiter_path.unlink(missing_ok=True)
+                continue
+            if not _pid_is_alive(waiter.pid):
+                _LOGGER.warning(
+                    "lane_scheduler removed dead waiter lane=%s pid=%s token=%s",
+                    waiter.lane,
+                    waiter.pid,
+                    waiter.token,
+                )
+                waiter_path.unlink(missing_ok=True)
+                continue
+            if waiter.lane == LANE_NON_INTERACTIVE and not batch_slot_available:
+                continue
+            key = (_LANE_PRIORITY[waiter.lane], waiter.created_at, waiter.token)
+            if best_key is None or key < best_key:
+                best_key = key
+                winner = waiter
+        return winner
 
     def _read_waiter(self, waiter_path: Path) -> WaiterRecord | None:
-        payload = self._read_json(waiter_path)
+        with self._open_state(waiter_path) as handle:
+            payload = self._read_json(handle) if handle is not None else None
         if payload is None:
             return None
         try:
@@ -428,13 +425,18 @@ class LaneScheduler:
             _LOGGER.warning("lane_scheduler removed invalid waiter state path=%s", waiter_path)
             return None
 
-    def _read_json(self, path: Path) -> dict[str, object] | None:
+    @contextmanager
+    def _open_state(self, path: Path) -> Iterator[IO[bytes] | None]:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
+            try:
+                handle = open(path, "rb", opener=_open_regular_file)
+            except FileNotFoundError:
+                yield None
+            else:
+                with handle:
+                    yield handle
         except OSError as exc:
-            # An unreadable live holder still owns capacity. Never reclaim it.
+            # Unverifiable state may still represent a live holder.
             _LOGGER.error(
                 "lane_scheduler cannot read state path=%s error=%s errno=%s",
                 path,
@@ -442,11 +444,16 @@ class LaneScheduler:
                 exc.errno,
             )
             raise RuntimeError("Cannot read lane scheduler state; admission refused.") from None
-        except UnicodeDecodeError, ValueError, RecursionError:
+
+    def _read_json(self, handle: IO[bytes]) -> dict[str, object] | None:
+        data = handle.read(_MAX_STATE_BYTES + 1)
+        if len(data) > _MAX_STATE_BYTES:
+            raise OSError("Lane scheduler state exceeds the size limit.")
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except ValueError, RecursionError:
             return None
-        if not isinstance(payload, dict):
-            return None
-        return payload
+        return payload if isinstance(payload, dict) else None
 
     def _write_json(self, path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")

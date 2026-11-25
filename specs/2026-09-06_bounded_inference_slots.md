@@ -17,6 +17,13 @@ reclaimed even after PID reuse. Older unmarked records retain PID liveness.
 Cancellation also interrupts control-lock waits and cleans its waiter without
 reacquiring the lock. See the D-24 ownership amendment and current README.
 
+**Receipt and selection amendment:** Scheduler receipt reads are limited to 64
+KiB from regular files opened without following links. I/O errors or rejected
+receipts refuse admission. Reclaiming a malformed holder requires locking its
+inode first. Queue polling skips waiter reads at full capacity and otherwise
+prunes dead waiters while selecting the minimum eligible lane, creation time
+and token in one pass. See the current README for operational details.
+
 ## Verified results (2026-09-06, studio, content-free synthetic audio)
 
 Method: a 20-minute mono MP3 (48 kbps, 7.2 MB) generated locally with `say`
