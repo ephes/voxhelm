@@ -552,7 +552,9 @@ Retention scans newest first and keeps complete turns that fit both the count
 and aggregate WAV-plus-JSON budget (positive integer bytes, default 160 MiB).
 A turn larger than the entire budget is skipped before staging. Allow disk space
 for one staged turn during publication. Recorder failure warnings omit audio,
-transcripts, file paths and exception details. Legacy flat recordings and other files in the configured
+transcripts, file paths and exception details. Metadata version 2 preserves
+`text`, `backend` and requested `language`, and adds the pre-normalization
+`raw_text` and the recognizer’s `result_language` (null when unavailable). Legacy flat recordings and other files in the configured
 directory stay available for manual migration or removal.
 
 

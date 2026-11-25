@@ -834,6 +834,8 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 text=result.text,
                 backend=result.backend_name,
                 language=self.request_language,
+                raw_text=raw_transcript,
+                result_language=result.language,
             )
             emit_transcription_debug_log(
                 source="wyoming",
@@ -1002,7 +1004,15 @@ def _remove_turn(path: Path) -> None:
     path.rmdir()
 
 
-def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: str | None) -> None:
+def record_voice_turn(
+    audio_bytes: bytes,
+    *,
+    text: str,
+    backend: str,
+    language: str | None,
+    raw_text: str | None = None,
+    result_language: str | None = None,
+) -> None:
     """Keep the turn's audio and transcript for an STT comparison, if enabled.
 
     Off unless VOXHELM_WYOMING_STT_RECORD_DIR is set. The recorder namespace and files are
@@ -1023,7 +1033,16 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             _commit_recording(
-                root, audio_bytes, {"text": text, "backend": backend, "language": language}
+                root,
+                audio_bytes,
+                {
+                    "metadata_version": 2,
+                    "text": text,
+                    "backend": backend,
+                    "language": language,
+                    "raw_text": text if raw_text is None else raw_text,
+                    "result_language": result_language,
+                },
             )
         finally:
             os.close(lock_fd)
@@ -1036,7 +1055,9 @@ _PENDING_PREFIX = ".pending-"
 _PCM_WAV_HEADER_BYTES = 44
 
 
-def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | None]) -> None:
+def _commit_recording(
+    root: Path, audio_bytes: bytes, metadata: dict[str, str | int | None]
+) -> None:
     for path in root.iterdir():
         if (
             path.name.startswith(_PENDING_PREFIX)

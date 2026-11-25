@@ -661,3 +661,39 @@ def test_recording_and_logging_failures_preserve_transcript(monkeypatch, setting
     finally:
         logger.removeHandler(sink)
     assert [Transcript.from_event(event).text for event in decode_all_events(writer)] == ["hello"]
+
+
+def test_recording_preserves_recognition_and_served_provenance(monkeypatch, settings, tmp_path):
+    import json
+
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(tmp_path)
+    settings.VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = True
+    from transcriptions.service import TranscriptionResult
+
+    def transcribe(*args, **kwargs):
+        return TranscriptionResult(
+            text="  turn the light on  ", language="en", segments=[], backend_name="fake"
+        )
+
+    monkeypatch.setattr(wyoming_module, "transcribe_pcm", transcribe)
+    writer = ClosingWriter()
+
+    async def flow():
+        handler = make_handler(asyncio.StreamReader(), writer)
+        handler.request_language = "de"
+        handler.audio_buffer.write(ONE_SECOND_PCM)
+        await handler.handle_event(AudioStop().event())
+
+    asyncio.run(flow())
+    transcript = Transcript.from_event(decode_all_events(writer)[0])
+    recording = next(tmp_path.glob("voxhelm-turns/[0-9]*/metadata.json"))
+    assert json.loads(recording.read_text()) == {
+        "metadata_version": 2,
+        "text": transcript.text,
+        "raw_text": "  turn the light on  ",
+        "backend": "fake",
+        "language": "de",
+        "result_language": "en",
+    }
+    assert transcript.text == "turn the light on"
+    assert transcript.language == "en"
