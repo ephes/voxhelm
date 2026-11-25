@@ -1025,6 +1025,8 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
 
 
 _PENDING_PREFIX = ".pending-"
+# The wave writer emits the standard 44-byte header for this PCM format.
+_PCM_WAV_HEADER_BYTES = 44
 
 
 def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | None]) -> None:
@@ -1035,6 +1037,13 @@ def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | 
             and _is_owned_turn(path, complete=False)
         ):
             _remove_turn(path)
+    metadata_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+    budget = settings.VOXHELM_WYOMING_STT_RECORD_MAX_BYTES
+    if _PCM_WAV_HEADER_BYTES + len(audio_bytes) + len(metadata_bytes) > budget:
+        _LOGGER.warning("Wyoming STT recording exceeds byte budget")
+        _prune_recordings(root, budget)
+        return
+
     name = f"{time.time_ns():020d}-{uuid4().hex}"
     stage = root / (_PENDING_PREFIX + name)
     stage.mkdir(mode=0o700)
@@ -1048,22 +1057,31 @@ def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | 
                 wav_file.setnchannels(_CONVERTED_CHANNELS)
                 wav_file.writeframes(audio_bytes)
         with open(
-            os.open(stage / "metadata.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+            os.open(stage / "metadata.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
         ) as handle:
-            json.dump(metadata, handle, ensure_ascii=False)
+            handle.write(metadata_bytes)
         stage.rename(root / name)
     finally:
         if stage.exists():
             _remove_turn(stage)
 
+    _prune_recordings(root, budget)
+
+
+def _prune_recordings(root: Path, budget: int) -> None:
     keep = max(1, settings.VOXHELM_WYOMING_STT_RECORD_MAX)
     complete = sorted(
         path
         for path in root.iterdir()
         if _TURN_NAME.fullmatch(path.name) and _is_owned_turn(path, complete=True)
     )
-    for expired in complete[:-keep]:
-        pending = expired.rename(root / (_PENDING_PREFIX + expired.name))
+    for turn in reversed(complete):
+        size = sum((turn / name).stat().st_size for name in _TURN_FILES)
+        if keep and size <= budget:
+            keep -= 1
+            budget -= size
+            continue
+        pending = turn.rename(root / (_PENDING_PREFIX + turn.name))
         _remove_turn(pending)
 
 

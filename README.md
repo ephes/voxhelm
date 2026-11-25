@@ -493,6 +493,7 @@ export VOXHELM_WYOMING_TTS_TARGET_DBFS="-19"
 # Temporary STT comparison: keep the newest N voice turns (WAV + transcript).
 export VOXHELM_WYOMING_STT_RECORD_DIR=""
 export VOXHELM_WYOMING_STT_RECORD_MAX="40"
+export VOXHELM_WYOMING_STT_RECORD_MAX_BYTES="167772160"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"
@@ -547,7 +548,10 @@ directory under `VOXHELM_WYOMING_STT_RECORD_DIR/voxhelm-turns/`, with owner-only
 `audio.wav` and `metadata.json` files. Count retention applies to complete pairs
 in this namespace. A turn becomes visible by directory rename after both files
 close. The writer retires interrupted staging directories on its next write.
-Legacy flat recordings and other files in the configured
+Retention scans newest first and keeps complete turns that fit both the count
+and aggregate WAV-plus-JSON budget (positive integer bytes, default 160 MiB).
+A turn larger than the entire budget is skipped before staging. Allow disk space
+for one staged turn during publication. Legacy flat recordings and other files in the configured
 directory stay available for manual migration or removal.
 
 

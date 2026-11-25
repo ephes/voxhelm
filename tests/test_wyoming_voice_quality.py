@@ -241,3 +241,21 @@ def test_recording_publishes_complete_turn_and_recovers_pending(settings, tmp_pa
     assert not abandoned.exists()
     assert unrelated.is_dir()
     assert len(list(root.glob("[0-9]*/metadata.json"))) == 2
+
+
+def test_recording_retains_newest_complete_turns_within_byte_budget(settings, tmp_path, caplog):
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(tmp_path)
+    settings.VOXHELM_WYOMING_STT_RECORD_MAX = 10
+    settings.VOXHELM_WYOMING_STT_RECORD_MAX_BYTES = 1000
+    root = tmp_path / "voxhelm-turns"
+    record = wyoming_module.record_voice_turn
+
+    for name, size in [("first", 120), ("large", 440), ("newest", 460), ("oversized", 1100)]:
+        record(bytes(size), text=name, backend="b", language="de")
+
+    import json
+
+    files = sorted(root.glob("[0-9]*/metadata.json"))
+    assert [json.loads(path.read_bytes())["text"] for path in files] == ["first", "newest"]
+    assert sum(path.stat().st_size for path in root.glob("[0-9]*/*")) <= 1000
+    assert "Wyoming STT recording exceeds byte budget" in caplog.text

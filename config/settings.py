@@ -516,6 +516,17 @@ VOXHELM_WYOMING_TTS_TARGET_DBFS = (
 # Empty (the default) records nothing. Household speech: delete after use.
 VOXHELM_WYOMING_STT_RECORD_DIR = os.getenv("VOXHELM_WYOMING_STT_RECORD_DIR", "").strip()
 VOXHELM_WYOMING_STT_RECORD_MAX = int(os.getenv("VOXHELM_WYOMING_STT_RECORD_MAX", "40"))
+try:
+    VOXHELM_WYOMING_STT_RECORD_MAX_BYTES = int(
+        os.getenv("VOXHELM_WYOMING_STT_RECORD_MAX_BYTES", str(160 * 1024 * 1024))
+    )
+    if VOXHELM_WYOMING_STT_RECORD_MAX_BYTES <= 0:
+        raise ValueError
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "VOXHELM_WYOMING_STT_RECORD_MAX_BYTES must be a positive integer."
+    ) from exc
+
 VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024"))
 VOXHELM_WYOMING_MAX_CONNECTIONS = int(os.getenv("VOXHELM_WYOMING_MAX_CONNECTIONS", "16"))
 VOXHELM_WYOMING_MAX_INFERENCE_THREADS = int(os.getenv("VOXHELM_WYOMING_MAX_INFERENCE_THREADS", "4"))

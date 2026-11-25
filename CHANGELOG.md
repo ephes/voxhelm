@@ -8,6 +8,7 @@
   JSON with transcript, backend and language, owner-only. Meant for short
   test windows; household speech, delete afterwards.
 
+- Cap retained Wyoming recording audio and metadata at 160 MiB by default.
 - Publish Wyoming recording audio and metadata together and recover interrupted staging.
 
 - Continue draining queued artifact deletions when diagnostic logging fails
