@@ -8,6 +8,7 @@
   JSON with transcript, backend and language, owner-only. Meant for short
   test windows; household speech, delete afterwards.
 
+- Track Wyoming warm-up work through bounded listener shutdown.
 - Warm the Wyoming Parakeet fallback even when the primary model fails to load.
 - Keep the first Parakeet transcript when the Wyoming language retry backend is unavailable.
 - Reload resident Parakeet when the installed model generation changes.

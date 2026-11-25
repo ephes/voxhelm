@@ -550,6 +550,9 @@ language retry is necessary and mlx-whisper is unavailable, Wyoming serves the
 first Parakeet result. Logs identify the pass selected after a retry attempt.
 Startup warm-up attempts Parakeet and its mlx-whisper fallback independently,
 once each, and logs the outcome for each backend. Warm-up transcripts are discarded.
+On shutdown the listener closes connections, signals warm-up cancellation and
+waits up to two seconds for the worker to finish. An unfinished native load is
+logged as detached and can finish in the background while the process is alive.
 
 Wyoming TTS measures RMS and peak in bounded blocks on a worker thread. One gain
 applies across the streamed reply, limited to ±8 dB with peak protection near

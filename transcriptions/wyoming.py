@@ -42,7 +42,7 @@ from wyoming.info import (
 from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import Synthesize
 
-from lane_scheduler import LANE_INTERACTIVE
+from lane_scheduler import LANE_INTERACTIVE, InferenceCancelled
 from synthesis.service import (
     SynthesisInputError,
     SynthesizeParams,
@@ -948,6 +948,7 @@ def transcribe_pcm(
     language: str | None,
     backend: str | None = None,
     warm_up_only: bool = False,
+    cancel_event: threading.Event | None = None,
 ):
     """Transcribe 16 kHz mono 16-bit PCM on the interactive lane."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
@@ -968,6 +969,7 @@ def transcribe_pcm(
                 scheduler_lane=LANE_INTERACTIVE,
                 backend=backend,
                 allow_backend_fallback=not warm_up_only,
+                cancel_event=cancel_event,
             ),
         )
         if (
@@ -985,6 +987,7 @@ def transcribe_pcm(
                         language=language,
                         scheduler_lane=LANE_INTERACTIVE,
                         backend="mlx",
+                        cancel_event=cancel_event,
                     ),
                 )
             except BackendUnavailableError:
@@ -1211,7 +1214,7 @@ def explicit_backend(config: WyomingSttConfig) -> str | None:
     return None
 
 
-def warm_up_stt(config: WyomingSttConfig) -> None:
+def warm_up_stt(config: WyomingSttConfig, *, cancel_event: threading.Event | None = None) -> None:
     """Load the STT model with one second of silence; the transcript is discarded."""
     primary_backend = explicit_backend(config)
     targets = [(primary_backend, config.model)]
@@ -1219,6 +1222,8 @@ def warm_up_stt(config: WyomingSttConfig) -> None:
         targets.append(("mlx", settings.VOXHELM_MLX_MODEL))
 
     for backend, model in targets:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         started = time.monotonic()
         try:
             transcribe_pcm(
@@ -1228,7 +1233,12 @@ def warm_up_stt(config: WyomingSttConfig) -> None:
                 language=config.language or next(iter(config.languages), None),
                 backend=backend,
                 warm_up_only=True,
+                cancel_event=cancel_event,
             )
+        except InferenceCancelled:
+            with suppress(Exception):
+                _LOGGER.info("Wyoming STT warm-up cancelled backend=%s", backend or config.backend)
+            break
         except Exception:
             with suppress(Exception):
                 _LOGGER.exception(
@@ -1241,6 +1251,42 @@ def warm_up_stt(config: WyomingSttConfig) -> None:
                     backend or config.backend,
                     time.monotonic() - started,
                 )
+
+
+_WARM_UP_DRAIN_SECONDS = 2
+
+
+class _WarmUp:
+    """Track completion in the native worker, independently of listener cancellation."""
+
+    def __init__(self, config: WyomingSttConfig) -> None:
+        self.cancel_event = threading.Event()
+        self.finished = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def run() -> None:
+            try:
+                warm_up_stt(config, cancel_event=self.cancel_event)
+            except Exception:
+                _best_effort_warning("Wyoming STT warm-up worker failed")
+            finally:
+                if self.cancel_event.is_set():
+                    with suppress(Exception):
+                        _LOGGER.info("Wyoming STT warm-up thread retired")
+                # The listener and its loop may already have exited after a timeout.
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self.finished.set)
+
+        # Native model loading may ignore cancellation. A detached warm-up does
+        # not hold up asyncio's default-executor shutdown or keep the process alive.
+        threading.Thread(target=run, name="wyoming-stt-warm-up", daemon=True).start()
+
+    async def drain(self) -> None:
+        try:
+            async with asyncio.timeout(_WARM_UP_DRAIN_SECONDS):
+                await self.finished.wait()
+        except TimeoutError:
+            _best_effort_warning("Wyoming STT warm-up still running at shutdown; detached")
 
 
 async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> None:
@@ -1281,7 +1327,7 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         )
 
     recording_task: asyncio.Task[None] | None = None
-    warm_up_task: asyncio.Task[None] | None = None
+    warm_up: _WarmUp | None = None
     try:
         await server.start(handler_factory)
         # Everything after a successful start runs under the finally, so a logging
@@ -1300,16 +1346,20 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
             if resolved_config.warm_up:
                 # In a thread so the listener answers describe/info at once; a voice
                 # turn that arrives meanwhile waits on the same model lock.
-                warm_up_task = asyncio.create_task(asyncio.to_thread(warm_up_stt, resolved_config))
+                warm_up = _WarmUp(resolved_config)
             await stop_event.wait()
         finally:
-            if warm_up_task is not None and not warm_up_task.done():
-                warm_up_task.cancel()
+            if warm_up is not None:
+                warm_up.cancel_event.set()
             try:
                 await shutdown_wyoming_server(server, admission)
             finally:
-                if recording_writer is not None and recording_task is not None:
-                    await recording_writer.close(recording_task)
+                try:
+                    if warm_up is not None:
+                        await warm_up.drain()
+                finally:
+                    if recording_writer is not None and recording_task is not None:
+                        await recording_writer.close(recording_task)
     finally:
         # Remove the SIGINT/SIGTERM handlers installed above so the caller's loop keeps
         # no stale reference to this server's stop event, but leave a handler someone

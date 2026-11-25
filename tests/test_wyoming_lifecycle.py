@@ -593,7 +593,7 @@ def test_server_warms_up_stt_after_listening_when_enabled(monkeypatch) -> None:
     warmed = threading.Event()
     calls: list[Any] = []
 
-    def fake_warm_up(config) -> None:
+    def fake_warm_up(config, *, cancel_event) -> None:
         assert server.started.is_set()
         calls.append(config)
         warmed.set()
@@ -834,3 +834,49 @@ def test_tts_measurement_keeps_listener_responsive_and_streams_one_gain(
         samples, width=2, target_dbfs=-19
     )
     assert max(read_sizes) < len(samples) // 4
+
+
+def test_listener_shutdown_accounts_for_blocked_warm_up(monkeypatch, caplog):
+    import logging
+
+    server = FakeServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(wyoming_module, "_WARM_UP_DRAIN_SECONDS", 0.01, raising=False)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_warm_up(config, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        finished.set()
+
+    monkeypatch.setattr(wyoming_module, "warm_up_stt", blocking_warm_up)
+    caplog.set_level(logging.INFO, logger=wyoming_module.__name__)
+
+    async def flow():
+        serving = asyncio.create_task(
+            run_wyoming_stt_server(config=replace(limit_config(), warm_up=True))
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            writer = ClosingWriter()
+            await server.factory(asyncio.StreamReader(), writer).handle_event(Describe().event())
+            assert decode_all_events(writer)[0].type == "info"
+
+            serving.cancel()
+            await asyncio.wait_for(asyncio.gather(serving, return_exceptions=True), 1)
+            assert server.stopped
+            assert not finished.is_set()
+            assert "warm-up still running at shutdown" in caplog.text
+            assert "warm-up thread retired" not in caplog.text
+        finally:
+            release.set()
+            await asyncio.gather(serving, return_exceptions=True)
+
+        async with asyncio.timeout(1):
+            while "warm-up thread retired" not in caplog.text:
+                await asyncio.sleep(0.001)
+        assert finished.is_set()
+
+    asyncio.run(flow())
