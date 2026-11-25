@@ -252,9 +252,12 @@ parts combined; sign and separator excluded). Longer numbers keep their literal
 spelling, including leading zeros, without integer conversion or fractional
 digit expansion. The independent `EUR` abbreviation still expands to `Euro`.
 This limit is independent of request text length and Python's global digit limit.
-For EUR amounts, dots in complete thousands groups are grouping separators
-(`1.234,56 EUR` reads as 1,234 euros and 56 cents). Ungrouped amounts still
-accept comma or dot decimals. Malformed grouping keeps the numeric spelling.
+For EUR amounts, units and degrees, a leading group of one to three digits
+without a leading zero, followed by dot-separated groups of three, uses German
+thousands grouping. For example, `1.234,56 EUR` reads as 1,234 euros and 56 cents,
+and `1.000 °C` reads as 1,000 degrees Celsius. Ungrouped quantities still
+accept comma or unambiguous dot decimals, such as `1.5 kg` or `0.125 kg`.
+Malformed grouping keeps the numeric spelling.
 Singular unit forms apply only to a quantity of exactly one in magnitude,
 including signed one and one written with decimal zeros.
 Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their

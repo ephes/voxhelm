@@ -320,6 +320,22 @@ def _unit_form(raw: str, singular: str, plural: str) -> str:
     return plural
 
 
+def _numbered_unit_suffix(unit_pattern: str) -> str:
+    if unit_pattern.endswith(r"\."):
+        return unit_pattern + r"(?=\s|[,!?]|$)"
+    return unit_pattern + r"(?=\b|[.,!?])"
+
+
+PHYSICAL_QUANTITY_RE = re.compile(
+    QUANTITY_TOKEN
+    + r"\s*(?:°|"
+    + "|".join(_numbered_unit_suffix(unit[0]) for unit in NUMBERED_UNITS)
+    + ")",
+    re.IGNORECASE,
+)
+DEGREE_QUANTITY_RE = re.compile(QUANTITY_TOKEN + r"\s*°(?:\s*([Cc])\b)?")
+
+
 def _normalize_numbered_units(text: str) -> str:
     for unit_pattern, singular, plural, gender in NUMBERED_UNITS:
 
@@ -329,22 +345,18 @@ def _normalize_numbered_units(text: str) -> str:
             _plural: str = plural,
             _gender: str | None = gender,
         ) -> str:
-            raw = match.group(1)
-            if not _supports_numeric_token(raw):
+            raw = _normalized_quantity(match.group(1))
+            if raw is None:
                 return match.group(0)
             number_word = _number_word_with_gender(raw, _gender)
             unit_word = _unit_form(raw, _singular, _plural)
             return f"{number_word} {unit_word}"
 
-        if unit_pattern.endswith(r"\."):
-            lookahead = r"(?=\s|[,!?]|$)"
-        else:
-            lookahead = r"(?=\b|[.,!?])"
-
         text = re.sub(
-            rf"(?i)(?<!\w)(-?\d+(?:[,.]\d+)?)\s*{unit_pattern}{lookahead}",
+            QUANTITY_TOKEN + r"\s*" + _numbered_unit_suffix(unit_pattern),
             replace_unit,
             text,
+            flags=re.IGNORECASE,
         )
 
     return text
@@ -399,29 +411,25 @@ def normalize_german_text(text: str) -> str:
 
     text = _normalize_cardinal_label_numbers(text)
 
-    def replace_temperature(match: re.Match[str]) -> str:
-        raw_value = match.group(1)
-        if not _supports_numeric_token(raw_value):
+    def replace_degree(match: re.Match[str]) -> str:
+        raw = _normalized_quantity(match.group(1))
+        if raw is None:
             return match.group(0)
-        prefix = "minus " if raw_value.startswith("-") else ""
-        value = decimal_to_words(raw_value.lstrip("-"))
-        return f"{prefix}{value} Grad Celsius"
-
-    def replace_degree_without_unit(match: re.Match[str]) -> str:
-        raw_value = match.group(1)
-        if not _supports_numeric_token(raw_value):
-            return match.group(0)
-        prefix = "minus " if raw_value.startswith("-") else ""
-        value = decimal_to_words(raw_value.lstrip("-"))
-        return f"{prefix}{value} Grad"
+        prefix = "minus " if raw.startswith("-") else ""
+        value = decimal_to_words(raw.lstrip("-"))
+        unit = "Grad Celsius" if match.group(2) else "Grad"
+        return f"{prefix}{value} {unit}"
 
     def replace_numeric_date(match: re.Match[str]) -> str:
         prefix = match.group(1) or ""
         day = int(match.group(2))
         month = int(match.group(3))
         year = match.group(4)
-        # A malformed euro amount can have the same spelling as a numeric date.
-        if EURO_AMOUNT_RE.match(match.string, match.start(2)):
+        # A malformed quantity can have the same spelling as a numeric date.
+        numeric_start = match.start(2)
+        if EURO_AMOUNT_RE.match(match.string, numeric_start) or PHYSICAL_QUANTITY_RE.match(
+            match.string, numeric_start
+        ):
             return match.group(0)
         if not _is_calendar_date(day, month, year or match.group(5)):
             return match.group(0)
@@ -519,8 +527,7 @@ def normalize_german_text(text: str) -> str:
 
         return f"{prefix_full}{word}{'.' if keep_stop else ''}"
 
-    text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°\s*[Cc]\b", replace_temperature, text)
-    text = re.sub(r"(?<!\w)(-?\d+(?:[,.]\d+)?)\s*°(?!\s*[Cc]\b)", replace_degree_without_unit, text)
+    text = DEGREE_QUANTITY_RE.sub(replace_degree, text)
     text = re.sub(
         r"(?i)(?<!\w)(?<!\d[.:])(am\s+|den\s+|zum\s+|vom\s+|bis\s+zum\s+|jeden\s+)?"
         # Only 20xx years are spoken; another four-digit year stays literal

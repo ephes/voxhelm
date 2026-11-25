@@ -173,10 +173,14 @@ One new backend, one routing layer, minimal surgery elsewhere:
     The independent EUR abbreviation may still become Euro. Date, time and
     ordinal patterns already have smaller fixed digit bounds. This policy is
     independent of total text length and does not change Python's digit limit.
-  - EUR amounts recognize complete dot-separated thousands groups with an
-    optional comma fraction before considering ungrouped decimals. One or two
-    decimal digits are read as cents as before. Malformed grouping preserves
-    the whole number, including date-shaped spellings before EUR.
+  - EUR, unit and degree quantities recognize complete thousands groups with
+    a first group of one to three digits without a leading zero, then
+    dot-separated groups of three and an optional comma fraction. This takes
+    precedence over dot decimals (`1.000 °C` means 1,000 degrees Celsius).
+    Ungrouped comma and unambiguous dot decimals are still accepted. One or
+    two decimal digits in EUR amounts are read as cents as before. Malformed
+    grouping preserves the whole number, including date-shaped spellings
+    before quantity suffixes.
   - Unit inflection uses the exact magnitude of the admitted decimal quantity.
     Signed one and decimal one keep the singular form.
   - Cardinal labels (`Kapitel 2.`, `Seite 4.`, etc.) emit their spoken number

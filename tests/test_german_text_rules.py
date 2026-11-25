@@ -243,3 +243,32 @@ def test_euros_preserve_the_complete_amount(text: str, expected: str) -> None:
 )
 def test_unit_inflection_uses_exact_quantity(raw: str, expected: str) -> None:
     assert normalize_german_text(f"{raw} Std.") == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1.234,5 kg", "eintausendzweihundertvierunddreißig komma fünf Kilogramm"),
+        ("-1.234,5 kg", "minus eintausendzweihundertvierunddreißig komma fünf Kilogramm"),
+        ("1.000 °C", "eintausend Grad Celsius"),
+        ("1.000°", "eintausend Grad"),
+        ("1.000.000 g", "1000000 Gramm"),
+        ("1,5 kg", "eins komma fünf Kilogramm"),
+        ("12.45 kg", "zwölf komma vier fünf Kilogramm"),
+        ("0.125 kg", "null komma eins zwei fünf Kilogramm"),
+        ("-1.5 °C", "minus eins komma fünf Grad Celsius"),
+        ("1.23,5 kg", "1.23,5 kg"),
+        ("1,23.45°", "1,23.45°"),
+        ("1.2.2024,5 °C", "1.2.2024,5 °C"),
+    ],
+)
+def test_physical_quantities_preserve_grouping(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
+
+
+def test_grouped_quantity_digit_budget() -> None:
+    # Dots do not count against the budget, but every digit does.
+    at_limit = "1" + ".234" * 21
+    over_limit = "12" + ".345" * 21
+    assert normalize_german_text(f"{at_limit} kg") == f"{at_limit.replace('.', '')} Kilogramm"
+    assert normalize_german_text(f"{over_limit} kg") == f"{over_limit} kg"

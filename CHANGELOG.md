@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read complete German thousands groups in numbered units and degrees, preserving malformed numeric spellings.
+
 - Choose singular or plural for German units using the exact decimal quantity.
 
 - Preserve complete German EUR amounts with thousands grouping and leave malformed numeric spellings intact.
