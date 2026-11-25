@@ -284,10 +284,11 @@ after loading. A changed generation fails with a retryable backend-unavailable
 error before cache publication; a mixed Piper model/config pair is discarded.
 
 Kokoro refuses requests that yield no supported phoneme tokens with a client
-error (HTTP 400 on the sync speech API). In a multi-sentence request, a sentence
-containing a letter or digit that yields no tokens fails the entire request
-before model loading. The error identifies the sentence by its one-based
-position after text preprocessing and splitting. Whitespace and punctuation-only
+error (HTTP 400 on the sync speech API). A sentence containing a letter or digit
+that yields no speech tokens (none at all, or only the punctuation and space
+pause tokens the phonemizer keeps, as in `雪.`) fails the entire request before
+model loading. In a multi-sentence request the error identifies the sentence by
+its one-based position after text preprocessing and splitting. Whitespace and punctuation-only
 segments that yield no tokens can still be skipped. Supported one-character
 utterances and punctuation tokens retain ordinary inference behavior. Audio chunks
 are validated and written incrementally to an owned WAV, retaining at most one

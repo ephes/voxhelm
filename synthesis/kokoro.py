@@ -174,6 +174,8 @@ KOKORO_SAMPLE_RATE = 24000
 # 30 minutes of mono 16-bit PCM: 86,400,000 payload bytes, below RIFF limits.
 KOKORO_MAX_OUTPUT_FRAMES = KOKORO_SAMPLE_RATE * 30 * 60
 _SPACE_TOKEN = KOKORO_VOCAB[" "]
+# Punctuation and space tokens carry pauses, not speech.
+_NON_SPEECH_TOKENS = frozenset(KOKORO_VOCAB[char] for char in ';:,.!?—…"()“” ')
 _MIN_SPEED = 0.5
 _MAX_SPEED = 2.0
 
@@ -280,13 +282,14 @@ class KokoroBackend:
         token_lists = []
         for index, sentence in enumerate(sentences, start=1):
             tokens = self._phonemize_to_tokens(sentence, config.phoneme_language)
-            if (
-                not tokens
-                and len(sentences) > 1
-                and any(char.isalpha() or char.isdigit() for char in sentence)
+            # Punctuation kept by the phonemizer must not hide an unsupported
+            # spoken sentence: "雪." yields only the "." token, a silent pause.
+            if not _has_speech_tokens(tokens) and any(
+                char.isalpha() or char.isdigit() for char in sentence
             ):
+                position = f" in sentence {index}" if len(sentences) > 1 else ""
                 raise SynthesisInputError(
-                    f"Kokoro found no supported speech tokens in sentence {index}. "
+                    f"Kokoro found no supported speech tokens{position}. "
                     "Try text in the voice's language."
                 )
             token_lists.append(tokens)
@@ -549,6 +552,10 @@ def split_sentences(text: str) -> list[str]:
 
 def tokenize(phonemes: str) -> list[int]:
     return [KOKORO_VOCAB[char] for char in phonemes if char in KOKORO_VOCAB]
+
+
+def _has_speech_tokens(tokens: Iterable[int]) -> bool:
+    return any(token not in _NON_SPEECH_TOKENS for token in tokens)
 
 
 def build_token_chunks(token_lists: list[list[int]], *, budget: int) -> list[list[int]]:

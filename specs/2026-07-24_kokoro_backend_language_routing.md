@@ -149,10 +149,12 @@ One new backend, one routing layer, minimal surgery elsewhere:
   select the per-chunk style vector from the configured `voicepack_key`
   entry by that chunk's token length, run inference per chunk, and
   append validated PCM chunks incrementally to one WAV. Reject nonblank
-  requests with no supported tokens. In a multi-sentence request, reject any
-  sentence containing a letter or digit that produces no tokens with a
-  positional input error before packing or loading artifacts. Tokenless
-  punctuation and whitespace segments can be skipped. Reject empty/nonfinite
+  requests with no supported tokens. Reject any sentence containing a letter
+  or digit that produces no speech tokens (none, or only punctuation/space
+  pause tokens kept by the phonemizer) with an input error before packing or
+  loading artifacts; in a multi-sentence request the error names the
+  sentence's position. Tokenless punctuation and whitespace segments can be
+  skipped. Reject empty/nonfinite
   or non-mono inference output and voicepacks without finite numeric
   `(rows, 1, 256)` styles.
   Cap output at 30 minutes of 24 kHz mono PCM, compute duration from written

@@ -40,7 +40,7 @@ def test_synthesis_reloads_replaced_artifacts_and_reuses_unchanged(tmp_path, mon
             return [np.zeros(1, dtype="float32")]
 
     monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=Session))
-    monkeypatch.setattr(instance, "_phonemize_to_tokens", lambda *a: [1])
+    monkeypatch.setattr(instance, "_phonemize_to_tokens", lambda *a: [43])
 
     def synthesize():
         result = instance.synthesize(
@@ -74,7 +74,7 @@ def test_synthesis_rejects_pair_replaced_between_artifact_loads(tmp_path, monkey
             return [np.zeros(1, dtype="float32")]
 
     monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=Session))
-    monkeypatch.setattr(instance, "_phonemize_to_tokens", lambda *a: [1])
+    monkeypatch.setattr(instance, "_phonemize_to_tokens", lambda *a: [43])
     params = SynthesizeParams(request_model="kokoro", voice="synthetic", language="en", speed=1.0)
     # Warm both caches so the replacement can happen after a real cache hit.
     instance.synthesize("Synthetic.", params).audio_path.unlink()

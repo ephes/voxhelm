@@ -66,23 +66,49 @@ def test_nonblank_text_without_supported_tokens_fails(
     assert not list(tmp_path.glob("*.wav"))
 
 
-@pytest.mark.parametrize("unsupported", ["雪", "٣"])
-def test_mixed_text_rejects_sentence_without_supported_tokens(monkeypatch, tmp_path, unsupported):
+def _punctuation_preserving_phonemizer(text: str, _language: str) -> str:
+    # Like espeak with preserve_punctuation=True: unsupported words vanish, but
+    # their sentence punctuation survives as pause tokens.
+    if text.startswith("Hello"):
+        return "a" + "".join(char for char in text if char in ".!?")
+    return "".join(char for char in text if char in ".!?")
+
+
+def _real_tokenizer_backend(monkeypatch, tmp_path):
     backend, _ = _stub_backend(monkeypatch, tmp_path)
     monkeypatch.setattr(backend, "_ensure_espeak", lambda: None)
     monkeypatch.setattr(
         backend, "_phonemize_to_tokens", kokoro.KokoroBackend._phonemize_to_tokens.__get__(backend)
     )
-    monkeypatch.setattr(kokoro, "_phonemize", lambda text, _: "a" if text == "Hello." else "§")
+    monkeypatch.setattr(kokoro, "_phonemize", _punctuation_preserving_phonemizer)
 
     def unexpected_load(*args, **kwargs):
         pytest.fail("Kokoro attempted to load artifacts for unsupported input")
 
     monkeypatch.setattr(backend, "_session", unexpected_load)
     monkeypatch.setattr(backend, "_voicepack", unexpected_load)
+    return backend
+
+
+@pytest.mark.parametrize("unsupported", ["雪", "٣", "雪.", "٣!", "雪 …"])
+def test_mixed_text_rejects_sentence_without_supported_tokens(monkeypatch, tmp_path, unsupported):
+    backend = _real_tokenizer_backend(monkeypatch, tmp_path)
 
     with pytest.raises(SynthesisInputError, match="supported speech tokens in sentence 2"):
         backend.synthesize(f"Hello. {unsupported}", _params())
+
+
+@pytest.mark.parametrize("unsupported", ["雪.", "٣!"])
+def test_single_spoken_sentence_with_only_punctuation_tokens_fails(
+    monkeypatch, tmp_path, unsupported
+):
+    backend = _real_tokenizer_backend(monkeypatch, tmp_path)
+
+    with pytest.raises(SynthesisInputError) as excinfo:
+        backend.synthesize(unsupported, _params())
+    assert str(excinfo.value) == (
+        "Kokoro found no supported speech tokens. Try text in the voice's language."
+    )
 
 
 def test_mixed_text_keeps_skipping_tokenless_punctuation_and_whitespace(monkeypatch, tmp_path):

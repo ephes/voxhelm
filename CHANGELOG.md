@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Return a Kokoro input error when a sentence with letters or digits produces
-  no supported tokens, so mixed requests cannot silently omit it.
+  no supported speech tokens (none, or only punctuation pause tokens), so
+  requests cannot silently omit it or render it as a pause.
 
 - Reject Kokoro synthesis when the model or voicepack changes while the request
   binds the pair, before running inference.
