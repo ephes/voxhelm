@@ -102,6 +102,9 @@ class WyomingSttConfig:
     max_event_payload_bytes_override: int | None = None
     max_connections: int = DEFAULT_MAX_CONNECTIONS
     max_inference_threads: int = DEFAULT_MAX_INFERENCE_THREADS
+    # Run one silent inference at startup so the model is loaded before the first
+    # voice turn (VOXHELM_WYOMING_STT_WARMUP). Off for directly built configs.
+    warm_up: bool = False
 
     @property
     def max_audio_bytes(self) -> int:
@@ -221,6 +224,7 @@ def get_wyoming_stt_config() -> WyomingSttConfig:
         max_event_payload_bytes_override=max_event_payload_bytes,
         max_connections=max_connections,
         max_inference_threads=max_inference_threads,
+        warm_up=settings.VOXHELM_WYOMING_STT_WARMUP,
     )
 
 
@@ -830,26 +834,12 @@ class WyomingSttEventHandler(AsyncEventHandler):
         return True
 
     def _transcribe_current_audio(self, audio_bytes: bytes):
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-            temp_path = Path(handle.name)
-        try:
-            with wave.open(str(temp_path), "wb") as wav_file:
-                wav_file.setframerate(_CONVERTED_RATE)
-                wav_file.setsampwidth(_CONVERTED_WIDTH)
-                wav_file.setnchannels(_CONVERTED_CHANNELS)
-                wav_file.writeframes(audio_bytes)
-
-            return transcribe_audio(
-                temp_path,
-                TranscribeParams(
-                    request_model=self.request_model,
-                    prompt=self.config.prompt,
-                    language=self.request_language,
-                    scheduler_lane=LANE_INTERACTIVE,
-                ),
-            )
-        finally:
-            temp_path.unlink(missing_ok=True)
+        return transcribe_pcm(
+            audio_bytes,
+            request_model=self.request_model,
+            prompt=self.config.prompt,
+            language=self.request_language,
+        )
 
     async def _write_synthesized_audio(self, audio_path: Path) -> None:
         with wave.open(str(audio_path), "rb") as wav_reader:
@@ -882,6 +872,56 @@ class WyomingSttEventHandler(AsyncEventHandler):
         await self.write_event(AudioStop().event())
 
 
+def transcribe_pcm(
+    audio_bytes: bytes,
+    *,
+    request_model: str,
+    prompt: str | None,
+    language: str | None,
+):
+    """Transcribe 16 kHz mono 16-bit PCM on the interactive lane."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        temp_path = Path(handle.name)
+    try:
+        with wave.open(str(temp_path), "wb") as wav_file:
+            wav_file.setframerate(_CONVERTED_RATE)
+            wav_file.setsampwidth(_CONVERTED_WIDTH)
+            wav_file.setnchannels(_CONVERTED_CHANNELS)
+            wav_file.writeframes(audio_bytes)
+
+        return transcribe_audio(
+            temp_path,
+            TranscribeParams(
+                request_model=request_model,
+                prompt=prompt,
+                language=language,
+                scheduler_lane=LANE_INTERACTIVE,
+            ),
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def warm_up_stt(config: WyomingSttConfig) -> None:
+    """Load the STT model with one second of silence; the transcript is discarded."""
+    started = time.monotonic()
+    try:
+        transcribe_pcm(
+            bytes(_CONVERTED_BYTES_PER_SECOND),
+            request_model=config.model,
+            prompt=config.prompt,
+            language=config.language or config.languages[0],
+        )
+    except Exception:
+        _LOGGER.exception("Wyoming STT warm-up failed model=%s", config.model)
+        return
+    _LOGGER.info(
+        "Wyoming STT warm-up finished model=%s seconds=%.1f",
+        config.model,
+        time.monotonic() - started,
+    )
+
+
 async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> None:
     resolved_config = config or get_wyoming_stt_config()
     info = build_wyoming_info(resolved_config)
@@ -910,6 +950,7 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
     ) -> WyomingSttEventHandler:
         return WyomingSttEventHandler(resolved_config, info, reader, writer, admission=admission)
 
+    warm_up_task: asyncio.Task[None] | None = None
     try:
         await server.start(handler_factory)
         # Everything after a successful start runs under the finally, so a logging
@@ -923,8 +964,14 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
                 resolved_config.model,
                 resolved_config.language or "auto",
             )
+            if resolved_config.warm_up:
+                # In a thread so the listener answers describe/info at once; a voice
+                # turn that arrives meanwhile waits on the same model lock.
+                warm_up_task = asyncio.create_task(asyncio.to_thread(warm_up_stt, resolved_config))
             await stop_event.wait()
         finally:
+            if warm_up_task is not None and not warm_up_task.done():
+                warm_up_task.cancel()
             await shutdown_wyoming_server(server, admission)
     finally:
         # Remove the SIGINT/SIGTERM handlers installed above so the caller's loop keeps

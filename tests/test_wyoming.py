@@ -24,6 +24,7 @@ from transcriptions.wyoming import (
     WyomingSttEventHandler,
     build_wyoming_info,
     get_wyoming_stt_config,
+    warm_up_stt,
 )
 
 
@@ -1178,3 +1179,45 @@ def test_wyoming_resampled_audio_at_duration_limit(rate) -> None:
         assert len(expected) >= config.max_audio_bytes - 2
 
     asyncio.run(run_flow())
+
+
+def test_get_wyoming_stt_config_reads_warm_up_setting(settings) -> None:
+    settings.VOXHELM_WYOMING_STT_WARMUP = True
+    assert get_wyoming_stt_config().warm_up is True
+    settings.VOXHELM_WYOMING_STT_WARMUP = False
+    assert get_wyoming_stt_config().warm_up is False
+
+
+def test_warm_up_stt_transcribes_one_second_of_silence(monkeypatch) -> None:
+    seen: list[tuple[int, TranscribeParams]] = []
+
+    def fake_transcribe(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+            assert wav_file.getframerate() == 16000
+        assert frames == bytes(len(frames))
+        seen.append((len(frames), params))
+        return TranscriptionResult(text="", language="de", segments=[])
+
+    monkeypatch.setattr("transcriptions.wyoming.transcribe_audio", fake_transcribe)
+    config = replace(limit_config(), language=None, languages=("de", "en"))
+
+    warm_up_stt(config)
+
+    assert len(seen) == 1
+    size, params = seen[0]
+    assert size == 32000
+    assert params.request_model == "ggml-large-v3.bin"
+    assert params.language == "de"
+    assert params.scheduler_lane == "interactive"
+
+
+def test_warm_up_stt_logs_and_swallows_backend_errors(monkeypatch, caplog) -> None:
+    def failing_transcribe(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        raise RuntimeError("model missing")
+
+    monkeypatch.setattr("transcriptions.wyoming.transcribe_audio", failing_transcribe)
+
+    warm_up_stt(limit_config())
+
+    assert "Wyoming STT warm-up failed" in caplog.text

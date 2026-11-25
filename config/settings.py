@@ -500,6 +500,10 @@ VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = env_bool(
     "VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT",
     default=True,
 )
+# Load the Wyoming STT model and run one short inference right after the
+# listener starts, so the first voice command after a restart does not pay the
+# model load (about 12 s for mlx-whisper large-v3 from a cold page cache).
+VOXHELM_WYOMING_STT_WARMUP = env_bool("VOXHELM_WYOMING_STT_WARMUP", default=True)
 VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024"))
 VOXHELM_WYOMING_MAX_CONNECTIONS = int(os.getenv("VOXHELM_WYOMING_MAX_CONNECTIONS", "16"))
 VOXHELM_WYOMING_MAX_INFERENCE_THREADS = int(os.getenv("VOXHELM_WYOMING_MAX_INFERENCE_THREADS", "4"))

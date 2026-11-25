@@ -483,6 +483,9 @@ export VOXHELM_WYOMING_MAX_EVENT_DATA_BYTES="262144"
 export VOXHELM_WYOMING_MAX_EVENT_PAYLOAD_BYTES=""
 export VOXHELM_WYOMING_MAX_CONNECTIONS="16"
 export VOXHELM_WYOMING_MAX_INFERENCE_THREADS="4"
+# Load the Wyoming STT model with one second of silence right after the listener
+# starts, so the first voice command after a restart skips the model load.
+export VOXHELM_WYOMING_STT_WARMUP="true"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Warm up the Wyoming STT model right after the listener starts
+  (`VOXHELM_WYOMING_STT_WARMUP`, default on): one second of silence goes
+  through the configured backend on the interactive lane and the transcript
+  is discarded. The first Home Assistant voice command after a restart took
+  about 12 s with mlx-whisper large-v3 because the model loaded lazily. A
+  failed warm-up is logged and the listener keeps serving.
+
 - Retire a pending inference holder if the control lock fails to exit before
   the caller receives its ticket.
 

@@ -585,3 +585,47 @@ def test_concurrent_sidecar_keeps_its_signal_handlers(monkeypatch) -> None:
 
     asyncio.run(flow())
     assert all(server.stopped for server in servers)
+
+
+def test_server_warms_up_stt_after_listening_when_enabled(monkeypatch) -> None:
+    server = FakeServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    warmed = threading.Event()
+    calls: list[Any] = []
+
+    def fake_warm_up(config) -> None:
+        assert server.started.is_set()
+        calls.append(config)
+        warmed.set()
+
+    monkeypatch.setattr(wyoming_module, "warm_up_stt", fake_warm_up)
+    config = replace(limit_config(), host="127.0.0.1", port=0, warm_up=True)
+
+    async def flow() -> None:
+        serving = asyncio.create_task(run_wyoming_stt_server(config=config))
+        await asyncio.wait_for(asyncio.to_thread(warmed.wait, 5), 6)
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+    asyncio.run(flow())
+    assert calls == [config]
+    assert server.stopped
+
+
+def test_server_skips_warm_up_when_disabled(monkeypatch) -> None:
+    server = FakeServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    monkeypatch.setattr(
+        wyoming_module, "warm_up_stt", lambda config: pytest.fail("warm-up must not run")
+    )
+    config = replace(limit_config(), host="127.0.0.1", port=0)
+
+    async def flow() -> None:
+        serving = asyncio.create_task(run_wyoming_stt_server(config=config))
+        await asyncio.wait_for(server.started.wait(), 5)
+        await asyncio.sleep(0.05)
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+    asyncio.run(flow())
+    assert server.stopped
