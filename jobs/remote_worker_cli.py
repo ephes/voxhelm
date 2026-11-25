@@ -459,6 +459,7 @@ def process_claim(
     ) as heartbeater:
         try:
             heartbeater.update(phase="materialize_input")
+            formats = claim_output_formats(claim)
             media = materialize_input(claim)
             cleanup_paths.append(media.path)
 
@@ -536,7 +537,7 @@ def process_claim(
                 upload_transcript_artifacts(
                     store=store,
                     artifact_prefix=artifact_prefix,
-                    formats=claim_output_formats(claim),
+                    formats=formats,
                     result=result,
                     check_ownership=heartbeater.check_ownership,
                 )
@@ -1256,7 +1257,11 @@ def claim_output_formats(claim: dict[str, Any]) -> list[str]:
     formats = output.get("formats")
     if not isinstance(formats, list):
         return ["text", "json"]
-    return [str(output_format) for output_format in formats]
+    output_formats = [str(output_format) for output_format in formats]
+    for output_format in output_formats:
+        if output_format not in TRANSCRIPT_ARTIFACTS_BY_FORMAT:
+            raise WorkerError(f"Unsupported transcript output format '{output_format}'.")
+    return output_formats
 
 
 def claim_diarization(claim: dict[str, Any]) -> dict[str, Any]:

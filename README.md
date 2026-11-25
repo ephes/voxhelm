@@ -1357,6 +1357,10 @@ The remote worker checks lease ownership before rendering each requested
 transcript format and again before uploading it. If a heartbeat detects lease
 loss during rendering, the worker discards the rendered bytes.
 
+The worker validates all requested transcript formats before materializing
+the input. An unsupported format fails the attempt through the normal worker
+failure report. A claim that omits formats still produces `text` and `json`.
+
 Workers must advertise supported transcript `output_formats`, concrete STT
 backend names, and concrete STT model names when claiming work. `auto`,
 `whisper-1`, and `gpt-4o-mini-transcribe` match the configured default backend

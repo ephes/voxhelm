@@ -6,6 +6,7 @@ import logging
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -209,18 +210,23 @@ def artifact_by_name(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {artifact["name"]: artifact for artifact in payload["artifacts"]}
 
 
+@pytest.mark.parametrize("omit_formats", [False, True])
 def test_process_claim_uploads_source_and_requested_transcripts(
     monkeypatch: Any,
     settings: Any,
     tmp_path: Path,
+    omit_formats: bool,
 ) -> None:
     configure_filesystem_store(settings, tmp_path / "artifacts")
     install_fake_download(monkeypatch, tmp_path)
     monkeypatch.setattr(worker_cli, "build_backend_service", lambda **_: FakeSttService())
 
     client = RecordingClient()
+    claim = base_claim()
+    if omit_formats:
+        del claim["output"]["formats"]
     worker_cli.process_claim(
-        base_claim(),
+        claim,
         config=worker_cli.WorkerConfig(
             base_url="http://voxhelm.local",
             worker_id="atlas",
@@ -250,6 +256,37 @@ def test_process_claim_uploads_source_and_requested_transcripts(
     assert payload["result_metadata"]["processing_seconds"] >= 0
     assert "source_url" not in payload["result_metadata"]
     assert client.heartbeats[0]["progress"]["phase"] == "materialize_input"
+
+
+def test_worker_rejects_unsupported_format_before_materializing(monkeypatch):
+    client = RecordingClient()
+    claim = base_claim()
+    claim["output"]["formats"] = ["text", "unsupported"]
+    monkeypatch.setattr(client, "heartbeat_worker", lambda **kwargs: {})
+    monkeypatch.setattr(client, "claim", lambda **kwargs: claim)
+    report_failure = Mock(return_value={})
+    monkeypatch.setattr(client, "fail_job", report_failure)
+
+    download = Mock(side_effect=AssertionError("input download started"))
+    transcribe = Mock()
+    store = Mock()
+    monkeypatch.setattr(worker_cli, "download_allowed_media", download)
+    monkeypatch.setattr(worker_cli, "transcribe_claim_audio", transcribe)
+    monkeypatch.setattr(worker_cli, "get_artifact_store_for_identity", lambda _identity: store)
+
+    outcome = worker_cli.run_worker_once(config=client.config, client=client, capabilities={})
+
+    download.assert_not_called()
+    transcribe.assert_not_called()
+    assert store.mock_calls == []
+    assert client.completed is None
+    assert outcome is worker_cli.WorkerOutcome.FAILED
+    report_failure.assert_called_once_with(
+        job_id=claim["id"],
+        lease_token=claim["lease_token"],
+        error_detail="Unsupported transcript output format 'unsupported'.",
+        retryable=True,
+    )
 
 
 def test_process_claim_uploads_known_speaker_sidecar(

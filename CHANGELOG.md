@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject unsupported remote transcript output formats before downloading or
+  processing the input. Claims that omit formats still use text and JSON.
+
 - Recheck remote lease ownership after rendering each transcript format and
   stop before upload if the lease was lost.
 
