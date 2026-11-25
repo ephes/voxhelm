@@ -210,3 +210,34 @@ def test_record_voice_turn_keeps_newest_owner_only(settings, tmp_path) -> None:
     assert texts == ["t1", "t2"]
     with wave.open(str(wavs[0]), "rb") as wav_file:
         assert wav_file.getframerate() == 16000
+
+
+def test_recording_publishes_complete_turn_and_recovers_pending(settings, tmp_path, monkeypatch):
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = str(tmp_path)
+    root = tmp_path / "voxhelm-turns"
+    record = wyoming_module.record_voice_turn
+
+    record(bytes(320), text="first", backend="b", language="de")
+    first = next(root.glob("[0-9]*"))
+    original_open = wyoming_module.os.open
+
+    def fail_metadata(path, *args, **kwargs):
+        if getattr(path, "name", None) == "metadata.json":
+            raise OSError("simulated disk failure")
+        return original_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(wyoming_module.os, "open", fail_metadata)
+        record(bytes(320), text="failed", backend="b", language="de")
+    assert list(root.glob("[0-9]*")) == [first]
+
+    abandoned = root / (".pending-" + first.name)
+    abandoned.mkdir()
+    (abandoned / "audio.wav").write_bytes(b"interrupted write")
+    unrelated = root / ".pending-elsewhere"
+    unrelated.mkdir()
+    record(bytes(320), text="next", backend="b", language="de")
+    assert first.is_dir()
+    assert not abandoned.exists()
+    assert unrelated.is_dir()
+    assert len(list(root.glob("[0-9]*/metadata.json"))) == 2

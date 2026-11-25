@@ -8,6 +8,8 @@
   JSON with transcript, backend and language, owner-only. Meant for short
   test windows; household speech, delete afterwards.
 
+- Publish Wyoming recording audio and metadata together and recover interrupted staging.
+
 - Continue draining queued artifact deletions when diagnostic logging fails
   and keep unresolved entries eligible for retry.
 - Index protected filesystem objects by device and inode once per artifact

@@ -545,7 +545,9 @@ export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 Wyoming STT comparison recordings are opt-in. Each turn lives in a timestamped
 directory under `VOXHELM_WYOMING_STT_RECORD_DIR/voxhelm-turns/`, with owner-only
 `audio.wav` and `metadata.json` files. Count retention applies to complete pairs
-in this namespace. Legacy flat recordings and other files in the configured
+in this namespace. A turn becomes visible by directory rename after both files
+close. The writer retires interrupted staging directories on its next write.
+Legacy flat recordings and other files in the configured
 directory stay available for manual migration or removal.
 
 

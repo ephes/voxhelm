@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import fcntl
 import io
 import json
 import logging
@@ -980,13 +981,12 @@ _TURN_NAME = re.compile(r"[0-9]{20}-[0-9a-f]{32}")
 _TURN_FILES = {"audio.wav", "metadata.json"}
 
 
-def _complete_turn(path: Path) -> bool:
+def _is_owned_turn(path: Path, *, complete: bool) -> bool:
     if not stat.S_ISDIR(path.lstat().st_mode):
         return False
     entries = {entry.name: entry for entry in path.iterdir()}
-    return entries.keys() == _TURN_FILES and all(
-        stat.S_ISREG(entry.lstat().st_mode) for entry in entries.values()
-    )
+    valid_names = entries.keys() == _TURN_FILES if complete else entries.keys() <= _TURN_FILES
+    return valid_names and all(stat.S_ISREG(entry.lstat().st_mode) for entry in entries.values())
 
 
 def _remove_turn(path: Path) -> None:
@@ -1012,30 +1012,59 @@ def record_voice_turn(audio_bytes: bytes, *, text: str, backend: str, language: 
         if not stat.S_ISDIR(root.lstat().st_mode):
             raise OSError("Invalid recording namespace")
         os.chmod(root, 0o700)
-        turn = root / f"{time.time_ns():020d}-{uuid4().hex}"
-        turn.mkdir(mode=0o700)
-        wav_path = turn / "audio.wav"
-        with open(os.open(wav_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as raw:
+        lock_fd = os.open(root / ".writer.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _commit_recording(
+                root, audio_bytes, {"text": text, "backend": backend, "language": language}
+            )
+        finally:
+            os.close(lock_fd)
+    except Exception:
+        _LOGGER.warning("Wyoming STT recording failed", exc_info=True)
+
+
+_PENDING_PREFIX = ".pending-"
+
+
+def _commit_recording(root: Path, audio_bytes: bytes, metadata: dict[str, str | None]) -> None:
+    for path in root.iterdir():
+        if (
+            path.name.startswith(_PENDING_PREFIX)
+            and _TURN_NAME.fullmatch(path.name.removeprefix(_PENDING_PREFIX))
+            and _is_owned_turn(path, complete=False)
+        ):
+            _remove_turn(path)
+    name = f"{time.time_ns():020d}-{uuid4().hex}"
+    stage = root / (_PENDING_PREFIX + name)
+    stage.mkdir(mode=0o700)
+    try:
+        with open(
+            os.open(stage / "audio.wav", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+        ) as raw:
             with wave.open(raw, "wb") as wav_file:
                 wav_file.setframerate(_CONVERTED_RATE)
                 wav_file.setsampwidth(_CONVERTED_WIDTH)
                 wav_file.setnchannels(_CONVERTED_CHANNELS)
                 wav_file.writeframes(audio_bytes)
-        meta = {"text": text, "backend": backend, "language": language}
         with open(
-            os.open(turn / "metadata.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+            os.open(stage / "metadata.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
         ) as handle:
-            json.dump(meta, handle, ensure_ascii=False)
-        keep = max(1, settings.VOXHELM_WYOMING_STT_RECORD_MAX)
-        complete = sorted(
-            path
-            for path in root.iterdir()
-            if _TURN_NAME.fullmatch(path.name) and _complete_turn(path)
-        )
-        for expired in complete[:-keep]:
-            _remove_turn(expired)
-    except Exception:
-        _LOGGER.warning("Wyoming STT recording failed", exc_info=True)
+            json.dump(metadata, handle, ensure_ascii=False)
+        stage.rename(root / name)
+    finally:
+        if stage.exists():
+            _remove_turn(stage)
+
+    keep = max(1, settings.VOXHELM_WYOMING_STT_RECORD_MAX)
+    complete = sorted(
+        path
+        for path in root.iterdir()
+        if _TURN_NAME.fullmatch(path.name) and _is_owned_turn(path, complete=True)
+    )
+    for expired in complete[:-keep]:
+        pending = expired.rename(root / (_PENDING_PREFIX + expired.name))
+        _remove_turn(pending)
 
 
 def needs_language_retry(text: str, language: str | None) -> bool:
