@@ -45,6 +45,7 @@ from synthesis.service import (
 from .errors import ApiError
 from .observability import emit_transcription_debug_log
 from .service import (
+    PARAKEET_INPROCESS_BACKEND_NAME,
     TranscribeParams,
     normalize_interactive_transcript,
     resolve_model_name_for_backend,
@@ -839,6 +840,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
             request_model=self.request_model,
             prompt=self.config.prompt,
             language=self.request_language,
+            backend=explicit_backend(self.config),
         )
 
     async def _write_synthesized_audio(self, audio_path: Path) -> None:
@@ -878,6 +880,7 @@ def transcribe_pcm(
     request_model: str,
     prompt: str | None,
     language: str | None,
+    backend: str | None = None,
 ):
     """Transcribe 16 kHz mono 16-bit PCM on the interactive lane."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
@@ -896,10 +899,18 @@ def transcribe_pcm(
                 prompt=prompt,
                 language=language,
                 scheduler_lane=LANE_INTERACTIVE,
+                backend=backend,
             ),
         )
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def explicit_backend(config: WyomingSttConfig) -> str | None:
+    """Backends the model name cannot select are passed to the service by name."""
+    if config.backend == PARAKEET_INPROCESS_BACKEND_NAME:
+        return config.backend
+    return None
 
 
 def warm_up_stt(config: WyomingSttConfig) -> None:
@@ -911,6 +922,7 @@ def warm_up_stt(config: WyomingSttConfig) -> None:
             request_model=config.model,
             prompt=config.prompt,
             language=config.language or config.languages[0],
+            backend=explicit_backend(config),
         )
     except Exception:
         _LOGGER.exception("Wyoming STT warm-up failed model=%s", config.model)

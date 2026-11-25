@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add the in-process Parakeet backend `parakeet-mlx` for the Wyoming
+  sidecar (`VOXHELM_WYOMING_STT_BACKEND=parakeet-mlx`, new `parakeet` extra
+  with `parakeet-mlx==0.5.3`, model from `VOXHELM_PARAKEET_MODEL_DIR`). The
+  model loads once and stays resident, so a voice command takes about 0.1 s
+  on the Studio instead of 0.4 s with mlx-whisper large-v3. If the package,
+  the model directory or the language is not available, the turn falls back
+  to mlx-whisper (`VOXHELM_MLX_MODEL`). The batch `parakeet` CLI backend is
+  unchanged.
+
 - Warm up the Wyoming STT model right after the listener starts
   (`VOXHELM_WYOMING_STT_WARMUP`, default on): one second of silence goes
   through the configured backend on the interactive lane and the transcript

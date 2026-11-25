@@ -33,6 +33,10 @@ kokoro = [
 routing = [
     "lingua-language-detector>=2.1.1",
 ]
+# In-process NVIDIA Parakeet for the Wyoming sidecar (backend "parakeet-mlx").
+parakeet = [
+    "parakeet-mlx==0.5.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
 
 [dependency-groups]
 dev = [

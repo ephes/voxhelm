@@ -473,6 +473,8 @@ export VOXHELM_HUGGINGFACE_TOKEN=""
 export VOXHELM_MODEL_CACHE_DIR="$PWD/var/models"
 export VOXHELM_WYOMING_STT_HOST="0.0.0.0"
 export VOXHELM_WYOMING_STT_PORT="10300"
+# "parakeet-mlx" runs Parakeet resident in the sidecar (needs `uv sync --extra parakeet`
+# and VOXHELM_PARAKEET_MODEL_DIR); it falls back to mlx-whisper when unavailable.
 export VOXHELM_WYOMING_STT_BACKEND="mlx"
 export VOXHELM_WYOMING_STT_MODEL=""
 export VOXHELM_WYOMING_STT_LANGUAGE=""

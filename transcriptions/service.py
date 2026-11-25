@@ -49,6 +49,9 @@ WHISPERKIT_ERROR_MAX_BYTES = 64 * 1024
 AUTO_BACKEND_MODEL_NAMES = {"auto", "gpt-4o-mini-transcribe", "whisper-1"}
 WHISPERKIT_BACKEND_MODEL_NAMES = {"whisperkit"}
 PARAKEET_BACKEND_NAME = "parakeet"
+# Parakeet loaded once into this process (Wyoming sidecar); needs the
+# ``parakeet`` extra. The ``parakeet`` backend above runs the CLI per call.
+PARAKEET_INPROCESS_BACKEND_NAME = "parakeet-mlx"
 # Parakeet TDT 0.6B v3 detects the language itself; these are the 25 it supports.
 PARAKEET_LANGUAGES = frozenset(
     "bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk".split()
@@ -93,6 +96,10 @@ class TranscribeParams:
     # disconnect). Excluded from equality/repr so parameter comparisons and log
     # lines stay unchanged.
     cancel_event: threading.Event | None = field(default=None, compare=False, repr=False)
+    # Run exactly this backend (then the mlx fallback if it is unavailable)
+    # instead of resolving one from the model name. Only the Wyoming sidecar
+    # sets it, for ``parakeet-mlx``.
+    backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -629,6 +636,64 @@ def _finite_seconds(value: object) -> float | None:
     return seconds if math.isfinite(seconds) else None
 
 
+_PARAKEET_INPROCESS_LOCK = threading.Lock()
+_PARAKEET_INPROCESS_MODELS: dict[str, Any] = {}
+
+
+class ParakeetInProcessBackend:
+    """Parakeet TDT through ``parakeet_mlx`` in this process, model kept loaded.
+
+    For short interactive audio (Home Assistant voice commands), where the CLI
+    backend's per-call model load would cost more than the inference.
+    """
+
+    def __init__(self, *, model_dir: str, model_name: str) -> None:
+        self.model_dir = model_dir
+        self.model_name = model_name
+
+    def transcribe(self, audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        if not parakeet_supports_language(params.language):
+            raise BackendUnavailableError(
+                f"Parakeet does not support language '{params.language}'."
+            )
+        try:
+            from parakeet_mlx import from_pretrained  # type: ignore[import-not-found]
+        except ModuleNotFoundError as exc:
+            raise BackendUnavailableError(
+                "parakeet-mlx is not installed. Install the 'parakeet' extra."
+            ) from exc
+        if not self.model_dir:
+            raise BackendUnavailableError("VOXHELM_PARAKEET_MODEL_DIR is not set.")
+        model_dir = Path(self.model_dir).expanduser().resolve()
+        if not (model_dir / "config.json").is_file():
+            raise BackendUnavailableError(f"Parakeet model not found in '{model_dir}'.")
+
+        with _PARAKEET_INPROCESS_LOCK:
+            _raise_if_cancelled(params)
+            model = _PARAKEET_INPROCESS_MODELS.get(str(model_dir))
+            if model is None:
+                model = from_pretrained(str(model_dir))
+                _PARAKEET_INPROCESS_MODELS[str(model_dir)] = model
+            result = model.transcribe(str(audio_path))
+        payload = {
+            "text": result.text,
+            "sentences": [
+                {
+                    "text": sentence.text,
+                    "start": sentence.start,
+                    "end": sentence.end,
+                    "tokens": [
+                        {"text": token.text, "start": token.start, "end": token.end}
+                        for token in sentence.tokens
+                    ],
+                }
+                for sentence in result.sentences
+            ],
+        }
+        normalized = normalize_parakeet_payload(payload, model_name=self.model_name)
+        return replace(normalized, backend_name=PARAKEET_INPROCESS_BACKEND_NAME)
+
+
 class WhisperKitBackend:
     def __init__(
         self,
@@ -1120,6 +1185,8 @@ def parakeet_supports_language(language: str | None) -> bool:
 
 
 def get_backend_services_for_params(params: TranscribeParams) -> list[BackendInvocation]:
+    if params.backend:
+        return explicit_backend_chain(params)
     # Word timings are asked for exactly by known-speaker jobs with the re-cut.
     chain = (
         known_speaker_backend_chain(params.request_model, language=params.language)
@@ -1132,6 +1199,30 @@ def get_backend_services_for_params(params: TranscribeParams) -> list[BackendInv
         BackendInvocation(name, service_for_backend_name(name, request_model=params.request_model))
         for name in chain
     ]
+
+
+def explicit_backend_chain(params: TranscribeParams) -> list[BackendInvocation]:
+    """The requested backend, then mlx-whisper if that one is unavailable."""
+    assert params.backend
+    chain = [
+        BackendInvocation(
+            params.backend,
+            build_backend_service(
+                backend_name=params.backend,
+                model_name=resolve_model_name_for_backend(
+                    request_model=params.request_model, backend_name=params.backend
+                ),
+            ),
+        )
+    ]
+    if params.backend != "mlx":
+        chain.append(
+            BackendInvocation(
+                "mlx",
+                build_backend_service(backend_name="mlx", model_name=settings.VOXHELM_MLX_MODEL),
+            )
+        )
+    return chain
 
 
 def service_for_backend_name(backend_name: str, *, request_model: str) -> BackendProtocol:
@@ -1180,6 +1271,11 @@ def build_backend_service(*, backend_name: str, model_name: str) -> BackendProto
             max_sentence_seconds=settings.VOXHELM_PARAKEET_MAX_SENTENCE_SECONDS,
             timeout_seconds=settings.VOXHELM_PARAKEET_TIMEOUT_SECONDS,
         )
+    if backend_name == PARAKEET_INPROCESS_BACKEND_NAME:
+        return ParakeetInProcessBackend(
+            model_dir=settings.VOXHELM_PARAKEET_MODEL_DIR,
+            model_name=model_name,
+        )
     raise RuntimeError(f"Unsupported STT backend '{backend_name}'.")
 
 
@@ -1213,7 +1309,7 @@ def resolve_model_name_for_backend(*, request_model: str, backend_name: str) -> 
         return settings.VOXHELM_MLX_MODEL
     if backend_name == "whisperkit":
         return settings.VOXHELM_WHISPERKIT_MODEL
-    if backend_name == PARAKEET_BACKEND_NAME:
+    if backend_name in (PARAKEET_BACKEND_NAME, PARAKEET_INPROCESS_BACKEND_NAME):
         return settings.VOXHELM_PARAKEET_MODEL_NAME
     raise RuntimeError(f"Unsupported STT backend '{backend_name}'.")
 
