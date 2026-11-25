@@ -543,7 +543,13 @@ export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
 
-Wyoming STT comparison recordings are opt-in. Each turn lives in a timestamped
+Wyoming STT comparison recordings are opt-in. One background writer processes
+captures, with up to four additional turns queued. Further captures are dropped
+when the queue is full. Listener shutdown allows up to two seconds to drain the
+queue after closing connections. At the deadline, queued captures are discarded
+and a write already running can finish in its thread.
+
+Each turn lives in a timestamped
 directory under `VOXHELM_WYOMING_STT_RECORD_DIR/voxhelm-turns/`, with owner-only
 `audio.wav` and `metadata.json` files. Count retention applies to complete pairs
 in this namespace. A turn becomes visible by directory rename after both files

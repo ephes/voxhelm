@@ -634,8 +634,11 @@ def test_server_skips_warm_up_when_disabled(monkeypatch) -> None:
 def test_recording_and_logging_failures_preserve_transcript(monkeypatch, settings, tmp_path):
     import logging
 
+    diagnostics: list[str] = []
+
     class BrokenSink(logging.Handler):
         def emit(self, record):
+            diagnostics.append(record.getMessage())
             raise RuntimeError("synthetic logging failure")
 
     root_file = tmp_path / "unwritable-directory"
@@ -649,9 +652,21 @@ def test_recording_and_logging_failures_preserve_transcript(monkeypatch, setting
     writer = ClosingWriter()
 
     async def flow():
-        handler = make_handler(asyncio.StreamReader(), writer)
+        config = limit_config()
+        recorder = wyoming_module._RecordingWriter()
+        worker = asyncio.create_task(recorder.run())
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+            recording_writer=recorder,
+        )
         handler.audio_buffer.write(ONE_SECOND_PCM)
-        await handler.handle_event(AudioStop().event())
+        try:
+            await handler.handle_event(AudioStop().event())
+        finally:
+            await recorder.close(worker)
 
     sink = BrokenSink()
     logger = wyoming_module._LOGGER
@@ -661,6 +676,7 @@ def test_recording_and_logging_failures_preserve_transcript(monkeypatch, setting
     finally:
         logger.removeHandler(sink)
     assert [Transcript.from_event(event).text for event in decode_all_events(writer)] == ["hello"]
+    assert diagnostics == ["Wyoming STT recording failed"]
 
 
 def test_recording_preserves_recognition_and_served_provenance(monkeypatch, settings, tmp_path):
@@ -679,10 +695,22 @@ def test_recording_preserves_recognition_and_served_provenance(monkeypatch, sett
     writer = ClosingWriter()
 
     async def flow():
-        handler = make_handler(asyncio.StreamReader(), writer)
+        config = limit_config()
+        recorder = wyoming_module._RecordingWriter()
+        worker = asyncio.create_task(recorder.run())
+        handler = WyomingSttEventHandler(
+            config,
+            build_wyoming_info(config),
+            asyncio.StreamReader(),
+            writer,
+            recording_writer=recorder,
+        )
         handler.request_language = "de"
         handler.audio_buffer.write(ONE_SECOND_PCM)
-        await handler.handle_event(AudioStop().event())
+        try:
+            await handler.handle_event(AudioStop().event())
+        finally:
+            await recorder.close(worker)
 
     asyncio.run(flow())
     transcript = Transcript.from_event(decode_all_events(writer)[0])
@@ -697,3 +725,57 @@ def test_recording_preserves_recognition_and_served_provenance(monkeypatch, sett
     }
     assert transcript.text == "turn the light on"
     assert transcript.language == "en"
+
+
+def test_slow_recording_keeps_listener_responsive_and_drains_admitted_work(monkeypatch, settings):
+    server = FakeServer()
+    monkeypatch.setattr(wyoming_module.AsyncServer, "from_uri", staticmethod(lambda uri: server))
+    settings.VOXHELM_WYOMING_STT_RECORD_DIR = "/synthetic/recordings"
+    release = threading.Event()
+    entered = threading.Event()
+    retired = threading.Event()
+    writes: list[bytes] = []
+
+    def record(audio, **kwargs):
+        writes.append(audio)
+        entered.set()
+        release.wait(2)
+        retired.set()
+
+    monkeypatch.setattr(wyoming_module, "record_voice_turn", record)
+    monkeypatch.setattr(
+        wyoming_module,
+        "transcribe_pcm",
+        lambda *args, **kwargs: SimpleNamespace(text="hello", language="en", backend_name="fake"),
+    )
+
+    async def flow():
+        config = limit_config()
+        serving = asyncio.create_task(run_wyoming_stt_server(config=config))
+        try:
+            await server.started.wait()
+            for index in range(9):
+                writer = ClosingWriter()
+                handler = server.factory(asyncio.StreamReader(), writer)
+                handler.audio_buffer.write(bytes([index, 0]))
+                await handler.handle_event(AudioStop().event())
+                assert Transcript.from_event(decode_all_events(writer)[0]).text == "hello"
+                if index == 0:
+                    assert await asyncio.to_thread(entered.wait, 2)
+                    assert not retired.is_set()
+            writer = ClosingWriter()
+            await server.factory(asyncio.StreamReader(), writer).handle_event(Describe().event())
+            assert decode_all_events(writer)[0].type == "info"
+            assert not retired.is_set()
+        finally:
+            serving.cancel()
+            try:
+                while not server.stopped and not serving.done():
+                    await asyncio.sleep(0)
+                assert not serving.done()
+            finally:
+                release.set()
+                await asyncio.gather(serving, return_exceptions=True)
+
+    asyncio.run(flow())
+    assert writes == [bytes([index, 0]) for index in range(5)]

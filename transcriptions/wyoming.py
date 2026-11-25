@@ -19,6 +19,7 @@ import wave
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -552,6 +553,39 @@ def _validate_typed_event(event: Event) -> None:
         raise WyomingEventRejected("invalid_event", "Invalid event fields.")
 
 
+_RECORDING_QUEUE_SIZE = 4
+_RECORDING_DRAIN_SECONDS = 2
+
+
+class _RecordingWriter:
+    """Own a single off-loop write and a bounded queue for the listener."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[Callable[[], None]] = asyncio.Queue(_RECORDING_QUEUE_SIZE)
+
+    def submit(self, write: Callable[[], None]) -> None:
+        with suppress(asyncio.QueueFull):
+            self.queue.put_nowait(write)
+
+    async def run(self) -> None:
+        while True:
+            write = await self.queue.get()
+            try:
+                await asyncio.to_thread(write)
+            finally:
+                self.queue.task_done()
+
+    async def close(self, worker: asyncio.Task[None]) -> None:
+        try:
+            async with asyncio.timeout(_RECORDING_DRAIN_SECONDS):
+                await self.queue.join()
+        except TimeoutError:
+            _best_effort_warning("Wyoming recording shutdown timed out; queued captures dropped")
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+
 class WyomingSttEventHandler(AsyncEventHandler):
     def __init__(
         self,
@@ -559,6 +593,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
         info: Info,
         *args,
         admission: WyomingAdmission | None = None,
+        recording_writer: _RecordingWriter | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -567,6 +602,7 @@ class WyomingSttEventHandler(AsyncEventHandler):
             max_connections=config.max_connections,
             max_inference_threads=config.max_inference_threads,
         )
+        self.recording_writer = recording_writer
         self.info_event = info.event()
         self._reset_audio()
         self.request_model = config.model
@@ -829,14 +865,18 @@ class WyomingSttEventHandler(AsyncEventHandler):
                 )
                 return False
 
-            record_voice_turn(
-                audio_bytes,
-                text=result.text,
-                backend=result.backend_name,
-                language=self.request_language,
-                raw_text=raw_transcript,
-                result_language=result.language,
-            )
+            if self.recording_writer is not None:
+                self.recording_writer.submit(
+                    partial(
+                        record_voice_turn,
+                        audio_bytes,
+                        text=result.text,
+                        backend=result.backend_name,
+                        language=self.request_language,
+                        raw_text=raw_transcript,
+                        result_language=result.language,
+                    )
+                )
             emit_transcription_debug_log(
                 source="wyoming",
                 audio_shape=self.audio_shape.as_dict(),
@@ -1179,6 +1219,8 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         max_inference_threads=resolved_config.max_inference_threads,
     )
 
+    recording_writer = _RecordingWriter() if settings.VOXHELM_WYOMING_STT_RECORD_DIR else None
+
     def request_stop() -> None:
         stop_event.set()
 
@@ -1194,14 +1236,24 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> WyomingSttEventHandler:
-        return WyomingSttEventHandler(resolved_config, info, reader, writer, admission=admission)
+        return WyomingSttEventHandler(
+            resolved_config,
+            info,
+            reader,
+            writer,
+            admission=admission,
+            recording_writer=recording_writer,
+        )
 
+    recording_task: asyncio.Task[None] | None = None
     warm_up_task: asyncio.Task[None] | None = None
     try:
         await server.start(handler_factory)
         # Everything after a successful start runs under the finally, so a logging
         # failure or cancellation still stops the listener and owned handlers.
         try:
+            if recording_writer is not None:
+                recording_task = asyncio.create_task(recording_writer.run())
             _LOGGER.info(
                 "Wyoming STT/TTS listening on %s:%s using backend=%s model=%s language=%s",
                 resolved_config.host,
@@ -1218,7 +1270,11 @@ async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> N
         finally:
             if warm_up_task is not None and not warm_up_task.done():
                 warm_up_task.cancel()
-            await shutdown_wyoming_server(server, admission)
+            try:
+                await shutdown_wyoming_server(server, admission)
+            finally:
+                if recording_writer is not None and recording_task is not None:
+                    await recording_writer.close(recording_task)
     finally:
         # Remove the SIGINT/SIGTERM handlers installed above so the caller's loop keeps
         # no stale reference to this server's stop event, but leave a handler someone

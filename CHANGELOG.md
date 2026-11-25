@@ -8,6 +8,7 @@
   JSON with transcript, backend and language, owner-only. Meant for short
   test windows; household speech, delete afterwards.
 
+- Move optional Wyoming recordings to a bounded background writer.
 - Record raw and served Wyoming STT text and requested and result languages for comparisons.
 - Keep Wyoming transcripts available when recording and diagnostic logging fail.
 - Cap retained Wyoming recording audio and metadata at 160 MiB by default.
