@@ -508,9 +508,18 @@ VOXHELM_WYOMING_STT_WARMUP = env_bool("VOXHELM_WYOMING_STT_WARMUP", default=True
 # kept below about -1 dBFS) so voices of different loudness sound alike on the
 # satellite. Empty disables it.
 _wyoming_tts_target_dbfs = os.getenv("VOXHELM_WYOMING_TTS_TARGET_DBFS", "-19").strip()
-VOXHELM_WYOMING_TTS_TARGET_DBFS = (
-    float(_wyoming_tts_target_dbfs) if _wyoming_tts_target_dbfs else None
-)
+try:
+    VOXHELM_WYOMING_TTS_TARGET_DBFS = (
+        float(_wyoming_tts_target_dbfs) if _wyoming_tts_target_dbfs else None
+    )
+    if VOXHELM_WYOMING_TTS_TARGET_DBFS is not None and not (
+        -96 <= VOXHELM_WYOMING_TTS_TARGET_DBFS <= 0
+    ):
+        raise ValueError
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        "VOXHELM_WYOMING_TTS_TARGET_DBFS must be empty or a finite number from -96 to 0."
+    ) from exc
 # Temporary STT comparison: keep each Wyoming turn's audio and transcript in
 # this owner-only directory (newest VOXHELM_WYOMING_STT_RECORD_MAX turns).
 # Empty (the default) records nothing. Household speech: delete after use.

@@ -259,3 +259,30 @@ def test_recording_retains_newest_complete_turns_within_byte_budget(settings, tm
     assert [json.loads(path.read_bytes())["text"] for path in files] == ["first", "newest"]
     assert sum(path.stat().st_size for path in root.glob("[0-9]*/*")) <= 1000
     assert "Wyoming STT recording exceeds byte budget" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("nan", None),
+        ("inf", None),
+        ("-inf", None),
+        ("0.1", None),
+        ("-96.1", None),
+        ("-96", -96.0),
+        ("0", 0.0),
+        ("-19", -19.0),
+        (" ", None),
+    ],
+)
+def test_wyoming_target_dbfs_settings(monkeypatch, target, expected):
+    import runpy
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    monkeypatch.setenv("VOXHELM_WYOMING_TTS_TARGET_DBFS", target)
+    if expected is None and target.strip():
+        with pytest.raises(ImproperlyConfigured, match="VOXHELM_WYOMING_TTS_TARGET_DBFS"):
+            runpy.run_path("config/settings.py")
+    else:
+        assert runpy.run_path("config/settings.py")["VOXHELM_WYOMING_TTS_TARGET_DBFS"] == expected
