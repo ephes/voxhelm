@@ -173,6 +173,10 @@ One new backend, one routing layer, minimal surgery elsewhere:
     The independent EUR abbreviation may still become Euro. Date, time and
     ordinal patterns already have smaller fixed digit bounds. This policy is
     independent of total text length and does not change Python's digit limit.
+  - EUR amounts recognize complete dot-separated thousands groups with an
+    optional comma fraction before considering ungrouped decimals. One or two
+    decimal digits are read as cents as before. Malformed grouping preserves
+    the whole number, including date-shaped spellings before EUR.
   - Cardinal labels (`Kapitel 2.`, `Seite 4.`, etc.) emit their spoken number
     and dot directly; subsequent ordinal rules cannot match the words. No
     reserved sentinel or global restoration is used, so literal marker-looking

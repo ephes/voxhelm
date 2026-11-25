@@ -86,7 +86,6 @@ NUMBERED_UNITS = (
     (r"m3", "Kubikmeter", "Kubikmeter", None),
     (r"m", "Meter", "Meter", None),
     (r"ltr\.", "Liter", "Liter", None),
-    (r"EUR", "Euro", "Euro", None),
     (r"W", "Watt", "Watt", None),
     (r"V", "Volt", "Volt", None),
     (r"Tsd\.", "Tausend", "Tausend", None),
@@ -192,6 +191,21 @@ def _is_named_calendar_date(match: re.Match[str]) -> bool:
         MONTH_NUMBERS.get(match.group("month").casefold(), 0),
         match.group("year") or match.group("literal_year"),
     )
+
+
+# Capture the entire numeric spelling so invalid grouping cannot expose a suffix.
+QUANTITY_TOKEN = r"(?<!\w)(?<![\d.,][.,])(-?\d+(?:[.,]+\d+)*)"
+GROUPED_QUANTITY_RE = re.compile(r"-?[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?")
+DECIMAL_QUANTITY_RE = re.compile(r"-?\d+(?:[,.]\d+)?")
+EURO_AMOUNT_RE = re.compile(QUANTITY_TOKEN + r"\s*EUR\b", re.IGNORECASE)
+
+
+def _normalized_quantity(raw: str) -> str | None:
+    if not _supports_numeric_token(raw):
+        return None
+    if GROUPED_QUANTITY_RE.fullmatch(raw):
+        return raw.replace(".", "")
+    return raw if DECIMAL_QUANTITY_RE.fullmatch(raw) else None
 
 
 def _supports_numeric_token(raw: str) -> bool:
@@ -345,23 +359,20 @@ def _normalize_numbered_units(text: str) -> str:
 
 def _normalize_euro_amounts(text: str) -> str:
     def replace_euro_amount(match: re.Match[str]) -> str:
-        euros_raw = match.group(1)
-        cents_raw = match.group(2)
-        if not _supports_numeric_token(euros_raw + cents_raw):
+        raw = _normalized_quantity(match.group(1))
+        if raw is None:
             return match.group(0)
-        euros_word = _number_word_with_gender(euros_raw, None)
-        cents = int(cents_raw.ljust(2, "0")[:2])
+        euros_raw, _, cents_raw = raw.replace(".", ",").partition(",")
+        if not 1 <= len(cents_raw) <= 2:
+            return f"{_number_word_with_gender(raw, None)} Euro"
 
+        euros_word = _number_word_with_gender(euros_raw, None)
+        cents = int(cents_raw.ljust(2, "0"))
         if cents == 0:
             return f"{euros_word} Euro"
-
         return f"{euros_word} Euro {number_to_words(cents)}"
 
-    return re.sub(
-        r"(?i)(?<!\w)(-?\d+)[,.](\d{1,2})\s*EUR\b",
-        replace_euro_amount,
-        text,
-    )
+    return EURO_AMOUNT_RE.sub(replace_euro_amount, text)
 
 
 def _normalize_cardinal_label_numbers(text: str) -> str:
@@ -416,6 +427,9 @@ def normalize_german_text(text: str) -> str:
         day = int(match.group(2))
         month = int(match.group(3))
         year = match.group(4)
+        # A malformed euro amount can have the same spelling as a numeric date.
+        if EURO_AMOUNT_RE.match(match.string, match.start(2)):
+            return match.group(0)
         if not _is_calendar_date(day, month, year or match.group(5)):
             return match.group(0)
 

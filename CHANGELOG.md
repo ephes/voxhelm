@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve complete German EUR amounts with thousands grouping and leave malformed numeric spellings intact.
+
 - Return a Kokoro input error when a sentence with letters or digits produces
   no supported speech tokens (none, or only punctuation pause tokens), so
   requests cannot silently omit it or render it as a pause.

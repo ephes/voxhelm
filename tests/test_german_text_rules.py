@@ -210,3 +210,22 @@ def test_numeric_token_digit_budget_boundary() -> None:
 )
 def test_cardinal_labels_preserve_literal_marker_text(text: str, expected: str) -> None:
     assert normalize_german_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1.234,56 EUR", "eintausendzweihundertvierunddreißig Euro sechsundfünfzig"),
+        ("1.234 EUR", "eintausendzweihundertvierunddreißig Euro"),
+        ("234,56 EUR", "zweihundertvierunddreißig Euro sechsundfünfzig"),
+        ("-1.234,05 EUR", "minus eintausendzweihundertvierunddreißig Euro fünf"),
+        ("-1 EUR", "minus ein Euro"),
+        ("1.05 EUR", "ein Euro fünf"),
+        ("1.23,45 EUR", "1.23,45 Euro"),
+        ("1.2.2024 EUR", "1.2.2024 Euro"),
+        ("1.2.2024,56 EUR", "1.2.2024,56 Euro"),
+        ("1..234,56 EUR", "1..234,56 Euro"),
+    ],
+)
+def test_euros_preserve_the_complete_amount(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected

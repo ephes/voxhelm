@@ -252,6 +252,9 @@ parts combined; sign and separator excluded). Longer numbers keep their literal
 spelling, including leading zeros, without integer conversion or fractional
 digit expansion. The independent `EUR` abbreviation still expands to `Euro`.
 This limit is independent of request text length and Python's global digit limit.
+For EUR amounts, dots in complete thousands groups are grouping separators
+(`1.234,56 EUR` reads as 1,234 euros and 56 cents). Ungrouped amounts still
+accept comma or dot decimals. Malformed grouping keeps the numeric spelling.
 Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their
 sentence punctuation without reserving internal marker text; literal input such
 as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.
