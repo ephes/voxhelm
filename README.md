@@ -1910,8 +1910,11 @@ workers after changes on filesystems that do not reliably report metadata change
 Kokoro ONNX sessions and voicepack styles use the same canonical path/file metadata
 identity as Piper, with separate caches of at most eight entries each. Replacing a
 model or voicepack at the same path reloads it on the next synthesis; unchanged files
-reuse the loaded objects. Cache loading/publication is serialized separately from
-inference, and NumPy voicepack archives close after loading, including on errors.
+reuse the loaded objects. Each request captures both identities before acquiring
+either object and checks the pair again under the inference lock. A detected
+change fails synthesis with a backend-unavailable error. A retry uses the current
+identities. Cache loading/publication is serialized separately from inference,
+and NumPy voicepack archives close after loading, including on errors.
 Publish complete model/voicepack pairs while workers are stopped; restart workers
 when filesystem metadata changes cannot be relied upon.
 

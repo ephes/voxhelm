@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from synthesis import kokoro
-from synthesis.service import SynthesizeParams
+from synthesis.service import BackendUnavailableError, SynthesizeParams
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +59,47 @@ def test_synthesis_reloads_replaced_artifacts_and_reuses_unchanged(tmp_path, mon
     assert loaded == [b"model-a", b"model-b-longer"]
     assert styles == [1.0, 1.0, 2.0]
     assert len(kokoro._SESSION_CACHE) == len(kokoro._VOICEPACK_CACHE) == 1
+
+
+def test_synthesis_rejects_pair_replaced_between_artifact_loads(tmp_path, monkeypatch):
+    instance, model, pack = backend(tmp_path)
+    inferred = []
+
+    class Session:
+        def __init__(self, path, **kwargs):
+            self.model = Path(path).read_bytes()
+
+        def run(self, _, inputs):
+            inferred.append((self.model, float(inputs["style"][0, 0])))
+            return [np.zeros(1, dtype="float32")]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(InferenceSession=Session))
+    monkeypatch.setattr(instance, "_phonemize_to_tokens", lambda *a: [1])
+    params = SynthesizeParams(request_model="kokoro", voice="synthetic", language="en", speed=1.0)
+    # Warm both caches so the replacement can happen after a real cache hit.
+    instance.synthesize("Synthetic.", params).audio_path.unlink()
+    inferred.clear()
+
+    original_session = instance._session
+
+    def session_then_replace(*args, **kwargs):
+        session = original_session(*args, **kwargs)
+        new_model = tmp_path / "replacement.onnx"
+        new_model.write_bytes(b"model-b")
+        new_model.replace(model)
+        new_pack = tmp_path / "replacement.npz"
+        np.savez(new_pack, synthetic=np.full((512, 1, 256), 2, dtype="float32"))
+        new_pack.replace(pack)
+        return session
+
+    with monkeypatch.context() as patch:
+        patch.setattr(instance, "_session", session_then_replace)
+        with pytest.raises(BackendUnavailableError, match="artifacts changed.*retry"):
+            instance.synthesize("Synthetic.", params).audio_path.unlink()
+    assert inferred == []
+
+    instance.synthesize("Synthetic.", params).audio_path.unlink()
+    assert inferred == [(b"model-b", 2.0)]
 
 
 @pytest.mark.parametrize("kind", ["session", "voicepack"])

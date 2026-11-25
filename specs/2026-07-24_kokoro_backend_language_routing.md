@@ -134,8 +134,11 @@ One new backend, one routing layer, minimal surgery elsewhere:
   match NumPy’s exact-filename/implicit-suffix resolution; duplicate selected
   members are refused. Invalid packs fail before
   caching. Model and pack identities are rechecked after loading; changes fail
-  with backend-unavailable and are never cached. Piper similarly rechecks both
-  model and config before publishing a loaded voice.
+  with backend-unavailable and are never cached. Kokoro binds both objects to
+  the identities captured at the start of artifact acquisition and rechecks
+  the pair under the inference lock. A detected change fails synthesis before
+  inference and a retry captures the current identities. Piper similarly
+  rechecks both model and config before publishing a loaded voice.
   Inference audio must be a nonempty finite mono vector or a single mono batch.
   **Token limit & chunking (hard requirement):** Kokoro models accept ~510
   phoneme tokens per call, and the voicepack is length-indexed — the style

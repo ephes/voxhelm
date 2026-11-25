@@ -29,7 +29,7 @@ from tests.test_kokoro import FakeSession, _params, _stub_backend
 @pytest.mark.django_db
 def test_invalid_inference_never_publishes(monkeypatch, tmp_path, client, settings, output, mode):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     calls = []
 
     def run(*args):
@@ -78,10 +78,10 @@ def test_invalid_inference_never_publishes(monkeypatch, tmp_path, client, settin
 @pytest.mark.parametrize(
     "samples", [np.array([-2, -0.5, 0, 0.5, 2]), np.array([[-2, -0.5, 0, 0.5, 2]])]
 )
-def test_supported_audio_keeps_exact_pcm(monkeypatch, samples):
+def test_supported_audio_keeps_exact_pcm(monkeypatch, tmp_path, samples):
     import wave
 
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     monkeypatch.setattr(session, "run", lambda *a: [samples])
     result = backend.synthesize("I", _params())
     try:
@@ -127,7 +127,7 @@ def test_bad_pack_is_not_cached_and_replacement_recovers(tmp_path, monkeypatch, 
         replacement.replace(pack)
         assert backend._voicepack(pack, "synthetic").shape == (3, 1, 256)
         assert len(kokoro._VOICEPACK_CACHE) == 1
-        monkeypatch.setattr(backend, "_session", lambda *a: FakeSession())
+        monkeypatch.setattr(backend, "_session", lambda *a, **kw: FakeSession())
         monkeypatch.setattr(backend, "_phonemize_to_tokens", lambda *a: [43])
         result = backend.synthesize("I", _params())
         assert result.audio_path.stat().st_size > 44

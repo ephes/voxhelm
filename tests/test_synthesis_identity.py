@@ -68,7 +68,7 @@ def test_ambiguous_alias_refuses_but_exact_keys_are_stable(tmp_path, reverse, ki
 def test_cleanup_refusal_preserves_primary_failure(tmp_path, monkeypatch, caplog, kind, failure):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     if kind == "kokoro":
-        backend, session = _stub_backend(monkeypatch)
+        backend, session = _stub_backend(monkeypatch, tmp_path)
 
         def run(*args):
             raise failure
@@ -130,7 +130,7 @@ def test_primary_input_error_survives_denied_cleanup_at_public_boundaries(
     from tests.test_jobs import build_synthesis_payload, configure_task_backend
 
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
 
     def fail(*args):
         raise service.SynthesisInputError("Synthetic input refused.")

@@ -283,11 +283,17 @@ class FakeSession:
         return [np.full(token_count * _SAMPLES_PER_TOKEN, 0.5, dtype=np.float32)]
 
 
-def _stub_backend(monkeypatch, language: str = "en-us", *, pack: np.ndarray | None = None):
+def _stub_backend(
+    monkeypatch, tmp_path, language: str = "en-us", *, pack: np.ndarray | None = None
+):
+    model_path = tmp_path / "test.onnx"
+    voicepack_path = tmp_path / "test.npz"
+    model_path.touch()
+    voicepack_path.touch()
     config = KokoroModelConfig(
         voice_key="kokoro-test",
-        model_path=Path("/models/test.onnx"),
-        voicepack_path=Path("/models/test.npz"),
+        model_path=model_path,
+        voicepack_path=voicepack_path,
         voicepack_key="test",
         phoneme_language=language,
     )
@@ -296,8 +302,8 @@ def _stub_backend(monkeypatch, language: str = "en-us", *, pack: np.ndarray | No
     if pack is None:
         pack = np.zeros((KOKORO_MAX_TOKENS + 2, 1, 256), dtype=np.float32)
     voicepack = pack
-    monkeypatch.setattr(backend, "_session", lambda _path: session)
-    monkeypatch.setattr(backend, "_voicepack", lambda _path, _key: voicepack)
+    monkeypatch.setattr(backend, "_session", lambda _path, **kwargs: session)
+    monkeypatch.setattr(backend, "_voicepack", lambda _path, _key, **kwargs: voicepack)
     # Token count per sentence == its stripped character count (espeak bypassed).
     monkeypatch.setattr(
         backend,
@@ -320,8 +326,8 @@ def _read_frames(path: Path) -> int:
         return reader.getnframes()
 
 
-def test_synthesize_single_chunk_one_call(monkeypatch) -> None:
-    backend, session = _stub_backend(monkeypatch)
+def test_synthesize_single_chunk_one_call(monkeypatch, tmp_path) -> None:
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     text = "a" * 100 + "."  # one 101-char sentence, under budget
     result = backend.synthesize(text, _params())
     assert len(session.calls) == 1
@@ -338,7 +344,7 @@ def test_synthesize_wav_write_failure_removes_temp_file(monkeypatch, tmp_path: P
     temp_dir = tmp_path / "tmp"
     temp_dir.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
-    backend, _session = _stub_backend(monkeypatch)
+    backend, _session = _stub_backend(monkeypatch, tmp_path)
     real_open = wave.open
 
     class _FailingWriter:
@@ -371,7 +377,7 @@ def test_synthesize_success_returns_temp_file_for_caller(monkeypatch, tmp_path: 
     temp_dir = tmp_path / "tmp"
     temp_dir.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
-    backend, _session = _stub_backend(monkeypatch)
+    backend, _session = _stub_backend(monkeypatch, tmp_path)
 
     result = backend.synthesize("Hello.", _params())
 
@@ -380,10 +386,10 @@ def test_synthesize_success_returns_temp_file_for_caller(monkeypatch, tmp_path: 
     result.audio_path.unlink()
 
 
-def test_synthesize_single_char_input_produces_nonempty_audio(monkeypatch) -> None:
+def test_synthesize_single_char_input_produces_nonempty_audio(monkeypatch, tmp_path) -> None:
     # "I" is a valid one-character utterance; it must synthesize real audio
     # rather than being dropped into a zero-frame WAV.
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     result = backend.synthesize("I", _params())
     assert len(session.calls) == 1
     frames = _read_frames(result.audio_path)
@@ -414,8 +420,8 @@ def test_phonemize_runs_under_phonemizer_lock(monkeypatch) -> None:
     assert not kokoro_module._PHONEMIZER_LOCK.locked()
 
 
-def test_synthesize_two_sentences_cross_budget_concatenates(monkeypatch) -> None:
-    backend, session = _stub_backend(monkeypatch)
+def test_synthesize_two_sentences_cross_budget_concatenates(monkeypatch, tmp_path) -> None:
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     text = "a" * 300 + ". " + "b" * 300 + "."  # two ~301-token sentences
     result = backend.synthesize(text, _params())
     assert len(session.calls) == 2
@@ -426,8 +432,8 @@ def test_synthesize_two_sentences_cross_budget_concatenates(monkeypatch) -> None
     result.audio_path.unlink()
 
 
-def test_synthesize_oversized_sentence_hard_splits(monkeypatch) -> None:
-    backend, session = _stub_backend(monkeypatch)
+def test_synthesize_oversized_sentence_hard_splits(monkeypatch, tmp_path) -> None:
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     text = "a" * 700 + "."  # single 701-token sentence
     result = backend.synthesize(text, _params())
     assert len(session.calls) == 2
@@ -437,29 +443,29 @@ def test_synthesize_oversized_sentence_hard_splits(monkeypatch) -> None:
     result.audio_path.unlink()
 
 
-def test_synthesize_selects_style_by_token_count_with_clamp(monkeypatch) -> None:
+def test_synthesize_selects_style_by_token_count_with_clamp(monkeypatch, tmp_path) -> None:
     pack = np.stack([np.full((1, 256), i, dtype=np.float32) for i in range(KOKORO_MAX_TOKENS + 2)])
-    backend, session = _stub_backend(monkeypatch, pack=pack)
+    backend, session = _stub_backend(monkeypatch, tmp_path, pack=pack)
     result = backend.synthesize("a" * 40 + ".", _params())  # 41 tokens
     style = np.asarray(session.calls[0]["style"])
     assert float(style.ravel()[0]) == 41.0
     result.audio_path.unlink()
 
 
-def test_synthesize_applies_german_rules_only_for_german(monkeypatch) -> None:
+def test_synthesize_applies_german_rules_only_for_german(monkeypatch, tmp_path) -> None:
     seen: list[str] = []
 
     def capture(text: str, lang: str) -> list[int]:
         seen.append(text)
         return [KOKORO_VOCAB["a"]] * max(len(text.strip()), 1)
 
-    backend, _ = _stub_backend(monkeypatch, language="de")
+    backend, _ = _stub_backend(monkeypatch, tmp_path, language="de")
     monkeypatch.setattr(backend, "_phonemize_to_tokens", capture)
     backend.synthesize("Das kostet 5 EUR heute.", _params()).audio_path.unlink()
     assert any("fünf Euro" in text for text in seen)
 
     seen.clear()
-    backend_en, _ = _stub_backend(monkeypatch, language="en-us")
+    backend_en, _ = _stub_backend(monkeypatch, tmp_path, language="en-us")
     monkeypatch.setattr(backend_en, "_phonemize_to_tokens", capture)
     backend_en.synthesize("Das kostet 5 EUR heute.", _params()).audio_path.unlink()
     assert any("5 EUR" in text for text in seen)
@@ -467,8 +473,10 @@ def test_synthesize_applies_german_rules_only_for_german(monkeypatch) -> None:
 
 @pytest.mark.parametrize("suffix", ["kg", "EUR", "°C", "°"])
 @pytest.mark.parametrize("raw", ["9" * 5000, "1," + "9" * 5000])
-def test_synthesize_german_oversized_numbers_reach_phonemizer_literal(monkeypatch, raw, suffix):
-    backend, session = _stub_backend(monkeypatch, language="de")
+def test_synthesize_german_oversized_numbers_reach_phonemizer_literal(
+    monkeypatch, tmp_path, raw, suffix
+):
+    backend, session = _stub_backend(monkeypatch, tmp_path, language="de")
     seen = []
 
     def capture(text, language):
@@ -484,8 +492,8 @@ def test_synthesize_german_oversized_numbers_reach_phonemizer_literal(monkeypatc
         result.audio_path.unlink()
 
 
-def test_synthesize_german_ordinary_numeric_pronunciation(monkeypatch):
-    backend, _ = _stub_backend(monkeypatch, language="de")
+def test_synthesize_german_ordinary_numeric_pronunciation(monkeypatch, tmp_path):
+    backend, _ = _stub_backend(monkeypatch, tmp_path, language="de")
     seen = []
 
     def capture(text, language):
@@ -503,8 +511,8 @@ def test_synthesize_german_ordinary_numeric_pronunciation(monkeypatch):
         result.audio_path.unlink()
 
 
-def test_synthesize_unknown_voice_raises(monkeypatch) -> None:
-    backend, _ = _stub_backend(monkeypatch)
+def test_synthesize_unknown_voice_raises(monkeypatch, tmp_path) -> None:
+    backend, _ = _stub_backend(monkeypatch, tmp_path)
     params = SynthesizeParams(
         request_model="auto", voice="kokoro-missing", language=None, speed=1.0
     )
@@ -551,8 +559,8 @@ def test_resolve_model_default_no_models_raises() -> None:
         KokoroBackend(models={})._resolve_model(None)
 
 
-def test_synthesize_without_voice_uses_default(monkeypatch) -> None:
-    backend, session = _stub_backend(monkeypatch)
+def test_synthesize_without_voice_uses_default(monkeypatch, tmp_path) -> None:
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     params = SynthesizeParams(request_model="auto", voice=None, language=None, speed=1.0)
     result = backend.synthesize("a" * 20 + ".", params)
     assert result.voice_name == "kokoro-test"

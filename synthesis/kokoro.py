@@ -284,11 +284,18 @@ class KokoroBackend:
                 "Kokoro found no supported speech tokens. Try text in the voice's language."
             )
 
-        session = self._session(config.model_path)
-        voicepack = self._voicepack(config.voicepack_path, config.voicepack_key)
+        artifact_paths = (Path(config.model_path), Path(config.voicepack_path))
+        model_identity, voicepack_identity = (
+            piper_artifact_identity(path) for path in artifact_paths
+        )
+        session = self._session(artifact_paths[0], identity=model_identity)
+        voicepack = self._voicepack(
+            artifact_paths[1], config.voicepack_key, identity=voicepack_identity
+        )
 
         speed = float(min(_MAX_SPEED, max(_MIN_SPEED, params.speed)))
         with _KOKORO_LOCK:
+            require_artifact_generation(artifact_paths, (model_identity, voicepack_identity))
             audio_path, frames = _write_wav(
                 _run_inference(session, chunk, voicepack, speed) for chunk in chunks
             )
@@ -366,9 +373,10 @@ class KokoroBackend:
             ) from exc
         _ESPEAK_READY = True
 
-    def _session(self, model_path: str | Path) -> Any:
+    def _session(self, model_path: str | Path, *, identity: ArtifactIdentity | None = None) -> Any:
         with _CACHE_LOCK:
-            identity = piper_artifact_identity(Path(model_path))
+            if identity is None:
+                identity = piper_artifact_identity(Path(model_path))
             cached = _SESSION_CACHE.get(identity)
             if cached is not None:
                 _SESSION_CACHE.move_to_end(identity)
@@ -387,10 +395,17 @@ class KokoroBackend:
                 _SESSION_CACHE.popitem(last=False)
             return session
 
-    def _voicepack(self, voicepack_path: str | Path, voicepack_key: str) -> Any:
+    def _voicepack(
+        self,
+        voicepack_path: str | Path,
+        voicepack_key: str,
+        *,
+        identity: ArtifactIdentity | None = None,
+    ) -> Any:
         np = _require_numpy()
         with _CACHE_LOCK:
-            identity = piper_artifact_identity(Path(voicepack_path))
+            if identity is None:
+                identity = piper_artifact_identity(Path(voicepack_path))
             cache_key = (identity, voicepack_key)
             cached = _VOICEPACK_CACHE.get(cache_key)
             if cached is not None:

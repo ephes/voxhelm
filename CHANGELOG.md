@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject Kokoro synthesis when the model or voicepack changes while the request
+  binds the pair, before running inference.
+
 - Optional recording of Wyoming STT turns for model comparisons:
   `VOXHELM_WYOMING_STT_RECORD_DIR` (empty = off, the default) keeps the
   newest `VOXHELM_WYOMING_STT_RECORD_MAX` (40) turns in its own namespace as 16 kHz WAV plus a

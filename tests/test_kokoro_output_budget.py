@@ -21,7 +21,7 @@ def test_nonblank_text_without_supported_tokens_fails(
     monkeypatch, tmp_path, client, settings, mode, phonemes
 ):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     monkeypatch.setattr(backend, "_ensure_espeak", lambda: None)
     monkeypatch.setattr(
         backend, "_phonemize_to_tokens", kokoro.KokoroBackend._phonemize_to_tokens.__get__(backend)
@@ -66,8 +66,8 @@ def test_nonblank_text_without_supported_tokens_fails(
 
 
 @pytest.mark.parametrize("text", ["I", ".", "I."])
-def test_one_character_and_punctuation_token_policy(monkeypatch, text):
-    backend, _ = _stub_backend(monkeypatch)
+def test_one_character_and_punctuation_token_policy(monkeypatch, tmp_path, text):
+    backend, _ = _stub_backend(monkeypatch, tmp_path)
     result = backend.synthesize(text, _params())
     try:
         with wave.open(str(result.audio_path), "rb") as reader:
@@ -76,8 +76,8 @@ def test_one_character_and_punctuation_token_policy(monkeypatch, text):
         result.audio_path.unlink()
 
 
-def test_many_chunks_keep_bounded_live_audio_and_exact_frames(monkeypatch):
-    backend, session = _stub_backend(monkeypatch)
+def test_many_chunks_keep_bounded_live_audio_and_exact_frames(monkeypatch, tmp_path):
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     refs, live = [], []
 
     def run(*args):
@@ -106,7 +106,7 @@ def test_many_chunks_keep_bounded_live_audio_and_exact_frames(monkeypatch):
 def test_late_failure_or_budget_overflow_removes_partial_wav(monkeypatch, tmp_path, failure):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(kokoro, "KOKORO_MAX_OUTPUT_FRAMES", 150, raising=False)
-    backend, session = _stub_backend(monkeypatch)
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     calls = []
     marker = asyncio.CancelledError() if failure == "cancel" else RuntimeError("late inference")
 
@@ -128,8 +128,8 @@ def test_late_failure_or_budget_overflow_removes_partial_wav(monkeypatch, tmp_pa
     assert not list(tmp_path.glob("*.wav"))
 
 
-def test_output_at_exact_frame_budget_succeeds(monkeypatch):
-    backend, session = _stub_backend(monkeypatch)
+def test_output_at_exact_frame_budget_succeeds(monkeypatch, tmp_path):
+    backend, session = _stub_backend(monkeypatch, tmp_path)
     monkeypatch.setattr(kokoro, "KOKORO_MAX_OUTPUT_FRAMES", 100, raising=False)
     monkeypatch.setattr(session, "run", lambda *a: [np.zeros(100, dtype="float32")])
     result = backend.synthesize("I", _params())
