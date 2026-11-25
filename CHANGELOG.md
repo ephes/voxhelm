@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Choose singular or plural for German units using the exact decimal quantity.
+
 - Preserve complete German EUR amounts with thousands grouping and leave malformed numeric spellings intact.
 
 - Return a Kokoro input error when a sentence with letters or digits produces

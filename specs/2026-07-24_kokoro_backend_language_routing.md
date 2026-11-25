@@ -177,6 +177,8 @@ One new backend, one routing layer, minimal surgery elsewhere:
     optional comma fraction before considering ungrouped decimals. One or two
     decimal digits are read as cents as before. Malformed grouping preserves
     the whole number, including date-shaped spellings before EUR.
+  - Unit inflection uses the exact magnitude of the admitted decimal quantity.
+    Signed one and decimal one keep the singular form.
   - Cardinal labels (`Kapitel 2.`, `Seite 4.`, etc.) emit their spoken number
     and dot directly; subsequent ordinal rules cannot match the words. No
     reserved sentinel or global restoration is used, so literal marker-looking

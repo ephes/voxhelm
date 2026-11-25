@@ -229,3 +229,17 @@ def test_cardinal_labels_preserve_literal_marker_text(text: str, expected: str) 
 )
 def test_euros_preserve_the_complete_amount(text: str, expected: str) -> None:
     assert normalize_german_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", "eine Stunde"),
+        ("-1", "minus eine Stunde"),
+        ("1,00", "eins komma null null Stunde"),
+        ("-1.00", "minus eins komma null null Stunde"),
+        (f"1,{'0' * 18}1", f"eins komma {'null ' * 18}eins Stunden"),
+    ],
+)
+def test_unit_inflection_uses_exact_quantity(raw: str, expected: str) -> None:
+    assert normalize_german_text(f"{raw} Std.") == expected

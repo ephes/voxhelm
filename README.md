@@ -255,6 +255,8 @@ This limit is independent of request text length and Python's global digit limit
 For EUR amounts, dots in complete thousands groups are grouping separators
 (`1.234,56 EUR` reads as 1,234 euros and 56 cents). Ungrouped amounts still
 accept comma or dot decimals. Malformed grouping keeps the numeric spelling.
+Singular unit forms apply only to a quantity of exactly one in magnitude,
+including signed one and one written with decimal zeros.
 Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their
 sentence punctuation without reserving internal marker text; literal input such
 as `__GODE_CARDINAL_DOT__` and its surrounding whitespace survives unchanged.

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from decimal import Decimal
 
 ABBREVIATIONS = (
     (r"\bLfd\.\s*Nr\.", "laufende Nummer"),
@@ -301,13 +302,6 @@ def decimal_to_words(raw_value: str) -> str:
     return f"{integer_word} komma {decimal_words}".strip()
 
 
-def _number_value(raw: str) -> float | None:
-    try:
-        return float(raw.replace(",", "."))
-    except ValueError:
-        return None
-
-
 def _number_word_with_gender(raw: str, gender: str | None) -> str:
     prefix = "minus " if raw.startswith("-") else ""
     unsigned = raw.lstrip("-")
@@ -321,8 +315,7 @@ def _number_word_with_gender(raw: str, gender: str | None) -> str:
 
 
 def _unit_form(raw: str, singular: str, plural: str) -> str:
-    value = _number_value(raw)
-    if value is not None and abs(value) == 1:
+    if Decimal(raw.replace(",", ".")).copy_abs() == 1:
         return singular
     return plural
 
