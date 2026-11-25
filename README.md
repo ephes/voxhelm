@@ -548,6 +548,8 @@ turns. Replacing `config.json` or `model.safetensors` triggers a reload under
 the model lock. A generation that changes during loading is refused. If the
 language retry is necessary and mlx-whisper is unavailable, Wyoming serves the
 first Parakeet result. Logs identify the pass selected after a retry attempt.
+Startup warm-up attempts Parakeet and its mlx-whisper fallback independently,
+once each, and logs the outcome for each backend. Warm-up transcripts are discarded.
 
 Wyoming TTS measures RMS and peak in bounded blocks on a worker thread. One gain
 applies across the streamed reply, limited to ±8 dB with peak protection near

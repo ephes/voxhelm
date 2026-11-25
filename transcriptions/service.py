@@ -101,6 +101,7 @@ class TranscribeParams:
     # instead of resolving one from the model name. Only the Wyoming sidecar
     # sets it, for ``parakeet-mlx``.
     backend: str | None = None
+    allow_backend_fallback: bool = True
 
 
 @dataclass(frozen=True)
@@ -1371,7 +1372,10 @@ def transcribe_audio(audio_path: Path, params: TranscribeParams) -> Transcriptio
     with admit_local_inference(params.scheduler_lane, cancel_event=params.cancel_event):
         _raise_if_cancelled(params)
         unavailable_errors: list[str] = []
-        for invocation in get_backend_services_for_params(params):
+        invocations = get_backend_services_for_params(params)
+        if not params.allow_backend_fallback:
+            invocations = invocations[:1]
+        for invocation in invocations:
             _raise_if_cancelled(params)
             try:
                 result = invocation.service.transcribe(audio_path, params)

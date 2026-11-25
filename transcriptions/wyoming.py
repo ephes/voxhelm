@@ -947,6 +947,7 @@ def transcribe_pcm(
     prompt: str | None,
     language: str | None,
     backend: str | None = None,
+    warm_up_only: bool = False,
 ):
     """Transcribe 16 kHz mono 16-bit PCM on the interactive lane."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
@@ -966,10 +967,12 @@ def transcribe_pcm(
                 language=language,
                 scheduler_lane=LANE_INTERACTIVE,
                 backend=backend,
+                allow_backend_fallback=not warm_up_only,
             ),
         )
         if (
-            backend == PARAKEET_INPROCESS_BACKEND_NAME
+            not warm_up_only
+            and backend == PARAKEET_INPROCESS_BACKEND_NAME
             and result.backend_name == PARAKEET_INPROCESS_BACKEND_NAME
             and needs_language_retry(result.text, language)
         ):
@@ -1210,32 +1213,34 @@ def explicit_backend(config: WyomingSttConfig) -> str | None:
 
 def warm_up_stt(config: WyomingSttConfig) -> None:
     """Load the STT model with one second of silence; the transcript is discarded."""
-    started = time.monotonic()
-    try:
-        transcribe_pcm(
-            bytes(_CONVERTED_BYTES_PER_SECOND),
-            request_model=config.model,
-            prompt=config.prompt,
-            language=config.language or config.languages[0],
-            backend=explicit_backend(config),
-        )
-        if explicit_backend(config) == PARAKEET_INPROCESS_BACKEND_NAME:
-            # mlx-whisper is the language retry and fallback; load it too.
+    primary_backend = explicit_backend(config)
+    targets = [(primary_backend, config.model)]
+    if primary_backend == PARAKEET_INPROCESS_BACKEND_NAME:
+        targets.append(("mlx", settings.VOXHELM_MLX_MODEL))
+
+    for backend, model in targets:
+        started = time.monotonic()
+        try:
             transcribe_pcm(
                 bytes(_CONVERTED_BYTES_PER_SECOND),
-                request_model=settings.VOXHELM_MLX_MODEL,
+                request_model=model,
                 prompt=config.prompt,
-                language=config.language or config.languages[0],
-                backend="mlx",
+                language=config.language or next(iter(config.languages), None),
+                backend=backend,
+                warm_up_only=True,
             )
-    except Exception:
-        _LOGGER.exception("Wyoming STT warm-up failed model=%s", config.model)
-        return
-    _LOGGER.info(
-        "Wyoming STT warm-up finished model=%s seconds=%.1f",
-        config.model,
-        time.monotonic() - started,
-    )
+        except Exception:
+            with suppress(Exception):
+                _LOGGER.exception(
+                    "Wyoming STT warm-up failed backend=%s", backend or config.backend
+                )
+        else:
+            with suppress(Exception):
+                _LOGGER.info(
+                    "Wyoming STT warm-up finished backend=%s seconds=%.1f",
+                    backend or config.backend,
+                    time.monotonic() - started,
+                )
 
 
 async def run_wyoming_stt_server(*, config: WyomingSttConfig | None = None) -> None:

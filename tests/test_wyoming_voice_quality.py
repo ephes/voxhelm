@@ -329,3 +329,46 @@ def test_parakeet_retry_only_recovers_backend_unavailability(
         error_type = InferenceCancelled if failure == "cancelled" else RuntimeError
         with pytest.raises(error_type, match="synthetic"):
             run()
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_parakeet_warm_up_attempts_fallback_once_after_primary_failure(
+    monkeypatch, settings, caplog, unavailable
+):
+    import logging
+
+    from transcriptions.service import (
+        BackendUnavailableError,
+        MlxWhisperBackend,
+        ParakeetInProcessBackend,
+    )
+
+    settings.VOXHELM_LANE_SCHEDULER_ENABLED = False
+    calls: list[str] = []
+
+    def primary(*args):
+        calls.append("parakeet-mlx")
+        error = BackendUnavailableError if unavailable else RuntimeError
+        raise error("synthetic model load failure")
+
+    def fallback(*args):
+        calls.append("mlx")
+        return TranscriptionResult(text="", language=None, segments=[], backend_name="mlx-whisper")
+
+    monkeypatch.setattr(ParakeetInProcessBackend, "transcribe", primary)
+    monkeypatch.setattr(MlxWhisperBackend, "transcribe", fallback)
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="parakeet-mlx",
+        model="m",
+        language="de",
+        languages=("de",),
+        prompt=None,
+    )
+    with caplog.at_level(logging.INFO, logger=wyoming_module.__name__):
+        warm_up_stt(config)
+
+    assert calls == ["parakeet-mlx", "mlx"]
+    assert "warm-up failed backend=parakeet-mlx" in caplog.text
+    assert "warm-up finished backend=mlx" in caplog.text
