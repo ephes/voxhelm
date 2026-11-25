@@ -168,6 +168,51 @@ def test_parakeet_warm_up_also_loads_whisper(monkeypatch, settings) -> None:
     assert seen == ["parakeet-mlx", "mlx"]
 
 
+def test_automatic_backend_warm_up_keeps_configured_fallback(monkeypatch) -> None:
+    seen: list[TranscribeParams] = []
+
+    def fake_transcribe(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        seen.append(params)
+        return TranscriptionResult(text="", language="de", segments=[], backend_name="x")
+
+    monkeypatch.setattr(wyoming_module, "transcribe_audio", fake_transcribe)
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="whispercpp",
+        model="ggml-large-v3.bin",
+        language="de",
+        languages=("de",),
+        prompt=None,
+    )
+    warm_up_stt(config)
+    assert [(params.backend, params.allow_backend_fallback) for params in seen] == [(None, True)]
+
+
+def test_parakeet_warm_up_targets_each_backend_without_fallback(monkeypatch, settings) -> None:
+    seen: list[TranscribeParams] = []
+
+    def fake_transcribe(audio_path: Path, params: TranscribeParams) -> TranscriptionResult:
+        seen.append(params)
+        return TranscriptionResult(text="", language="de", segments=[], backend_name="x")
+
+    monkeypatch.setattr(wyoming_module, "transcribe_audio", fake_transcribe)
+    config = WyomingSttConfig(
+        host="127.0.0.1",
+        port=10300,
+        backend="parakeet-mlx",
+        model="parakeet-tdt-0.6b-v3",
+        language="de",
+        languages=("de",),
+        prompt=None,
+    )
+    warm_up_stt(config)
+    assert [(params.backend, params.allow_backend_fallback) for params in seen] == [
+        ("parakeet-mlx", False),
+        ("mlx", False),
+    ]
+
+
 def test_record_voice_turn_is_off_by_default(settings, tmp_path) -> None:
     settings.VOXHELM_WYOMING_STT_RECORD_DIR = ""
     wyoming_module.record_voice_turn(bytes(320), text="x", backend="b", language="de")

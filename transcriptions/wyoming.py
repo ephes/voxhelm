@@ -968,7 +968,9 @@ def transcribe_pcm(
                 language=language,
                 scheduler_lane=LANE_INTERACTIVE,
                 backend=backend,
-                allow_backend_fallback=not warm_up_only,
+                # Warm-up targets an explicit backend once each; an automatic
+                # backend keeps its configured fallback so that one gets warm.
+                allow_backend_fallback=not (warm_up_only and backend is not None),
                 cancel_event=cancel_event,
             ),
         )
