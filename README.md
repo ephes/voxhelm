@@ -543,6 +543,10 @@ export VOXHELM_BOOTSTRAP_OPERATOR_EMAIL=""
 export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 ```
 
+The Wyoming `parakeet-mlx` backend keeps the installed model resident across
+turns. Replacing `config.json` or `model.safetensors` triggers a reload under
+the model lock. A generation that changes during loading is refused.
+
 Wyoming TTS measures RMS and peak in bounded blocks on a worker thread. One gain
 applies across the streamed reply, limited to ±8 dB with peak protection near
 −1 dBFS. An empty target skips measurement and streams the original PCM.

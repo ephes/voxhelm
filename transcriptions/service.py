@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from stat import S_ISREG
 from threading import Lock
 from time import monotonic
 from typing import Any, Protocol, cast
@@ -33,7 +34,7 @@ from transcriptions.coverage import (
     wav_duration_seconds,
 )
 from transcriptions.json_input import decode_json_object
-from transcriptions.native_output import read_native_json
+from transcriptions.native_output import file_generation, read_native_json
 from transcriptions.owned_process import (
     OwnedProcessMessages,
     process_output_directory,
@@ -637,7 +638,19 @@ def _finite_seconds(value: object) -> float | None:
 
 
 _PARAKEET_INPROCESS_LOCK = threading.Lock()
-_PARAKEET_INPROCESS_MODELS: dict[str, Any] = {}
+type _ParakeetGeneration = tuple[Path, tuple[tuple[int, ...], ...]]
+_PARAKEET_INPROCESS_MODELS: dict[Path, tuple[_ParakeetGeneration, Any]] = {}
+
+
+def _parakeet_installed_generation(configured: Path) -> _ParakeetGeneration:
+    directory = configured.resolve()
+    try:
+        files = [(directory / name).stat() for name in PARAKEET_MODEL_FILES]
+    except OSError as exc:
+        raise BackendUnavailableError("Parakeet model files are unavailable.") from exc
+    if not all(S_ISREG(metadata.st_mode) for metadata in files):
+        raise BackendUnavailableError("Parakeet model files must be regular files.")
+    return directory, tuple(map(file_generation, files))
 
 
 class ParakeetInProcessBackend:
@@ -664,16 +677,21 @@ class ParakeetInProcessBackend:
             ) from exc
         if not self.model_dir:
             raise BackendUnavailableError("VOXHELM_PARAKEET_MODEL_DIR is not set.")
-        model_dir = Path(self.model_dir).expanduser().resolve()
-        if not (model_dir / "config.json").is_file():
-            raise BackendUnavailableError(f"Parakeet model not found in '{model_dir}'.")
-
+        configured = Path(self.model_dir).expanduser().absolute()
         with _PARAKEET_INPROCESS_LOCK:
             _raise_if_cancelled(params)
-            model = _PARAKEET_INPROCESS_MODELS.get(str(model_dir))
-            if model is None:
-                model = from_pretrained(str(model_dir))
-                _PARAKEET_INPROCESS_MODELS[str(model_dir)] = model
+            generation = _parakeet_installed_generation(configured)
+            resident = _PARAKEET_INPROCESS_MODELS.get(configured)
+            if resident is None or resident[0] != generation:
+                del resident
+                _PARAKEET_INPROCESS_MODELS.pop(configured, None)
+                model = from_pretrained(str(generation[0]))
+                if _parakeet_installed_generation(configured) != generation:
+                    raise BackendUnavailableError("Parakeet model changed while loading.")
+                _PARAKEET_INPROCESS_MODELS[configured] = (generation, model)
+            else:
+                model = resident[1]
+            _raise_if_cancelled(params)
             result = model.transcribe(str(audio_path))
         payload = {
             "text": result.text,

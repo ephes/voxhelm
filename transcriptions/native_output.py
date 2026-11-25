@@ -6,7 +6,8 @@ from pathlib import Path
 from stat import S_ISREG
 
 
-def _generation(metadata: os.stat_result) -> tuple[int, ...]:
+def file_generation(metadata: os.stat_result) -> tuple[int, ...]:
+    """Identify an installed or opened file generation by metadata."""
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -51,13 +52,13 @@ def read_native_json(path: Path, *, limit: int) -> bytes:
             raise RuntimeError(
                 f"whisper.cpp JSON output exceeded the {limit // (1024 * 1024)} MiB window limit."
             )
-        generation = _generation(metadata)
-        if _generation(after) != generation or len(raw) != metadata.st_size:
+        generation = file_generation(metadata)
+        if file_generation(after) != generation or len(raw) != metadata.st_size:
             raise RuntimeError("whisper.cpp JSON output changed while being read.")
         try:
             named = path.stat(follow_symlinks=False)
         except OSError as exc:
             raise RuntimeError("whisper.cpp JSON output changed while being read.") from exc
-        if not S_ISREG(named.st_mode) or _generation(named) != generation:
+        if not S_ISREG(named.st_mode) or file_generation(named) != generation:
             raise RuntimeError("whisper.cpp JSON output changed while being read.")
     return raw

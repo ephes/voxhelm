@@ -82,6 +82,7 @@ def fake_parakeet(monkeypatch, tmp_path: Path) -> dict[str, Any]:
     model_dir = tmp_path / "parakeet"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{}")
+    (model_dir / "model.safetensors").write_bytes(b"synthetic weights")
     return {"loads": loads, "model": model, "dir": model_dir}
 
 
@@ -177,3 +178,31 @@ def test_wyoming_names_only_the_inprocess_parakeet_backend() -> None:
     assert explicit_backend(make_config("parakeet-mlx")) == "parakeet-mlx"
     assert explicit_backend(make_config("mlx")) is None
     assert explicit_backend(make_config("whispercpp")) is None
+
+
+def test_resident_parakeet_reloads_replaced_weights_at_same_path(
+    fake_parakeet, monkeypatch, tmp_path
+):
+    model_dir = fake_parakeet["dir"]
+    weights = model_dir / "model.safetensors"
+    weights.write_text("first generation")
+    loads: list[str] = []
+
+    def load(directory):
+        text = (Path(directory) / weights.name).read_text()
+        loads.append(text)
+        return types.SimpleNamespace(transcribe=lambda path: FakeResult(text, []))
+
+    monkeypatch.setattr(sys.modules["parakeet_mlx"], "from_pretrained", load)
+    first = ParakeetInProcessBackend(model_dir=str(model_dir), model_name="m")
+    second = ParakeetInProcessBackend(model_dir=str(model_dir), model_name="m")
+    audio = tmp_path / "a.wav"
+    assert first.transcribe(audio, params()).text == "first generation"
+    assert second.transcribe(audio, params()).text == "first generation"
+
+    replacement = tmp_path / "replacement"
+    replacement.write_text("other generation")
+    replacement.replace(weights)
+    assert second.transcribe(audio, params()).text == "other generation"
+    assert first.transcribe(audio, params()).text == "other generation"
+    assert loads == ["first generation", "other generation"]
