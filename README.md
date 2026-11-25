@@ -545,7 +545,9 @@ export VOXHELM_BOOTSTRAP_OPERATOR_PASSWORD="replace-me"
 
 The Wyoming `parakeet-mlx` backend keeps the installed model resident across
 turns. Replacing `config.json` or `model.safetensors` triggers a reload under
-the model lock. A generation that changes during loading is refused.
+the model lock. A generation that changes during loading is refused. If the
+language retry is necessary and mlx-whisper is unavailable, Wyoming serves the
+first Parakeet result. Logs identify the pass selected after a retry attempt.
 
 Wyoming TTS measures RMS and peak in bounded blocks on a worker thread. One gain
 applies across the streamed reply, limited to ±8 dB with peak protection near

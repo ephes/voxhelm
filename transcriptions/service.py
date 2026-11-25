@@ -1388,7 +1388,7 @@ def transcribe_audio(audio_path: Path, params: TranscribeParams) -> Transcriptio
         # InferenceCancelled, never as a backend-availability failure.
         _raise_if_cancelled(params)
         joined = "; ".join(unavailable_errors)
-        raise RuntimeError(f"No configured STT backend is available. {joined}")
+        raise BackendUnavailableError(f"No configured STT backend is available. {joined}")
 
 
 def serialize_health() -> str:

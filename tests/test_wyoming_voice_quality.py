@@ -286,3 +286,46 @@ def test_wyoming_target_dbfs_settings(monkeypatch, target, expected):
             runpy.run_path("config/settings.py")
     else:
         assert runpy.run_path("config/settings.py")["VOXHELM_WYOMING_TTS_TARGET_DBFS"] == expected
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "cancelled", "inference"])
+def test_parakeet_retry_only_recovers_backend_unavailability(
+    monkeypatch, settings, caplog, failure
+):
+    from lane_scheduler import InferenceCancelled
+    from transcriptions.service import (
+        BackendUnavailableError,
+        MlxWhisperBackend,
+        ParakeetInProcessBackend,
+    )
+
+    settings.VOXHELM_LANE_SCHEDULER_ENABLED = False
+    first = TranscriptionResult(
+        text="Yes.", language="en", segments=[], backend_name="parakeet-mlx"
+    )
+
+    def fail_retry(*args):
+        raise {
+            "unavailable": BackendUnavailableError("synthetic missing backend"),
+            "cancelled": InferenceCancelled("synthetic cancellation"),
+            "inference": RuntimeError("synthetic inference failure"),
+        }[failure]
+
+    monkeypatch.setattr(ParakeetInProcessBackend, "transcribe", lambda *args: first)
+    monkeypatch.setattr(MlxWhisperBackend, "transcribe", fail_retry)
+    monkeypatch.setattr(wyoming_module, "needs_language_retry", lambda *args: True)
+
+    def run():
+        return transcribe_pcm(
+            bytes(320), request_model="m", prompt=None, language="de", backend="parakeet-mlx"
+        )
+
+    if failure == "unavailable":
+        result = run()
+        assert result.text == first.text
+        assert result.language == first.language
+        assert "serving first pass" in caplog.text
+    else:
+        error_type = InferenceCancelled if failure == "cancelled" else RuntimeError
+        with pytest.raises(error_type, match="synthetic"):
+            run()

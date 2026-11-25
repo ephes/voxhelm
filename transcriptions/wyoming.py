@@ -56,6 +56,7 @@ from .errors import ApiError
 from .observability import emit_transcription_debug_log
 from .service import (
     PARAKEET_INPROCESS_BACKEND_NAME,
+    BackendUnavailableError,
     TranscribeParams,
     normalize_interactive_transcript,
     resolve_model_name_for_backend,
@@ -972,20 +973,22 @@ def transcribe_pcm(
             and result.backend_name == PARAKEET_INPROCESS_BACKEND_NAME
             and needs_language_retry(result.text, language)
         ):
-            _LOGGER.info(
-                "Parakeet transcript is not in language=%s; retrying with mlx-whisper",
-                language,
-            )
-            result = transcribe_audio(
-                temp_path,
-                TranscribeParams(
-                    request_model=settings.VOXHELM_MLX_MODEL,
-                    prompt=prompt,
-                    language=language,
-                    scheduler_lane=LANE_INTERACTIVE,
-                    backend="mlx",
-                ),
-            )
+            try:
+                result = transcribe_audio(
+                    temp_path,
+                    TranscribeParams(
+                        request_model=settings.VOXHELM_MLX_MODEL,
+                        prompt=prompt,
+                        language=language,
+                        scheduler_lane=LANE_INTERACTIVE,
+                        backend="mlx",
+                    ),
+                )
+            except BackendUnavailableError:
+                _best_effort_warning("Wyoming STT language retry unavailable; serving first pass")
+            else:
+                with suppress(Exception):
+                    _LOGGER.info("Wyoming STT language retry succeeded; serving retry pass")
         return result
     finally:
         temp_path.unlink(missing_ok=True)
