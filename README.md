@@ -258,6 +258,8 @@ thousands grouping. For example, `1.234,56 EUR` reads as 1,234 euros and 56 cent
 and `1.000 °C` reads as 1,000 degrees Celsius. Ungrouped quantities still
 accept comma or unambiguous dot decimals, such as `1.5 kg` or `0.125 kg`.
 Malformed grouping keeps the numeric spelling.
+ASCII hyphen-minus (`-`) and Unicode minus (`−`) both read as `minus`
+at the start of an admitted quantity. Elsewhere the original sign is retained.
 Singular unit forms apply only to a quantity of exactly one in magnitude,
 including signed one and one written with decimal zeros.
 Cardinal labels such as `Kapitel 2.` become `Kapitel zwei.` and keep their

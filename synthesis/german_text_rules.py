@@ -195,13 +195,14 @@ def _is_named_calendar_date(match: re.Match[str]) -> bool:
 
 
 # Capture the entire numeric spelling so invalid grouping cannot expose a suffix.
-QUANTITY_TOKEN = r"(?<!\w)(?<![\d.,][.,])(-?\d+(?:[.,]+\d+)*)"
+QUANTITY_TOKEN = r"(?<!\w)(?<![\d.,][.,])([-−]?\d+(?:[.,]+\d+)*)"
 GROUPED_QUANTITY_RE = re.compile(r"-?[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?")
 DECIMAL_QUANTITY_RE = re.compile(r"-?\d+(?:[,.]\d+)?")
 EURO_AMOUNT_RE = re.compile(QUANTITY_TOKEN + r"\s*EUR\b", re.IGNORECASE)
 
 
 def _normalized_quantity(raw: str) -> str | None:
+    raw = raw.replace("−", "-")
     if not _supports_numeric_token(raw):
         return None
     if GROUPED_QUANTITY_RE.fullmatch(raw):

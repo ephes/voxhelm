@@ -272,3 +272,35 @@ def test_grouped_quantity_digit_budget() -> None:
     over_limit = "12" + ".345" * 21
     assert normalize_german_text(f"{at_limit} kg") == f"{at_limit.replace('.', '')} Kilogramm"
     assert normalize_german_text(f"{over_limit} kg") == f"{over_limit} kg"
+
+
+@pytest.mark.parametrize(
+    ("quantity", "expected"),
+    [
+        ("5 °C", "minus fünf Grad Celsius"),
+        ("5°", "minus fünf Grad"),
+        ("1 Std.", "minus eine Stunde"),
+        ("1,05 EUR", "minus ein Euro fünf"),
+        ("1.234,5 kg", "minus eintausendzweihundertvierunddreißig komma fünf Kilogramm"),
+        ("1.234,05 EUR", "minus eintausendzweihundertvierunddreißig Euro fünf"),
+        (f"{'0' * 63}1 kg", "minus ein Kilogramm"),
+    ],
+)
+def test_unicode_minus_matches_ascii_for_admitted_quantities(quantity: str, expected: str) -> None:
+    assert normalize_german_text(f"-{quantity}") == expected
+    assert normalize_german_text(f"−{quantity}") == expected
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_suffix"), [("kg", "kg"), ("°C", "°C"), ("EUR", "Euro")]
+)
+def test_unicode_minus_on_oversized_quantities_remains_literal(
+    suffix: str, expected_suffix: str
+) -> None:
+    raw = "12" + ".345" * 21
+    assert normalize_german_text(f"−{raw} {suffix}") == f"−{raw} {expected_suffix}"
+
+
+def test_unicode_minus_outside_admitted_quantities_remains_literal() -> None:
+    text = "Nord-Süd − Südost bei −5 und −1.23,5 kg"
+    assert normalize_german_text(text) == text
