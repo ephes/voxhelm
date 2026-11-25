@@ -504,6 +504,13 @@ VOXHELM_WYOMING_STT_NORMALIZE_TRANSCRIPT = env_bool(
 # listener starts, so the first voice command after a restart does not pay the
 # model load (about 12 s for mlx-whisper large-v3 from a cold page cache).
 VOXHELM_WYOMING_STT_WARMUP = env_bool("VOXHELM_WYOMING_STT_WARMUP", default=True)
+# RMS level Wyoming TTS answers are scaled to (dBFS, +/-8 dB at most, peaks
+# kept below about -1 dBFS) so voices of different loudness sound alike on the
+# satellite. Empty disables it.
+_wyoming_tts_target_dbfs = os.getenv("VOXHELM_WYOMING_TTS_TARGET_DBFS", "-19").strip()
+VOXHELM_WYOMING_TTS_TARGET_DBFS = (
+    float(_wyoming_tts_target_dbfs) if _wyoming_tts_target_dbfs else None
+)
 VOXHELM_WYOMING_SAMPLES_PER_CHUNK = int(os.getenv("VOXHELM_WYOMING_SAMPLES_PER_CHUNK", "1024"))
 VOXHELM_WYOMING_MAX_CONNECTIONS = int(os.getenv("VOXHELM_WYOMING_MAX_CONNECTIONS", "16"))
 VOXHELM_WYOMING_MAX_INFERENCE_THREADS = int(os.getenv("VOXHELM_WYOMING_MAX_INFERENCE_THREADS", "4"))

@@ -488,6 +488,8 @@ export VOXHELM_WYOMING_MAX_INFERENCE_THREADS="4"
 # Load the Wyoming STT model with one second of silence right after the listener
 # starts, so the first voice command after a restart skips the model load.
 export VOXHELM_WYOMING_STT_WARMUP="true"
+# RMS level (dBFS) Wyoming TTS answers are scaled to; empty disables it.
+export VOXHELM_WYOMING_TTS_TARGET_DBFS="-19"
 # Host-wide lane scheduler for local inference (see "Lane Scheduler" below).
 export VOXHELM_LANE_SCHEDULER_ENABLED="false"
 export VOXHELM_LANE_SCHEDULER_DIR="$PWD/var/lane-scheduler"

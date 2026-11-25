@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import array
 import asyncio
 import io
 import json
 import logging
+import math
 import os
 import signal
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +42,7 @@ from synthesis.service import (
     SynthesizeParams,
     build_voice_registry,
     cleanup_paths,
+    detect_routing_language,
     synthesize_text,
 )
 
@@ -858,13 +862,16 @@ class WyomingSttEventHandler(AsyncEventHandler):
             )
 
             frames_per_chunk = settings.VOXHELM_WYOMING_SAMPLES_PER_CHUNK
-            while True:
-                chunk = wav_reader.readframes(frames_per_chunk)
-                if not chunk:
-                    break
+            audio = normalize_loudness(
+                wav_reader.readframes(wav_reader.getnframes()),
+                width=width,
+                target_dbfs=settings.VOXHELM_WYOMING_TTS_TARGET_DBFS,
+            )
+            step = frames_per_chunk * width * channels
+            for offset in range(0, len(audio), step):
                 await self.write_event(
                     AudioChunk(
-                        audio=chunk,
+                        audio=audio[offset : offset + step],
                         rate=rate,
                         width=width,
                         channels=channels,
@@ -892,7 +899,7 @@ def transcribe_pcm(
             wav_file.setnchannels(_CONVERTED_CHANNELS)
             wav_file.writeframes(audio_bytes)
 
-        return transcribe_audio(
+        result = transcribe_audio(
             temp_path,
             TranscribeParams(
                 request_model=request_model,
@@ -902,8 +909,80 @@ def transcribe_pcm(
                 backend=backend,
             ),
         )
+        if (
+            backend == PARAKEET_INPROCESS_BACKEND_NAME
+            and result.backend_name == PARAKEET_INPROCESS_BACKEND_NAME
+            and needs_language_retry(result.text, language)
+        ):
+            _LOGGER.info(
+                "Parakeet transcript is not in language=%s; retrying with mlx-whisper",
+                language,
+            )
+            result = transcribe_audio(
+                temp_path,
+                TranscribeParams(
+                    request_model=settings.VOXHELM_MLX_MODEL,
+                    prompt=prompt,
+                    language=language,
+                    scheduler_lane=LANE_INTERACTIVE,
+                    backend="mlx",
+                ),
+            )
+        return result
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+_TTS_MAX_BOOST_DB = 8.0
+_TTS_MAX_CUT_DB = 8.0
+_TTS_PEAK_CEILING = 0.89  # about -1 dBFS
+
+
+def normalize_loudness(audio: bytes, *, width: int, target_dbfs: float | None) -> bytes:
+    """Scale 16-bit PCM so its RMS level is ``target_dbfs``.
+
+    The voices differ by about 6 dB (Piper Thorsten, Kokoro Martin, Kokoro
+    af_heart), which made some Home Assistant answers sound much quieter than
+    others. The gain is limited to +/-8 dB and never lifts a peak above about
+    -1 dBFS. Other sample widths, silence and a disabled target pass unchanged.
+    """
+    if target_dbfs is None or width != 2 or len(audio) < 2:
+        return audio
+    samples = array.array("h")
+    samples.frombytes(audio[: len(audio) - len(audio) % 2])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    peak = max((abs(sample) for sample in samples), default=0)
+    if peak == 0:
+        return audio
+    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+    gain_db = target_dbfs - 20 * math.log10(rms / 32768)
+    gain_db = max(-_TTS_MAX_CUT_DB, min(_TTS_MAX_BOOST_DB, gain_db))
+    gain = min(10 ** (gain_db / 20), _TTS_PEAK_CEILING * 32767 / peak)
+    if abs(gain - 1.0) < 0.01:
+        return audio
+    scaled = array.array("h", (max(-32768, min(32767, round(sample * gain))) for sample in samples))
+    if sys.byteorder != "little":
+        scaled.byteswap()
+    return scaled.tobytes()
+
+
+def needs_language_retry(text: str, language: str | None) -> bool:
+    """True when Parakeet's transcript is not in the pipeline's language.
+
+    Parakeet detects the language itself and turns short German follow-ups
+    ("Das linke", "Ja") into English ("Uh, that's linking.", "Yep."); the
+    conversation agent then answers in English. Only de/en are judged, with
+    the TTS routing detector (``routing`` extra); without it nothing retries.
+    """
+    expected = (language or "").strip().lower()[:2]
+    if expected not in {"de", "en"} or not text.strip():
+        return False
+    try:
+        detection = detect_routing_language(text.strip())
+    except Exception:
+        return False
+    return detection is not None and detection.language != expected
 
 
 def explicit_backend(config: WyomingSttConfig) -> str | None:
@@ -924,6 +1003,15 @@ def warm_up_stt(config: WyomingSttConfig) -> None:
             language=config.language or config.languages[0],
             backend=explicit_backend(config),
         )
+        if explicit_backend(config) == PARAKEET_INPROCESS_BACKEND_NAME:
+            # mlx-whisper is the language retry and fallback; load it too.
+            transcribe_pcm(
+                bytes(_CONVERTED_BYTES_PER_SECOND),
+                request_model=settings.VOXHELM_MLX_MODEL,
+                prompt=config.prompt,
+                language=config.language or config.languages[0],
+                backend="mlx",
+            )
     except Exception:
         _LOGGER.exception("Wyoming STT warm-up failed model=%s", config.model)
         return

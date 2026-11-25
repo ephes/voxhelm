@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Wyoming STT with `parakeet-mlx`: when the transcript is not in the
+  requested language (de/en, judged with the TTS routing detector), the
+  turn is transcribed again with mlx-whisper forced to that language.
+  Parakeet detects the language itself and turned short German follow-ups
+  into English ("Uh, that's linking.", "Yep."), and Home Assistant's agent
+  then answered in English. The warm-up now also loads mlx-whisper.
+
+- Wyoming TTS answers are scaled to an RMS level of
+  `VOXHELM_WYOMING_TTS_TARGET_DBFS` (default -19 dBFS, at most +/-8 dB,
+  peaks below about -1 dBFS; empty disables it). Piper Thorsten, Kokoro
+  Martin and Kokoro af_heart differed by about 6 dB.
+
 - Add the in-process Parakeet backend `parakeet-mlx` for the Wyoming
   sidecar (`VOXHELM_WYOMING_STT_BACKEND=parakeet-mlx`, new `parakeet` extra
   with `parakeet-mlx==0.5.3`, model from `VOXHELM_PARAKEET_MODEL_DIR`). The
