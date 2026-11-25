@@ -277,7 +277,19 @@ class KokoroBackend:
             prepared = normalize_german_text(prepared)
 
         sentences = split_sentences(prepared)
-        token_lists = [self._phonemize_to_tokens(s, config.phoneme_language) for s in sentences]
+        token_lists = []
+        for index, sentence in enumerate(sentences, start=1):
+            tokens = self._phonemize_to_tokens(sentence, config.phoneme_language)
+            if (
+                not tokens
+                and len(sentences) > 1
+                and any(char.isalpha() or char.isdigit() for char in sentence)
+            ):
+                raise SynthesisInputError(
+                    f"Kokoro found no supported speech tokens in sentence {index}. "
+                    "Try text in the voice's language."
+                )
+            token_lists.append(tokens)
         chunks = build_token_chunks(token_lists, budget=KOKORO_MAX_TOKENS)
         if not chunks:
             raise SynthesisInputError(

@@ -10,6 +10,7 @@ import pytest
 
 from jobs.models import JobArtifact
 from synthesis import kokoro
+from synthesis.service import SynthesisInputError
 from tests.test_jobs import build_synthesis_payload, configure_task_backend
 from tests.test_kokoro import _params, _stub_backend
 
@@ -63,6 +64,38 @@ def test_nonblank_text_without_supported_tokens_fails(
         assert not JobArtifact.objects.exists()
     assert not session.calls
     assert not list(tmp_path.glob("*.wav"))
+
+
+@pytest.mark.parametrize("unsupported", ["雪", "٣"])
+def test_mixed_text_rejects_sentence_without_supported_tokens(monkeypatch, tmp_path, unsupported):
+    backend, _ = _stub_backend(monkeypatch, tmp_path)
+    monkeypatch.setattr(backend, "_ensure_espeak", lambda: None)
+    monkeypatch.setattr(
+        backend, "_phonemize_to_tokens", kokoro.KokoroBackend._phonemize_to_tokens.__get__(backend)
+    )
+    monkeypatch.setattr(kokoro, "_phonemize", lambda text, _: "a" if text == "Hello." else "§")
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("Kokoro attempted to load artifacts for unsupported input")
+
+    monkeypatch.setattr(backend, "_session", unexpected_load)
+    monkeypatch.setattr(backend, "_voicepack", unexpected_load)
+
+    with pytest.raises(SynthesisInputError, match="supported speech tokens in sentence 2"):
+        backend.synthesize(f"Hello. {unsupported}", _params())
+
+
+def test_mixed_text_keeps_skipping_tokenless_punctuation_and_whitespace(monkeypatch, tmp_path):
+    backend, session = _stub_backend(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        backend, "_phonemize_to_tokens", lambda text, _: [43] if text == "I." else []
+    )
+    result = backend.synthesize("I.   \n\n   §", _params())
+    try:
+        assert len(session.calls) == 1
+        assert session.calls[0]["tokens"].tolist() == [[0, 43, 0]]
+    finally:
+        result.audio_path.unlink()
 
 
 @pytest.mark.parametrize("text", ["I", ".", "I."])

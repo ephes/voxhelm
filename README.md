@@ -283,14 +283,18 @@ voicepack and Piper model/config loaders recheck all their artifact identities
 after loading. A changed generation fails with a retryable backend-unavailable
 error before cache publication; a mixed Piper model/config pair is discarded.
 
-Kokoro refuses nonblank text that yields no supported phoneme tokens with an
-actionable client error (HTTP 400 on the sync speech API). Supported one-character utterances and punctuation tokens
-retain ordinary inference behavior. Audio chunks are validated and written
-incrementally to an owned WAV, retaining at most one inference chunk and its PCM
-conversion at a time. Total output is capped at 30 minutes (43,200,000 frames,
-86,400,000 PCM bytes at 24 kHz mono). Duration comes from written frames. Late
-inference errors, cancellation and cap overflow remove the partial WAV before
-any artifact is published.
+Kokoro refuses requests that yield no supported phoneme tokens with a client
+error (HTTP 400 on the sync speech API). In a multi-sentence request, a sentence
+containing a letter or digit that yields no tokens fails the entire request
+before model loading. The error identifies the sentence by its one-based
+position after text preprocessing and splitting. Whitespace and punctuation-only
+segments that yield no tokens can still be skipped. Supported one-character
+utterances and punctuation tokens retain ordinary inference behavior. Audio chunks
+are validated and written incrementally to an owned WAV, retaining at most one
+inference chunk and its PCM conversion at a time. Total output is capped at 30
+minutes (43,200,000 frames, 86,400,000 PCM bytes at 24 kHz mono). Duration comes
+from written frames. Late inference errors, cancellation and cap overflow remove
+the partial WAV before any artifact is published.
 
 Piper consumes the supported audio-chunk API into an owned WAV. It accepts
 16-bit PCM with one or two channels and a fixed positive sample rate up to
@@ -1949,7 +1953,8 @@ invoke ffmpeg or use this deadline.
 - Backend, converter and filesystem failures return HTTP 500 with the fixed
   message `Speech synthesis failed.`; details are logged only. Input errors stay
   client-facing as HTTP 400 `invalid_request_error`: a requested voice that is not
-  installed (with the available voices) and Kokoro text without supported tokens.
+  installed (with the available voices) and Kokoro text or spoken sentences that
+  yield no supported tokens.
   The Wyoming sidecar passes the same messages through in `synthesis_failed`.
 - Audio is streamed in bounded reads from an open file handle with
   `Content-Length`, using worker-thread reads under ASGI (uvicorn) so Django never
