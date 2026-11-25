@@ -1,5 +1,6 @@
 """Frozen bundle and complete suite publication, using synthetic backends."""
 
+import errno
 import os
 import time
 
@@ -599,6 +600,48 @@ def test_suite_rechecks_cached_generation_before_replay(suite_root, monkeypatch)
     with pytest.raises(ValueError, match="identity"):
         ev.run_suite(root, {}, "baseline")
     assert not (root / "results" / "baseline").exists()
+
+
+@pytest.mark.parametrize("failure", ["directory", "wrapper"])
+def test_fingerprint_closes_descriptors_on_admission_failure(tmp_path, monkeypatch, failure):
+    from evals.speaker_generations import file_digest
+
+    path = tmp_path / "evidence"
+    if failure == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"synthetic model")
+    opened = set()
+    real_open = os.open
+
+    def track_open(name, *args, **kwargs):
+        descriptor = real_open(name, *args, **kwargs)
+        if name == path:
+            opened.add(descriptor)
+        return descriptor
+
+    def fail_wrapper(*args, **kwargs):
+        raise OSError("synthetic file wrapper failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", track_open)
+        if failure == "wrapper":
+            patch.setattr(os, "fdopen", fail_wrapper)
+        for _ in range(3):
+            with pytest.raises(ValueError, match="identity"):
+                file_digest(path)
+
+    leaked = 0
+    for descriptor in opened:
+        try:
+            os.fstat(descriptor)
+        except OSError as exc:
+            assert exc.errno == errno.EBADF
+        else:
+            os.close(descriptor)
+            leaked += 1
+    assert opened
+    assert leaked == 0
 
 
 @pytest.mark.parametrize("change", ["rewrite", "replace", "symlink"])

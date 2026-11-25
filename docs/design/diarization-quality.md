@@ -1077,9 +1077,11 @@ reuse the same frozen inputs.
 
 Within one suite invocation, unchanged source/model/code file generations share
 their SHA-256, including files listed in multiple roles or episodes. Every use
-still opens the regular file without following its final symlink and checks its
-device, inode, size, nanosecond mtime and ctime against both the descriptor and
-current name. A changed generation is hashed again and must match the frozen
+still opens the file without following its final symlink, requires the opened
+descriptor to be a regular file before wrapping it, and closes the descriptor
+even if admission or wrapping fails. It checks device, inode, size, nanosecond
+mtime and ctime against both the descriptor and current name. A changed
+generation is hashed again and must match the frozen
 identity; a change during a read or cache lookup is refused. Hash reads cover
 only the initially admitted size. The cache is discarded after the invocation;
 it never replaces the pre/post replay evidence checks or persists across runs.

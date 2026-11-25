@@ -8,6 +8,9 @@
 - Skip nonregular Piper models during discovery and reject them before native
   loading. Model symlinks to regular files still work.
 
+- Close speaker evaluation fingerprint descriptors when a file is rejected or
+  the read stream cannot be opened.
+
 - Complete remote jobs and omit optional numeric diagnostics that exceed the
   finite double-precision range, including oversized JSON integers.
 

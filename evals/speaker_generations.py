@@ -77,28 +77,32 @@ def file_digest(path: Path, fingerprints: FingerprintCache | None = None) -> str
     """Hash or reuse an opened generation, checking descriptor and name each time."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
+        try:
             before = os.fstat(fd)
             require(stat.S_ISREG(before.st_mode), "identity.file")
-            generation = file_generation(before)
-            result = fingerprints.get(generation) if fingerprints is not None else None
-            if result is None:
-                digest = hashlib.sha256()
-                remaining = before.st_size
-                while remaining:
-                    chunk = stream.read(min(remaining, 1024 * 1024))
-                    require(bool(chunk), "identity.changed")
-                    remaining -= len(chunk)
-                    digest.update(chunk)
-                result = digest.hexdigest()
-            require(
-                file_generation(os.fstat(fd)) == generation
-                and file_generation(path.stat(follow_symlinks=False)) == generation,
-                "identity.changed",
-            )
-            if fingerprints is not None:
-                fingerprints[generation] = result
-            return result
+            # Keep ownership even if stream construction fails partway through.
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                generation = file_generation(before)
+                result = fingerprints.get(generation) if fingerprints is not None else None
+                if result is None:
+                    digest = hashlib.sha256()
+                    remaining = before.st_size
+                    while remaining:
+                        chunk = stream.read(min(remaining, 1024 * 1024))
+                        require(bool(chunk), "identity.changed")
+                        remaining -= len(chunk)
+                        digest.update(chunk)
+                    result = digest.hexdigest()
+                require(
+                    file_generation(os.fstat(fd)) == generation
+                    and file_generation(path.stat(follow_symlinks=False)) == generation,
+                    "identity.changed",
+                )
+                if fingerprints is not None:
+                    fingerprints[generation] = result
+                return result
+        finally:
+            os.close(fd)
     except OSError as exc:
         raise ValueError("Invalid evaluation identity file") from exc
 
