@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep the original words when a drift retry reports a different window start.
 - Reject invalid drift window widths and probability thresholds before grouping words.
 
 - Reject frozen speaker bundles that reuse an array member across job audio or reference windows.

@@ -52,9 +52,9 @@ profile).
    `4,0.1`).
 4. Retry: `transcribe_window(audio, t)` (D-27): clip `[t - 1, t + 31]`,
    language detected on the clip, words starting in `[t, t + 30)`.
-5. Accept: the detected language equals the job's `language_hint` and
-   p >= 0.9 (the post-hoc rule the spec adopts); otherwise Parakeet's words
-   stay.
+5. Accept when the retry reports the requested grid start, the detected
+   language equals the job's `language_hint` with probability in `[0.9, 1]`,
+   and the result has usable in-window words. Otherwise Parakeet's words stay.
 6. Splice (`splice.py`): every Parakeet word starting in an accepted window
    is dropped, the retry's words are added, and the list is sorted by start
    (stable). Retry words carry `c: null`. If no retry is accepted and the words
@@ -285,3 +285,8 @@ all fail this admission records `accepted: false`,
 increments `rejected`. Usable replacements still splice normally and have
 `c: null`; no confidence is inferred from absent words. This is an output
 admission safeguard around the existing frozen detection rule and word lists.
+
+The check requires `WindowTranscription.t` to equal the requested grid start
+before filtering the retry's words. A mismatch records `accepted: false`
+and `rejection_reason: "window_start_mismatch"`, preserves the original
+window words and increments `rejected`.

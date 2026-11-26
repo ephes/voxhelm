@@ -12,8 +12,9 @@ of 2026-10-15, the post-hoc acceptance rule of its REPORT.md):
    the window when English >= 4 and English / (English + German) >= 0.10.
 3. Retry: re-transcribe each flagged window with whisper large-v3-turbo on
    ``[t - 1, t + 31]``, language detected on the clip (``transcribe_window``).
-4. Accept: only when the detected language is the episode language with p >= 0.9
-   and the retry has usable in-window words; otherwise Parakeet's words stay.
+4. Accept: only when the retry reports the requested start, the detected language
+   is the episode language with p >= 0.9, and the retry has usable in-window words.
+   Otherwise Parakeet's words stay.
 5. Splice: every Parakeet word starting in ``[t, t + 30)`` of an accepted window is
    replaced by the retry's words, which start in the same range (``splice.py``).
 
@@ -289,8 +290,9 @@ def run_drift_check(
         raise_if_cancelled(cancel_event)
         english, german = count_function_words([word["w"] for word in window_words])
         flagged = rule.flags(english, german)
+        window_start = index * rule.window_seconds
         record: dict[str, Any] = {
-            "t": index * rule.window_seconds,
+            "t": window_start,
             "en": english,
             "de": german,
             "flagged": flagged,
@@ -305,23 +307,25 @@ def run_drift_check(
                     f"({WINDOW_SETTINGS.window_seconds:g} seconds)."
                 )
             started = monotonic()
-            result = retry_window(
-                audio_path, index * rule.window_seconds, cancel_event=cancel_event
-            )
+            result = retry_window(audio_path, window_start, cancel_event=cancel_event)
             elapsed = monotonic() - started
             retry_seconds += elapsed
-            replacement = usable_retry_words(
-                result.words,
-                start=index * rule.window_seconds,
-                end=(index + 1) * rule.window_seconds,
-            )
+            if result.t != window_start:
+                replacement = []
+                record["rejection_reason"] = "window_start_mismatch"
+            else:
+                replacement = usable_retry_words(
+                    result.words,
+                    start=window_start,
+                    end=(index + 1) * rule.window_seconds,
+                )
+                if not replacement:
+                    record["rejection_reason"] = "empty_retry"
             accepted = (
                 bool(replacement)
                 and result.language == language
                 and rule.accept_probability <= result.language_probability <= 1.0
             )
-            if not replacement:
-                record["rejection_reason"] = "empty_retry"
             record.update(
                 {
                     "language": result.language,

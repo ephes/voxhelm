@@ -242,12 +242,13 @@ a retry. The window width must be finite and positive, and the minimum English
 share and retry acceptance probability must be in `[0, 1]`. Invalid settings
 raise `ValueError`.
 
-The German drift check retains the original window words when a retry has no
-usable in-window words, even with strong matching language evidence. Nonblank,
-finite, positive-duration retry words must start inside the window; ends are
-clipped at its boundary. Empty/fully filtered retries record
-`rejection_reason: empty_retry` and count as rejected. Accepted replacements
-still carry `c: null`, preserving the absence of Parakeet confidence evidence.
+The German drift check requires the retry's `t` to equal the requested grid
+start. A mismatch records `rejection_reason: window_start_mismatch` and retains
+the original window words. Nonblank, finite, positive-duration retry words
+must start inside the window, and ends are clipped at its boundary. Empty or
+fully filtered retries record `rejection_reason: empty_retry` and also retain
+the original words. Both outcomes count as rejected. Accepted replacements
+carry `c: null`, preserving the absence of Parakeet confidence evidence.
 
 ## Kokoro inference and installed style validation
 
@@ -1018,12 +1019,13 @@ profile then runs the German drift check (D-28): it counts English and German
 function words in every 30 s grid window `[30k, 30k + 30)` of the Parakeet
 word starts, flags a window with at least 4 English ones that are at least
 10 % of both, re-transcribes each flagged window with whisper large-v3-turbo
-(window transcription, below), and keeps the retry only when whisper detects
-German with p >= 0.9; then every Parakeet word starting in the window is
-replaced by the retry's words. A job may also carry the edges of the episode's
-sponsor chapters (`chapter_marks_ms`, D-29): the profile then transcribes the
-`turbo-window-v1` word window around each mark with the same turbo model
-(chapter windows, below). The profile needs its runtimes on every host
+(window transcription, below), and keeps the retry only if it reports the
+requested window start, detects German with probability in `[0.9, 1]`, and
+supplies usable in-window words. It then replaces every Parakeet word starting
+in the window with the admitted retry words. A job may also carry the edges of
+the episode's sponsor chapters (`chapter_marks_ms`, D-29). The profile then
+transcribes the `turbo-window-v1` word window around each mark with the same
+turbo model (chapter windows, below). The profile needs its runtimes on every host
 (Parakeet, `whisper-cli` with the pinned turbo model, and ffprobe), whatever the
 job's language.
 

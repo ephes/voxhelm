@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -251,6 +252,35 @@ def test_custom_retry_can_cover_a_different_drift_window_width():
     )
 
     assert check.words == [word("Korrektur", 85.0) | {"c": None}, words[-1]]
+
+
+@pytest.mark.parametrize(("returned_start", "accepted"), [(60.0, False), (30.0, True)])
+def test_retry_must_report_the_requested_drift_window_start(returned_start: float, accepted: bool):
+    original = words_at(30.0, DRIFTED)
+    fake_retry = FakeRetry()
+
+    def retry(audio_path: Path, t: float, *, cancel_event=None) -> WindowTranscription:
+        result = fake_retry(audio_path, t, cancel_event=cancel_event)
+        return replace(result, t=returned_start)
+
+    check = run_drift_check(AUDIO, original, language="de", retry=retry)
+
+    assert fake_retry.calls == [30.0]
+    record = check.record["windows"][0]
+    assert record["t"] == 30.0
+    assert record["accepted"] is accepted
+    summary = check.record["summary"]
+    assert (summary["accepted"], summary["rejected"]) == ((1, 0) if accepted else (0, 1))
+    if accepted:
+        assert "rejection_reason" not in record
+        assert check.words == [
+            {"w": "Retry", "s": 30.25, "e": 30.5, "c": None},
+            {"w": "Wort.", "s": 59.5, "e": 59.9, "c": None},
+        ]
+    else:
+        assert record["rejection_reason"] == "window_start_mismatch"
+        assert record["words_after"] == len(original)
+        assert check.words is original
 
 
 def test_splice_replaces_exactly_the_words_starting_in_the_window():
