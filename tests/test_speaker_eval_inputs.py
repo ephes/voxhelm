@@ -1,5 +1,6 @@
 """Synthetic offline evaluation admission regressions; no models or audio files."""
 
+import hashlib
 import os
 
 import numpy as np
@@ -85,6 +86,65 @@ def test_bundle_members_cannot_escape(tmp_path, monkeypatch, name):
     monkeypatch.setattr(np, "load", lambda *a, **k: pytest.fail("outside load"))
     with pytest.raises(ValueError):
         ev.run_bundle(path, {})
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("reused_member", ["reference", "job audio"])
+def test_bundle_refuses_reused_member_names(tmp_path, monkeypatch, version, reused_member):
+    path = tmp_path / "bundle"
+    value = tiny_bundle(path)
+    value["version"] = version
+    value["references"] = [
+        {"id": "a", "name": "Speaker A", "windows": ["first.npy"]},
+        {"id": "b", "name": "Speaker B", "windows": ["second.npy"]},
+    ]
+    samples = np.ones(16, dtype=np.float32)
+    for name in ("first.npy", "second.npy"):
+        np.save(path / name, samples)
+    if version == 2:
+        value["sample_sha256"] = {
+            name: hashlib.sha256(samples).hexdigest()
+            for name in ("audio.npy", "first.npy", "second.npy")
+        }
+
+    class Backend:
+        embedding_version = "fixture"
+
+        def embed(self, samples, sample_rate):
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend", lambda _: Backend()
+    )
+    ev.write_json(path / "bundle.json", value)
+    sidecar, _ = ev.run_bundle(path, {})
+    assert sidecar["summary"]["known_speakers"] == ["Speaker A", "Speaker B"]
+
+    value["references"][1]["windows"] = [
+        "first.npy" if reused_member == "reference" else "audio.npy"
+    ]
+    if version == 2:
+        del value["sample_sha256"]["second.npy"]
+    ev.write_json(path / "bundle.json", value)
+    monkeypatch.setattr(ev, "load_arrays", lambda *a, **k: pytest.fail("array admission started"))
+    with pytest.raises(ValueError, match=r"bundle\.member\.duplicate"):
+        ev.run_bundle(path, {})
+
+
+def test_bundle_refuses_member_alias_on_case_insensitive_filesystem(tmp_path, monkeypatch):
+    path = tmp_path / "bundle"
+    value = tiny_bundle(path)
+    if not (path / "AUDIO.npy").exists():
+        pytest.skip("filesystem distinguishes these names")
+    value["references"] = [{"id": "a", "name": "Speaker A", "windows": ["AUDIO.npy"]}]
+    ev.write_json(path / "bundle.json", value)
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend",
+        lambda *a: pytest.fail("backend started"),
+    )
+    with pytest.raises(ValueError, match=r"bundle\.array") as raised:
+        ev.run_bundle(path, {})
+    assert "bundle.member.duplicate" in str(raised.value.__cause__)
 
 
 @pytest.mark.parametrize(

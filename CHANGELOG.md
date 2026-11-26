@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject frozen speaker bundles that reuse an array member across job audio or reference windows.
+
 - Report out-of-range integer window starts as invalid arguments before looking up the retry runtime.
 
 - Refuse a flagged drift window when its width differs from the built-in retry's 30-second window.

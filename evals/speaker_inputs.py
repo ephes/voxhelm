@@ -177,6 +177,18 @@ def validate_manifest(value: Any) -> None:
     manifest_diarization_params(value)
 
 
+def member_path(name: str) -> PurePosixPath:
+    path = PurePosixPath(name)
+    require(
+        not path.is_absolute()
+        and "\\" not in name
+        and all(part not in ("", ".", "..") for part in name.split("/"))
+        and path.suffix == ".npy",
+        "bundle.member",
+    )
+    return path
+
+
 def validate_bundle(value: Any) -> list[tuple[str, int]]:
     require(
         isinstance(value, dict)
@@ -233,20 +245,17 @@ def validate_bundle(value: Any) -> list[tuple[str, int]]:
         require(bool(windows), "bundle.windows")
         members.extend((name, 5 * 16000) for name in windows)
     require(len(members) <= MAX_WINDOWS + 1, "bundle.windows")
+    seen: set[PurePosixPath] = set()
     for name, _ in members:
         text(name, "bundle.member")
+        path = member_path(name)
+        require(path not in seen, "bundle.member.duplicate")
+        seen.add(path)
     return members
 
 
 def open_member(stack: ExitStack, root_fd: int, name: str) -> Any:
-    path = PurePosixPath(name)
-    require(
-        not path.is_absolute()
-        and "\\" not in name
-        and all(part not in ("", ".", "..") for part in name.split("/"))
-        and path.suffix == ".npy",
-        "bundle.member",
-    )
+    path = member_path(name)
     directory = root_fd
     for part in path.parts[:-1]:
         directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
@@ -276,9 +285,14 @@ def load_arrays(
             root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             stack.callback(os.close, root_fd)
             handles = []
+            seen_files: set[tuple[int, int]] = set()
             total = 0
             for name, max_frames in members:
                 handle = open_member(stack, root_fd, name)
+                metadata = os.fstat(handle.fileno())
+                identity = (metadata.st_dev, metadata.st_ino)
+                require(identity not in seen_files, "bundle.member.duplicate")
+                seen_files.add(identity)
                 version = np.lib.format.read_magic(handle)
                 require(version in ((1, 0), (2, 0)), "bundle.array.version")
                 reader = (

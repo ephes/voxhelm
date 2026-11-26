@@ -1016,12 +1016,15 @@ most 600 seconds. Malformed controls fail before embedding/model startup.
 Frozen members must be relative regular `.npy` files contained in the chosen
 bundle, with no `.`/`..`, backslashes, absolute paths or symlink components;
 hard-linked members are refused too.
+In both bundle versions each canonical member name may appear only once across
+the job audio and all reference windows. Names that resolve to the same file
+are also refused. Recapture bundles that reuse a member.
 All opened NumPy 1.0/2.0 headers and exact file lengths are checked before sample
 allocation: nonempty native float32 mono vectors, at most two hours at 16 kHz
 for audio (the production Pyannote decode bound, `PYANNOTE_MAX_FRAMES`; capture
 decodes the job audio with that allowance first and refuses longer sources
 before ASR or diarization start), five seconds per reference window, 1000 windows and 512 MiB aggregate
-sample bytes (including repeated members). Samples must be finite before any
+sample bytes. Samples must be finite before any
 embedding. After header admission fixed-count raw float32 reads avoid reparsing
 a potentially modified header; pickle is never enabled or used. Opened files
 must remain unchanged during reads. These are offline capacity limits, not
