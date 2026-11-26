@@ -5,6 +5,7 @@ from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from django.core.management import CommandError, call_command
@@ -28,6 +29,7 @@ from jobs.retention import (
     prune_job_metadata,
     queue_replaced_intermediate_objects,
 )
+from transcriptions.profiles import AD_ANALYSIS_V1
 
 
 def make_job(*, state: str, finished_ago: timedelta | None) -> Job:
@@ -750,6 +752,54 @@ def test_dry_run_reports_refusals_like_a_real_run(settings):
 
 
 METADATA_RETENTION = timedelta(days=90)
+
+
+@pytest.mark.django_db
+def test_pending_deletion_lookups_use_job_index(settings, monkeypatch):
+    settings.VOXHELM_JOB_METADATA_RETENTION_SECONDS = int(METADATA_RETENTION.total_seconds())
+    old = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
+    guarded = make_job(state=Job.State.SUCCEEDED, finished_ago=timedelta(days=100))
+    guarded.profile = AD_ANALYSIS_V1
+    guarded.save(update_fields=["profile"])
+    pending = PendingArtifactDeletion.objects.create(
+        job_id=guarded.pk,
+        kind=JobArtifact.Kind.SOURCE,
+        storage_backend="filesystem",
+        storage_key=f"voxhelm/jobs/{guarded.pk}/attempt-1/old.mp3",
+        storage_identity=current_artifact_store_identity(),
+    )
+    PendingArtifactDeletion.objects.bulk_create(
+        PendingArtifactDeletion(
+            job_id=uuid4(),
+            kind=JobArtifact.Kind.SOURCE,
+            storage_backend="filesystem",
+            storage_key=f"unrelated/{i}.mp3",
+        )
+        for i in range(3000)
+    )
+
+    plans = {"metadata pruning": expired_job_metadata().explain()}
+    assert [job.pk for job in prune_job_metadata()] == [old.pk]
+    assert Job.objects.filter(pk=guarded.pk).exists()
+
+    def explain_drain(selection):
+        plans["explicit job deletion"] = selection.explain()
+        assert list(selection) == [pending]
+        return drain_pending_artifact_deletions(selection)
+
+    monkeypatch.setattr(retention, "drain_pending_artifact_deletions", explain_drain)
+    retention.delete_job_for_producer(job_id=guarded.pk, producer=guarded.producer)
+    assert not Job.objects.filter(pk=guarded.pk).exists()
+    assert not PendingArtifactDeletion.objects.filter(pk=pending.pk).exists()
+    assert PendingArtifactDeletion.objects.count() == 3000
+
+    assert all(
+        any(
+            "SEARCH " in line and "jobs_pending_job_id_idx (job_id=?)" in line
+            for line in plan.splitlines()
+        )
+        for plan in plans.values()
+    ), plans
 
 
 @pytest.mark.django_db

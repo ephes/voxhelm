@@ -1016,7 +1016,9 @@ served through their job, so a job that still has them keeps its row. A
 profile job past its backstop loses those artifacts in the same run and its row
 then goes regardless of the metadata retention. Queued and running jobs are
 never deleted. Each batch re-checks these conditions under
-the database write lock. Deleting a job also frees its `task_ref`, so a later
+the database write lock. Metadata pruning and explicit job deletion look up
+queued deletions through a `job_id` index. The general retry drain uses its
+separate retry-order index. Deleting a job also frees its `task_ref`, so a later
 submission with the same `task_ref` creates a new job. `--dry-run` lists the
 job rows a real run would delete, counting the artifacts and queued deletions
 that run would remove first as already gone.

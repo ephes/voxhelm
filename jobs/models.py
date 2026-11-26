@@ -217,7 +217,10 @@ class PendingArtifactDeletion(models.Model):
 
     class Meta:
         ordering = ["created_at"]
-        indexes = [models.Index(fields=["drain_attempts", "id"])]
+        indexes = [
+            models.Index(fields=["drain_attempts", "id"]),
+            models.Index(fields=["job_id"], name="jobs_pending_job_id_idx"),
+        ]
 
 
 class RemoteAttemptPrefix(models.Model):
