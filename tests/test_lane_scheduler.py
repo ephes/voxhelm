@@ -1257,6 +1257,42 @@ def test_unreadable_holder_directory_refuses_admission(tmp_path, monkeypatch):
     assert waiter_count(scheduler) == 0
 
 
+def test_unreadable_waiter_directory_refuses_admission(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
+    scheduler._ensure_layout()
+    unrelated = scheduler.waiters_dir / "keep.txt"
+    unrelated.write_text("unrelated")
+    original_scandir = os.scandir
+    scans = []
+
+    def scandir(path="."):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == scheduler.waiters_dir:
+            with original_scandir(scheduler.waiters_dir) as entries:
+                scans.append([entry.name for entry in entries if entry.name.endswith(".json")])
+            raise PermissionError("cannot enumerate waiters")
+        return original_scandir(path)
+
+    def unexpected_poll(_interval):
+        pytest.fail("An unreadable queue was treated as empty")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", scandir)
+        patch.setattr("lane_scheduler.time.sleep", unexpected_poll)
+        with pytest.raises(RuntimeError, match="Cannot read lane scheduler state"):
+            scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+
+    assert len(scans) == 1
+    assert len(scans[0]) == 1
+    assert list(scheduler.waiters_dir.iterdir()) == [unrelated]
+    assert holder_count(scheduler) == 0
+
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    try:
+        assert list(scheduler.waiters_dir.iterdir()) == [unrelated]
+    finally:
+        scheduler.release(ticket)
+
+
 def test_contender_refuses_replaced_control_lock_before_registering(tmp_path, monkeypatch):
     import lane_scheduler
 

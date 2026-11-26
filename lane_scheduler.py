@@ -440,7 +440,7 @@ class LaneScheduler:
         batch_slot_available = non_interactive_holders < self.non_interactive_slots
         winner: WaiterRecord | None = None
         best_key: tuple[int, float, str] | None = None
-        for waiter_path in self.waiters_dir.glob("*.json"):
+        for waiter_path in self._iter_waiter_paths():
             waiter = self._read_waiter(waiter_path)
             if waiter is None:
                 waiter_path.unlink(missing_ok=True)
@@ -461,6 +461,18 @@ class LaneScheduler:
                 best_key = key
                 winner = waiter
         return winner
+
+    def _iter_waiter_paths(self) -> Iterator[Path]:
+        # Like the holder scan, surface directory I/O errors suppressed by glob().
+        try:
+            yield from (path for path in self.waiters_dir.iterdir() if path.name.endswith(".json"))
+        except OSError as exc:
+            _LOGGER.error(
+                "lane_scheduler cannot scan waiters error=%s errno=%s",
+                type(exc).__name__,
+                exc.errno,
+            )
+            raise RuntimeError("Cannot read lane scheduler state; admission refused.") from None
 
     def _read_waiter(self, waiter_path: Path) -> WaiterRecord | None:
         with self._open_state(waiter_path) as handle:

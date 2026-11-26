@@ -1730,15 +1730,17 @@ Capacity is a small, bounded set of slots (decision D-24):
   but not blocked.
 - A waiter receipt participates in admission only when its filename is
   `<token>.json` for the token in its contents. Queue scans remove mismatched
-  receipts under the control lock.
+  receipts under the control lock. A failed waiter directory scan refuses
+  admission and attempts to remove the current attempt's waiter. The queue scan
+  ignores files without a `.json` suffix.
 - Holder publication and waiter removal run under the control lock. The
   ticket transfers to the caller after the lock exits successfully and a final
   cancellation check passes. Cancellation at that check, a failed publication,
   or a failed lock exit attempts to remove only the pending holder before
   closing its handle, preserving the original error. Waiter and holder
   receipts must be regular files of at most 64 KiB and are opened without
-  following symlinks. A rejected receipt or state I/O failure refuses
-  admission and preserves the affected holder. Malformed receipts within
+  following symlinks. Violating those file constraints or encountering a state
+  I/O failure refuses admission and preserves the affected holder. Malformed receipts within
   the limit can be reclaimed once the holder inode can be locked. Fix
   filesystem access before retrying an I/O failure.
 - The persistent control lock must be a regular file. After acquiring it,
