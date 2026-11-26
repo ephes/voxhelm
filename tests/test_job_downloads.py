@@ -227,6 +227,42 @@ def test_s3_download_requires_valid_size_metadata(client, monkeypatch, size_meta
 
 
 @pytest.mark.django_db
+def test_refused_s3_download_keeps_unavailable_response_when_cleanup_and_warning_fail(
+    client, monkeypatch
+):
+    job, _ = artifact_fixture()
+    raw = io.BytesIO(b"x")
+    body = StreamingBody(raw, 1)
+
+    def fail_close():
+        raw.close()
+        raise OSError("synthetic body close failure")
+
+    close = Mock(side_effect=fail_close)
+    warning = Mock(side_effect=LookupError("synthetic warning failure"))
+    monkeypatch.setattr(body, "close", close)
+    monkeypatch.setattr("jobs.artifacts.logger.warning", warning)
+    store = object.__new__(S3ArtifactStore)
+    store.bucket = "synthetic"
+    store.client = SimpleNamespace(get_object=lambda **kwargs: {"Body": body, "ContentLength": 1})
+    install_store(monkeypatch, lambda identity: store)
+
+    response = client.get(artifact_url(job, False), HTTP_AUTHORIZATION="Bearer test-token")
+
+    assert response.status_code == 503
+    assert not response.streaming
+    assert response.json() == {
+        "error": {
+            "message": "Artifact storage is unavailable; retry later.",
+            "type": "server_error",
+        }
+    }
+    close.assert_called_once_with()
+    assert raw.closed
+    warning.assert_called_once_with("Artifact reader cleanup failed after open was refused.")
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("operator", OPERATOR_ROUTES)
 @pytest.mark.parametrize("early_close", [False, True])
 def test_download_streams_bounded_chunks_and_closes(

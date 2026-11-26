@@ -801,9 +801,12 @@ sending download headers, Voxhelm compares the recorded artifact size with the
 open file descriptor's size or the S3 GET response's reported `ContentLength`.
 S3 must report a matching nonnegative integer `ContentLength`. Missing, invalid
 or mismatched size metadata closes the reader and returns HTTP 503 before any
-artifact bytes are sent. Closing or cancelling a streaming response closes its
-reader once the active read settles. Authorization, private cache headers and
-recorded content types still apply. A missing stored object returns HTTP 404.
+artifact bytes are sent. When either store refuses a reader, it attempts to
+close it once. A close failure attempts a fixed warning, and failure of that
+warning leaves the original refusal intact. Closing or cancelling a streaming
+response closes its reader once the active read settles. Authorization, private
+cache headers and recorded content types still apply. A missing stored object
+returns HTTP 404.
 S3 missing-object codes are recognized only as strings in a valid error mapping.
 Malformed S3 error envelopes and other supported storage and configuration failures
 before response headers return HTTP 503 with a bounded JSON error and no storage

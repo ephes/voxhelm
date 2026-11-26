@@ -53,7 +53,8 @@ def _close_rejected_reader(reader: BinaryIO) -> None:
     try:
         reader.close()
     except Exception:
-        logger.warning("Artifact reader cleanup failed after open was refused.")
+        with suppress(Exception):
+            logger.warning("Artifact reader cleanup failed after open was refused.")
 
 
 class FilesystemArtifactStore:

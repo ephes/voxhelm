@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve artifact reader refusals when both closing the reader and logging the cleanup failure fail.
 - Release the newly opened artifact directory if closing its parent fails, and preserve the parent error.
 - Refuse incomplete filesystem artifact writes before replacing the previous object.
 - Refuse short temporary media writes in upload and URL acquisition before handing off the file.

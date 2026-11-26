@@ -286,6 +286,32 @@ def test_reader_closes_when_parent_close_fails(tmp_path, monkeypatch):
             opened.close()
 
 
+def test_refused_file_reader_keeps_size_error_when_cleanup_and_warning_fail(tmp_path, monkeypatch):
+    (tmp_path / "artifact").write_bytes(b"synthetic")
+    store = FilesystemArtifactStore(root=tmp_path)
+    closed = []
+
+    class FailingCloseFile(io.FileIO):
+        def close(self):
+            super().close()
+            closed.append(self)
+            raise OSError("synthetic file close failure")
+
+    def fail_warning(message):
+        raise LookupError("synthetic warning failure")
+
+    monkeypatch.setattr(
+        "jobs.artifacts.io",
+        SimpleNamespace(FileIO=FailingCloseFile, BufferedReader=io.BufferedReader),
+    )
+    monkeypatch.setattr("jobs.artifacts.logger.warning", fail_warning)
+
+    with pytest.raises(ValueError, match="Artifact object size differs from the recorded size"):
+        store.open_reader(key="artifact", expected_size_bytes=1)
+    [reader] = closed
+    assert reader.closed
+
+
 @pytest.mark.parametrize("primary", ["write", "fsync", "replace"])
 def test_cleanup_denial_preserves_primary_error(tmp_path, monkeypatch, caplog, primary):
     store = FilesystemArtifactStore(root=tmp_path)
