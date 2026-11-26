@@ -1381,18 +1381,23 @@ def verify_remote_artifact_objects(
     except RuntimeError as exc:
         raise ApiError(f"Artifact store is not configured: {exc}") from exc
     deadline = time.monotonic() + REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS
-    for artifact in artifacts:
+
+    def check_deadline() -> None:
         if time.monotonic() >= deadline:
             raise ApiError(
                 "Artifact verification exceeded its "
                 f"{REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS:g} second budget."
             )
+
+    for artifact in artifacts:
+        check_deadline()
         try:
             stored = store.stat(key=artifact["storage_key"])
         except Exception as exc:
             raise ApiError(
                 f"Artifact object '{artifact['name']}' is not available in the artifact store."
             ) from exc
+        check_deadline()
         if stored.size_bytes != artifact["size_bytes"]:
             raise ApiError(
                 f"Artifact object '{artifact['name']}' size_bytes does not match the manifest."

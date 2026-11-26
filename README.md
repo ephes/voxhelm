@@ -1508,10 +1508,14 @@ attempt prefix, for example `voxhelm/jobs/<job_id>/attempt-1/transcript.txt`;
 Voxhelm verifies that each reported object exists in the configured artifact
 store and that its stored size matches the manifest before marking the job
 succeeded. A manifest lists at most 32 artifacts, checked before any store
-access, and the per-object store checks share a 30-second cumulative budget
-(checked before each request; one request is bounded by the store client's own
-timeouts), after which the completion is refused without settling the job; names, storage keys and content types must fit their columns (255, 512
-and 255 characters, no NUL), `size_bytes` must fit a signed 64-bit integer, and no
+access. The per-object store checks share a 30-second cumulative budget,
+enforced before and after each successful stat, including the final one.
+Individual requests use the store client's own timeouts. If verification runs
+out of budget, Voxhelm refuses the completion without settling the job. The
+worker can retry while its lease is active.
+
+Names, storage keys and content types must fit their columns (255, 512 and
+255 characters, no NUL), `size_bytes` must fit a signed 64-bit integer, and no
 two artifacts may name the same object (keys are compared after collapsing `//`
 and `.` segments). The producer still downloads winning artifacts through
 `GET /v1/jobs/<job_id>/artifacts/<name>`. Transcript and speaker-sidecar

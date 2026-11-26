@@ -4,6 +4,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 from sys import float_info
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,7 +12,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DatabaseError
 from django.utils import timezone
 
-from jobs import services
+from jobs import remote_workers, services
 from jobs.artifacts import StoredArtifact, current_artifact_store_identity, get_artifact_store
 from jobs.models import Job, JobArtifact, PendingArtifactDeletion, StagedMedia, Worker
 from jobs.retention import prune_job_artifacts
@@ -1131,6 +1132,56 @@ def test_remote_completion_verifies_artifact_objects_outside_settlement_transact
     )
 
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_remote_completion_rejects_a_final_stat_past_the_verification_deadline(
+    client, monkeypatch, settings
+):
+    job = submit_remote_job(client, settings, task_ref="remote-final-stat-deadline")
+    claim = claim_one(client).json()["job"]
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+    store = get_artifact_store()
+    clock = 0.0
+    slow_final_stat = True
+
+    def stat(*, key: str) -> StoredArtifact:
+        nonlocal clock
+        stored = store.stat(key=key)
+        if slow_final_stat and key == manifest[-1]["storage_key"]:
+            clock += remote_workers.REMOTE_ARTIFACT_VERIFY_BUDGET_SECONDS + 1
+        return stored
+
+    monkeypatch.setattr(remote_workers, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(
+        remote_workers,
+        "get_artifact_store_for_identity",
+        lambda store_identity: SimpleNamespace(stat=stat),
+    )
+    body = {
+        "worker_id": "atlas",
+        "lease_token": claim["lease_token"],
+        "result_text": "remote transcript",
+        "result_metadata": {"backend": "whisper.cpp"},
+        "artifacts": manifest,
+    }
+    url = f"/v1/internal/work/{job.id}/complete"
+    response = client.post(url, body, content_type="application/json", **worker_headers())
+
+    assert response.status_code == 400
+    assert "Artifact verification exceeded its" in response.json()["error"]["message"]
+    job.refresh_from_db()
+    assert job.state == Job.State.RUNNING
+    assert job.finished_at is None
+    assert not JobArtifact.objects.filter(job=job).exists()
+
+    slow_final_stat = False
+    response = client.post(url, body, content_type="application/json", **worker_headers())
+    assert response.status_code == 200
+    job.refresh_from_db()
+    assert job.state == Job.State.SUCCEEDED
+    assert JobArtifact.objects.filter(job=job).count() == len(manifest)
 
 
 @pytest.mark.django_db
