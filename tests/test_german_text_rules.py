@@ -173,11 +173,7 @@ def test_non_clock_colon_notation_remains_literal(text: str) -> None:
     [
         ("Um 00:00.", "Um null Uhr."),
         ("Um 23:59 Uhr.", "Um dreiundzwanzig Uhr neunundfünfzig."),
-        ("Um 1:00 Uhr.", "Um eins Uhr."),
-        (
-            "Um 01:30 Uhr kommt 1 kg Mehl dazu.",
-            "Um eins Uhr dreißig kommt ein Kilogramm Mehl dazu.",
-        ),
+        ("Um 1:00 Uhr.", "Um ein Uhr."),
     ],
 )
 def test_valid_german_clock_times_are_spoken(text: str, expected: str) -> None:

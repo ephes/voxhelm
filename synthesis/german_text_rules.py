@@ -26,7 +26,7 @@
 # - Numeric substitutions preserve tokens above 64 digits without conversion.
 # - Cardinal labels emit their punctuation directly; no text markers are reserved.
 # - Date expansions require valid Gregorian calendar components.
-# - Clock expansions require a time from 00:00 to 23:59 and say "eins Uhr".
+# - Clock expansions require a time from 00:00 to 23:59.
 # - The "z. B." expansion requires a word boundary after the "B".
 from __future__ import annotations
 
@@ -466,7 +466,7 @@ def normalize_german_text(text: str) -> str:
         minute = int(match.group(2))
         if hour >= 24 or minute >= 60:
             return match.group(0)
-        hour_word = number_to_words(hour)
+        hour_word = "ein" if hour == 1 else number_to_words(hour)
         if minute == 0:
             return f"{hour_word} Uhr"
         return f"{hour_word} Uhr {number_to_words(minute)}"
