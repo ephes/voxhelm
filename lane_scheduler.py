@@ -468,7 +468,10 @@ class LaneScheduler:
         if payload is None:
             return None
         try:
-            return WaiterRecord.from_dict(payload)
+            waiter = WaiterRecord.from_dict(payload)
+            if waiter_path.name != f"{waiter.token}.json":
+                raise ValueError("Waiter token does not match its receipt filename.")
+            return waiter
         except KeyError, TypeError, ValueError:
             _LOGGER.warning("lane_scheduler removed invalid waiter state path=%s", waiter_path)
             return None

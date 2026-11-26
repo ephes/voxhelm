@@ -1184,6 +1184,28 @@ def test_waiter_selection_matches_sorted_queue(tmp_path, total, batch):
     assert actual == expected
 
 
+def test_detached_live_waiter_does_not_block_admission(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
+    scheduler._ensure_layout()
+    original = scheduler._waiter_path("original")
+    detached = scheduler._waiter_path("detached")
+    waiter = WaiterRecord("original", LANE_INTERACTIVE, os.getpid(), 1)
+    with scheduler._control_lock():
+        scheduler._write_json(original, waiter.as_dict())
+        detached.write_bytes(original.read_bytes())
+        original.unlink()
+
+    def unexpected_poll(_interval):
+        pytest.fail("The detached waiter blocked an idle slot")
+
+    monkeypatch.setattr("lane_scheduler.time.sleep", unexpected_poll)
+    ticket = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    try:
+        assert waiter_count(scheduler) == 0
+    finally:
+        scheduler.release(ticket)
+
+
 def test_acquire_skips_waiter_reads_when_all_slots_are_full(tmp_path, monkeypatch):
     scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
     holder = scheduler.acquire(lane=LANE_NON_INTERACTIVE)

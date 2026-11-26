@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove waiter receipts whose filenames do not match their tokens before ranking the inference queue.
+
 - Speak Unicode minus on admitted German EUR amounts, units and degrees.
 
 - Read complete German thousands groups in numbered units and degrees, preserving malformed numeric spellings.

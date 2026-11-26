@@ -1728,6 +1728,9 @@ Capacity is a small, bounded set of slots (decision D-24):
   while one long HTTP transcription is inside `whisper-cli`; both
   then share the GPU, so the interactive request is slower than on an idle host
   but not blocked.
+- A waiter receipt participates in admission only when its filename is
+  `<token>.json` for the token in its contents. Queue scans remove mismatched
+  receipts under the control lock.
 - Holder publication and waiter removal run under the control lock. The
   ticket transfers to the caller after the lock exits successfully and a final
   cancellation check passes. Cancellation at that check, a failed publication,
