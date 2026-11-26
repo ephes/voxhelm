@@ -8,6 +8,24 @@ from synthesis.german_text_rules import normalize_german_text, year_to_words
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
+        ("Das Beispiel heißt z. Bausch.", "Das Beispiel heißt z. Bausch."),
+        ("Das Beispiel heißt z.Bausch.", "Das Beispiel heißt z.Bausch."),
+        ("Das gilt z. B. heute.", "Das gilt zum Beispiel heute."),
+        ("Das gilt z.B., auch morgen.", "Das gilt zum Beispiel, auch morgen."),
+        ("Das gilt zB heute.", "Das gilt zum Beispiel heute."),
+        ("Das gilt z. B..", "Das gilt zum Beispiel."),
+        ("Das gilt z.\nB. heute.", "Das gilt zum Beispiel heute."),
+        ("Das gilt z.", "Das gilt zum Beispiel"),
+        ("B. heute.", "heute."),
+    ],
+)
+def test_zum_beispiel_abbreviation_requires_a_complete_b(text: str, expected: str) -> None:
+    assert normalize_german_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
         # Sentence-final numbers are cardinals (or years) and keep their full stop.
         (
             "Das war im Jahr 2024. Danach kam mehr.",

@@ -166,6 +166,8 @@ One new backend, one routing layer, minimal surgery elsewhere:
   attribution comment with upstream URL + revision) and apply it before
   phonemization for German synthesis only. Vendored file is excluded from
   strict lint if needed but covered by tests.
+  - Expanding `z. B.` and its compact forms requires a word boundary after
+    the `B`, so a following word such as `Bausch` remains whole.
   - Numeric-token admission (2026-11): unit, EUR and degree substitutions
     accept at most 64 digits across integer and fractional parts, excluding
     sign and separator. Longer matches retain their literal number (including

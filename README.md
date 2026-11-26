@@ -246,6 +246,11 @@ still carry `c: null`, preserving the absence of Parakeet confidence evidence.
 
 ## Kokoro inference and installed style validation
 
+German preprocessing reads `z. B.`, `z.B.` and `zB` as `zum Beispiel`
+when the `B` ends the abbreviation. Text such as `z. Bausch` keeps the
+following word intact. When input arrives in separate fragments, a trailing
+`z.` expands and the next fragment's leading `B.` is skipped before a word.
+
 German preprocessing expands numeric units, EUR amounts and temperatures only
 when the complete numeric token has at most 64 digits (integer and fractional
 parts combined; sign and separator excluded). Longer numbers keep their literal

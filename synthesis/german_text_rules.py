@@ -27,6 +27,7 @@
 # - Cardinal labels emit their punctuation directly; no text markers are reserved.
 # - Date expansions require valid Gregorian calendar components.
 # - Clock expansions require a time from 00:00 to 23:59.
+# - The "z. B." expansion requires a word boundary after the "B".
 from __future__ import annotations
 
 import re
@@ -37,7 +38,7 @@ ABBREVIATIONS = (
     (r"\bLfd\.\s*Nr\.", "laufende Nummer"),
     (r"\bz\.\s*$", "zum Beispiel"),
     (r"^\s*b\.\s+", ""),
-    (r"\bz\s*\.?\s*b\.?", "zum Beispiel"),
+    (r"\bz\s*\.?\s*b\b\.?", "zum Beispiel"),
     (r"\bzB\b", "zum Beispiel"),
     (r"\betc\.", "ezetera"),
     (r"\busw\.", "und so weiter"),
