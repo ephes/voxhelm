@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Check staged audio size at open and after copying before local batch transcription.
 - Reject empty batch audio uploads before registering a lease or writing an artifact.
 - Continue staged upload admission and defer failed expiry cleanup before logging warnings.
 - Preserve artifact reader refusals when both closing the reader and logging the cleanup failure fail.

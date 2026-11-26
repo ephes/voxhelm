@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import uuid
 from collections.abc import Iterator
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -235,10 +236,16 @@ def materialize_staged_media(*, staged: StagedMedia) -> DownloadedMedia:
 
     target_path = reserve_temp_media_path(suffix=suffix)
     try:
-        get_artifact_store_for_identity(staged.storage_identity).download_file(
-            key=staged.storage_key,
-            destination_path=target_path,
-        )
+        store = get_artifact_store_for_identity(staged.storage_identity)
+        with (
+            closing(
+                store.open_reader(key=staged.storage_key, expected_size_bytes=staged.size_bytes)
+            ) as source,
+            target_path.open("wb") as target,
+        ):
+            shutil.copyfileobj(source, target)
+        if target_path.stat().st_size != staged.size_bytes:
+            raise ValueError("Staged input copy size differs from the recorded size.")
     except Exception as exc:
         target_path.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to materialize staged input: {exc}") from exc

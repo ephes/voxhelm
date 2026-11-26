@@ -757,7 +757,10 @@ curl -X POST http://127.0.0.1:8000/v1/jobs \
 ```
 
 Staged uploads are stored in Voxhelm's configured artifact backend before
-execution. Django Tasks jobs delete the temporary staged object immediately after
+execution. Local Django Tasks jobs check the stored object's size when opening it
+and the completed temporary copy's size against the recorded upload size. A
+mismatch fails the job before transcription and removes the temporary copy.
+Django Tasks jobs delete the temporary staged object immediately after
 materialization; remote worker jobs delete it after a successful completion
 records the worker-copied job-owned source artifact. Terminal remote failures
 release the staged upload claim so the same `upload_id` can be retried until the

@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from asgiref.local import Local
@@ -1202,6 +1203,47 @@ def test_staged_audio_job_records_materialization_failure(client, settings, monk
     assert response.status_code == 201
     assert response.json()["state"] == "failed"
     assert response.json()["error"]["message"] == "staging exploded"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("truncate_after_open", [False, True])
+def test_staged_audio_job_refuses_truncated_input(
+    client, settings, monkeypatch, staging_temp_paths, truncate_after_open
+):
+    configure_task_backend(settings, "django_tasks.backends.immediate.ImmediateBackend")
+    backend = Mock(wraps=DummyBackend())
+    monkeypatch.setattr("transcriptions.service.get_backend_service", lambda: backend)
+    monkeypatch.setattr(jobs_staging, "reserve_temp_media_path", jobs_media.reserve_temp_media_path)
+    staged_response = stage_upload(client, content_type="audio/mpeg")
+    assert staged_response.status_code == 201
+    staged = StagedMedia.objects.get(id=staged_response.json()["id"])
+    artifact = Path(settings.VOXHELM_ARTIFACT_ROOT) / staged.storage_key
+
+    if truncate_after_open:
+        open_reader = FilesystemArtifactStore.open_reader
+
+        def open_then_truncate(self, *, key, expected_size_bytes=None):
+            reader = open_reader(self, key=key, expected_size_bytes=expected_size_bytes)
+            artifact.write_bytes(b"short")
+            return reader
+
+        monkeypatch.setattr(FilesystemArtifactStore, "open_reader", open_then_truncate)
+    else:
+        artifact.write_bytes(b"short")
+
+    response = client.post(
+        "/v1/jobs",
+        data=json.dumps(
+            build_job_payload(input_data={"kind": "upload", "upload_id": str(staged.id)})
+        ),
+        content_type="application/json",
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["state"] == "failed"
+    backend.transcribe.assert_not_called()
+    assert [path.exists() for path in staging_temp_paths] == [False, False]
 
 
 @pytest.mark.django_db
