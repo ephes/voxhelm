@@ -1019,16 +1019,21 @@ hard-linked members are refused too.
 In both bundle versions each canonical member name may appear only once across
 the job audio and all reference windows. Names that resolve to the same file
 are also refused. Recapture bundles that reuse a member.
-All opened NumPy 1.0/2.0 headers and exact file lengths are checked before sample
-allocation: nonempty native float32 mono vectors, at most two hours at 16 kHz
-for audio (the production Pyannote decode bound, `PYANNOTE_MAX_FRAMES`; capture
-decodes the job audio with that allowance first and refuses longer sources
-before ASR or diarization start), five seconds per reference window, 1000 windows and 512 MiB aggregate
-sample bytes. Samples must be finite before any
-embedding. After header admission fixed-count raw float32 reads avoid reparsing
-a potentially modified header; pickle is never enabled or used. Opened files
-must remain unchanged during reads. These are offline capacity limits, not
-changes to production inference admission.
+
+Preflight opens one member at a time and checks every NumPy 1.0/2.0 header and
+exact file length before sample allocation. Arrays must be nonempty native
+float32 mono vectors. Job audio is limited to two hours at 16 kHz, matching the
+production Pyannote decode bound (`PYANNOTE_MAX_FRAMES`). Capture decodes job
+audio with that allowance first and refuses longer sources before ASR or
+diarization starts. The bundle admits up to 1000 reference windows of at most
+five seconds each and at most 512 MiB of sample bytes in total.
+
+The loader holds the bundle directory open across both passes. It reopens each
+member relative to that directory and checks
+the file identity, size, modification and change times, and header layout against
+preflight before reading the admitted byte count. It checks the file generation
+again after reading. Samples must be finite before any embedding. The loader
+reads raw float32 samples directly and never uses pickle.
 
 ### Frozen generation publication and identity (bundle version 2)
 

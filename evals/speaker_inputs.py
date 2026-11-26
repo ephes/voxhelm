@@ -12,7 +12,7 @@ import os
 import stat
 from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 from transcriptions.json_input import (
     check_json_depth,
@@ -254,7 +254,7 @@ def validate_bundle(value: Any) -> list[tuple[str, int]]:
     return members
 
 
-def open_member(stack: ExitStack, root_fd: int, name: str) -> Any:
+def open_member(stack: ExitStack, root_fd: int, name: str) -> tuple[BinaryIO, os.stat_result]:
     path = member_path(name)
     directory = root_fd
     for part in path.parts[:-1]:
@@ -264,7 +264,29 @@ def open_member(stack: ExitStack, root_fd: int, name: str) -> Any:
     handle = stack.enter_context(os.fdopen(fd, "rb"))
     metadata = os.fstat(fd)
     require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1, "bundle.member")
-    return handle
+    return handle, metadata
+
+
+def array_layout(handle: BinaryIO, max_frames: int) -> tuple[int, int]:
+    """Return the sample offset and byte count of an admitted NPY header."""
+    import numpy as np
+
+    version = np.lib.format.read_magic(handle)
+    require(version in ((1, 0), (2, 0)), "bundle.array.version")
+    reader = (
+        np.lib.format.read_array_header_1_0
+        if version == (1, 0)
+        else np.lib.format.read_array_header_2_0
+    )
+    shape, fortran, dtype = reader(handle, max_header_size=4096)
+    require(
+        len(shape) == 1
+        and 0 < shape[0] <= max_frames
+        and dtype == np.dtype("float32")
+        and not fortran,
+        "bundle.array.geometry",
+    )
+    return handle.tell(), shape[0] * dtype.itemsize
 
 
 def sample_digests(members: list[tuple[str, int]], arrays: list[Any]) -> dict[str, str]:
@@ -277,54 +299,53 @@ def sample_digests(members: list[tuple[str, int]], arrays: list[Any]) -> dict[st
 def load_arrays(
     root: Path, members: list[tuple[str, int]], *, expected: dict[str, str] | None = None
 ) -> list[Any]:
-    """Inspect every header/aggregate before any allocation, then load the same FDs."""
+    """Admit every header and the aggregate size before loading any samples."""
     import numpy as np
 
     try:
         with ExitStack() as stack:
             root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             stack.callback(os.close, root_fd)
-            handles = []
+            admitted = []
             seen_files: set[tuple[int, int]] = set()
             total = 0
             for name, max_frames in members:
-                handle = open_member(stack, root_fd, name)
-                metadata = os.fstat(handle.fileno())
-                identity = (metadata.st_dev, metadata.st_ino)
-                require(identity not in seen_files, "bundle.member.duplicate")
-                seen_files.add(identity)
-                version = np.lib.format.read_magic(handle)
-                require(version in ((1, 0), (2, 0)), "bundle.array.version")
-                reader = (
-                    np.lib.format.read_array_header_1_0
-                    if version == (1, 0)
-                    else np.lib.format.read_array_header_2_0
-                )
-                shape, fortran, dtype = reader(handle, max_header_size=4096)
-                require(
-                    len(shape) == 1
-                    and 0 < shape[0] <= max_frames
-                    and dtype == np.dtype("float32")
-                    and not fortran,
-                    "bundle.array.geometry",
-                )
-                size = shape[0] * dtype.itemsize
-                total += size
-                require(total <= MAX_ARRAY_BYTES, "bundle.array.aggregate")
-                require(
-                    os.fstat(handle.fileno()).st_size == handle.tell() + size, "bundle.array.bytes"
-                )
-                handles.append((handle, size, os.fstat(handle.fileno())))
+                with ExitStack() as member_stack:
+                    handle, metadata = open_member(member_stack, root_fd, name)
+                    identity = (metadata.st_dev, metadata.st_ino)
+                    require(identity not in seen_files, "bundle.member.duplicate")
+                    seen_files.add(identity)
+                    generation = file_generation(metadata)
+                    offset, size = array_layout(handle, max_frames)
+                    require(
+                        file_generation(os.fstat(handle.fileno())) == generation,
+                        "bundle.array.changed",
+                    )
+                    require(metadata.st_size == offset + size, "bundle.array.bytes")
+                    total += size
+                    require(total <= MAX_ARRAY_BYTES, "bundle.array.aggregate")
+                    admitted.append((generation, offset, size))
             arrays = []
-            for handle, size, metadata in handles:
-                # Fixed-count raw float32 read: never reparse a mutable header during load,
-                # and never invoke pickle or allocate from untrusted shape metadata.
-                raw = handle.read(size + 1)
-                require(
-                    len(raw) == size
-                    and file_generation(os.fstat(handle.fileno())) == file_generation(metadata),
-                    "bundle.array.changed",
-                )
+            for (name, max_frames), (generation, offset, size) in zip(
+                members, admitted, strict=True
+            ):
+                with ExitStack() as member_stack:
+                    handle, metadata = open_member(member_stack, root_fd, name)
+                    require(file_generation(metadata) == generation, "bundle.array.changed")
+                    require(
+                        array_layout(handle, max_frames) == (offset, size), "bundle.array.changed"
+                    )
+                    require(
+                        file_generation(os.fstat(handle.fileno())) == generation,
+                        "bundle.array.changed",
+                    )
+                    # Use the admitted byte count directly; no pickle or shape-driven allocation.
+                    raw = handle.read(size + 1)
+                    require(
+                        len(raw) == size
+                        and file_generation(os.fstat(handle.fileno())) == generation,
+                        "bundle.array.changed",
+                    )
                 array = np.frombuffer(raw, dtype=np.float32)
                 for start in range(0, len(array), 65536):
                     require(

@@ -2,6 +2,8 @@
 
 import hashlib
 import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -182,6 +184,80 @@ def test_huge_header_and_aggregate_refuse_before_load(tmp_path, monkeypatch):
         )
     with pytest.raises(ValueError):
         ev.run_bundle(path, {})
+
+
+def test_bundle_array_admission_under_low_descriptor_limit(tmp_path):
+    path = tmp_path / "bundle"
+    value = tiny_bundle(path)
+    (path / "references" / "speaker").mkdir(parents=True)
+    windows = [f"references/speaker/{index}.npy" for index in range(128)]
+    for name in windows:
+        np.save(path / name, np.ones(16, dtype=np.float32))
+    value["references"] = [{"id": "a", "name": "Speaker A", "windows": windows}]
+    ev.write_json(path / "bundle.json", value)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import resource
+import sys
+from pathlib import Path
+
+import numpy
+
+from evals.speaker_inputs import load_arrays, read_json, validate_bundle
+
+root = Path(sys.argv[1])
+members = validate_bundle(read_json(root / "bundle.json"))
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (64 if soft < 0 else min(soft, 64), hard))
+arrays = load_arrays(root, members)
+assert len(arrays) == 129
+assert all(numpy.array_equal(array, numpy.ones(16, dtype=numpy.float32)) for array in arrays)
+""",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_bundle_refuses_member_replaced_after_header_preflight(tmp_path, monkeypatch):
+    path = tmp_path / "bundle"
+    value = tiny_bundle(path)
+    value["references"] = [{"id": "a", "name": "Speaker A", "windows": ["refs/window.npy"]}]
+    ev.write_json(path / "bundle.json", value)
+    original = path / "refs"
+    replacement = path / "replacement"
+    for directory in (original, replacement):
+        directory.mkdir()
+        np.save(directory / "window.npy", np.ones(16, dtype=np.float32))
+
+    read_header = np.lib.format.read_array_header_1_0
+    header_count = 0
+
+    def replace_after_last_header(*args, **kwargs):
+        nonlocal header_count
+        header = read_header(*args, **kwargs)
+        header_count += 1
+        if header_count == 2:
+            # Swapping the parent leaves the already opened member's metadata intact.
+            original.rename(path / "old")
+            replacement.rename(original)
+        return header
+
+    monkeypatch.setattr(np.lib.format, "read_array_header_1_0", replace_after_last_header)
+    monkeypatch.setattr(
+        "transcriptions.known_speaker.get_known_speaker_backend",
+        lambda *a: pytest.fail("backend started"),
+    )
+    with pytest.raises(ValueError, match=r"bundle\.array") as raised:
+        ev.run_bundle(path, {})
+    assert "bundle.array.changed" in str(raised.value.__cause__)
 
 
 @pytest.mark.parametrize("role", ["result", "turn"])
