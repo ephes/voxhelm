@@ -24,7 +24,7 @@ from django_tasks import task_backends
 from jobs import media as jobs_media
 from jobs import services
 from jobs import staging as jobs_staging
-from jobs.artifacts import FilesystemArtifactStore, get_artifact_store
+from jobs.artifacts import FilesystemArtifactStore, StoredArtifact, get_artifact_store
 from jobs.fingerprints import stored_job_request_fingerprint
 from jobs.media import DownloadedMedia
 from jobs.models import Job, JobArtifact, StagedMedia
@@ -830,6 +830,29 @@ def test_staging_removes_partial_object_and_row_when_upload_fails(
     with pytest.raises(OSError, match="artifact store exploded"):
         stage_audio_directly()
 
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("receipt_size", [-1, 0, 5, 20])
+def test_staging_rejects_wrong_store_receipt_size(
+    client, settings, monkeypatch, staging_temp_paths, receipt_size
+):
+    def put_with_wrong_receipt(self, *, key, source_path, content_type):
+        registered = StagedMedia.objects.get()
+        assert registered.storage_key == key
+        assert registered.size_bytes == source_path.stat().st_size == len(b"mp3-bytes")
+        self.put_bytes(key=key, data=b"x" * max(0, receipt_size), content_type=content_type)
+        return StoredArtifact(backend="s3", key=f"{key}.unrelated", size_bytes=receipt_size)
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_with_wrong_receipt)
+
+    response = stage_upload(client, content_type="audio/mpeg")
+
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Batch processing failed."
     assert stored_staged_objects(settings) == []
     assert not StagedMedia.objects.exists()
     assert [path.exists() for path in staging_temp_paths] == [False]

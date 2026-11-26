@@ -780,6 +780,9 @@ Voxhelm deletes the late object through the same cleanup used for failed uploads
 and database updates. If deletion fails, Voxhelm keeps or recreates the row as
 already expired so the next cleanup can retry. Failed cleanup diagnostics cannot
 prevent recording that expiry or replace the original staging error.
+Before completion, the artifact store's reported byte count must match the
+nonempty temporary copy. A mismatch returns HTTP 500 and triggers the same
+cleanup using the backend and key registered for the upload.
 The staging byte ceiling is checked against both the declared size and the
 actual chunks before they are written to the temporary file. An over-limit
 stream removes its partial file and publishes no object or staging row. An

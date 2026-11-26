@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject staged uploads when the store reports the wrong byte count and clean up the registered object.
 - Check staged audio size at open and after copying before local batch transcription.
 - Reject empty batch audio uploads before registering a lease or writing an artifact.
 - Continue staged upload admission and defer failed expiry cleanup before logging warnings.

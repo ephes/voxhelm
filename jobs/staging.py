@@ -100,6 +100,8 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
                 source_path=temp_path,
                 content_type=staged.content_type,
             )
+            if stored.size_bytes != upload_size:
+                raise RuntimeError("Artifact store reported an unexpected staged upload size.")
             staged.storage_backend = stored.backend
             staged.storage_key = stored.key
             # Retention counts from the finished upload; until here the row
