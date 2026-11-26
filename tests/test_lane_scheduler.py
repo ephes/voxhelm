@@ -819,6 +819,37 @@ def test_admit_local_inference_is_a_no_op_when_disabled(settings, tmp_path: Path
     assert not scheduler_dir.exists()
 
 
+@pytest.mark.parametrize("worker_error", [None, InferenceCancelled, ValueError])
+def test_inference_outcome_when_slot_release_fails(settings, tmp_path, monkeypatch, worker_error):
+    settings.VOXHELM_LANE_SCHEDULER_ENABLED = True
+    settings.VOXHELM_LANE_SCHEDULER_DIR = tmp_path
+    holders_dir = tmp_path / "holders"
+    original_unlink = Path.unlink
+    release_failure = PermissionError("holder unlink failed")
+    primary = worker_error("fake worker failed") if worker_error is not None else None
+    release_attempts = []
+
+    def unlink(path, *args, **kwargs):
+        if path.parent == holders_dir:
+            release_attempts.append(path)
+            raise release_failure
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    expected = primary if primary is not None else release_failure
+    handle = None
+    with pytest.raises(type(expected)) as raised, admit_local_inference(LANE_INTERACTIVE) as ticket:
+        handle = ticket._holder_handle
+        if primary is not None:
+            raise primary
+
+    assert raised.value is expected
+    if primary is not None:
+        assert getattr(primary, "__notes__", []) == ["Could not release the inference lane slot."]
+    assert release_attempts == [holders_dir / f"{ticket.token}.json"]
+    assert handle is not None and handle.closed
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_age_warning_tracks_presence_and_ignores_young_holders(tmp_path: Path, caplog, legacy):
     scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60)

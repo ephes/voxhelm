@@ -546,10 +546,19 @@ def admit_local_inference(
         non_interactive_slots=settings.VOXHELM_LANE_SCHEDULER_NON_INTERACTIVE_SLOTS,
     )
     ticket = scheduler.acquire(lane=normalized_lane, cancel_event=cancel_event)
+    failure: BaseException | None = None
     try:
         yield ticket
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
-        scheduler.release(ticket)
+        try:
+            scheduler.release(ticket)
+        except BaseException:
+            if failure is None:
+                raise
+            failure.add_note("Could not release the inference lane slot.")
 
 
 def normalize_lane(lane: str) -> str:

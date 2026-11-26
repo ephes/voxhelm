@@ -1754,6 +1754,10 @@ Capacity is a small, bounded set of slots (decision D-24):
   Release checks that the receipt still names the locked inode. If another
   inode has taken its place, release preserves that receipt, closes the
   original handle, and reports an error.
+  The admission context attempts release once after inference. If both
+  inference and release fail, the inference error or cancellation propagates
+  with a fixed release-failure note. A release failure after successful
+  inference propagates on its own.
   Process death releases that lock, so a later admission reclaims the abandoned
   holder even if its PID has been reused. Keep the returned ticket alive until
   inference ends and call `release` (normally via `admit_local_inference`).
