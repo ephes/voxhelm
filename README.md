@@ -126,7 +126,11 @@ such an error reaches whisper-cli's non-zero exit.
 
 As a backstop, every whisper.cpp run checks its raw segments against the real
 duration of the normalized WAV (frames / rate) before the temporary WAV is
-removed (`transcriptions/coverage.py`). The largest stretch without text, at the
+removed (`transcriptions/coverage.py`). Segment records require string text.
+Blank text is skipped. Nonblank text requires both `timestamps.from` and
+`timestamps.to` as timestamp strings that parse to finite, millisecond-representable
+times. A malformed record raises `TranscriptionError` before the coverage check
+or transcript publication. The largest stretch without text, at the
 start, between segments or at the end, must not exceed
 `VOXHELM_WHISPERCPP_MAX_GAP_SECONDS` (default `600`; `0` disables the rejection,
 a gap exactly at the threshold passes). Coverage is the sorted union of the

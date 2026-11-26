@@ -1,13 +1,18 @@
 """Synthetic native inference output admission; no model or media is used."""
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 
+from tests.test_service import write_wav
 from transcriptions import service
+from transcriptions.errors import TranscriptionError
 from transcriptions.owned_process import OWNED_PROCESS_DIAGNOSTIC_MAX_BYTES
 
 
@@ -117,6 +122,69 @@ def test_whispercpp_refuses_untrusted_transcript(monkeypatch, tmp_path, kind):
         RuntimeError, match="whisper.cpp transcription produced invalid JSON output"
     ):
         backend.transcribe(tmp_path / "input.wav", service.TranscribeParams("auto", None, None))
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"text": None, "timestamps": {"from": "00:00:00,000", "to": "00:00:01,000"}},
+        {"text": 42, "timestamps": {"from": "00:00:00,000", "to": "00:00:01,000"}},
+        {"text": "Synthetic", "timestamps": {"to": "00:00:01,000"}},
+        {"text": "Synthetic", "timestamps": {"from": "00:00:00,000"}},
+        {"text": "Synthetic", "timestamps": {"from": "NaN:00:00,000", "to": "00:00:01,000"}},
+        {"text": "Synthetic", "timestamps": {"from": "invalid", "to": "00:00:01,000"}},
+        {"text": "Synthetic"},
+        ["Synthetic"],
+    ],
+)
+def test_whispercpp_rejects_invalid_segment_before_coverage(client, monkeypatch, tmp_path, record):
+    monkeypatch.setattr(service, "resolve_whispercpp_binary", lambda _: "synthetic-cli")
+    monkeypatch.setattr(service, "resolve_whispercpp_model_path", lambda _: tmp_path / "model")
+    monkeypatch.setattr(
+        service,
+        "normalize_audio_to_wav_16k_mono",
+        lambda **kwargs: write_wav(kwargs["output_path"]),
+    )
+    valid = {"text": "Valid", "timestamps": {"from": "00:00:00,000", "to": "00:00:01,000"}}
+    records = [valid, record]
+
+    def produce(args, **kwargs):
+        path = Path(args[args.index("-of") + 1]).with_suffix(".json")
+        path.write_text(json.dumps({"transcription": records}))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(service, "run_cancellable_process", produce)
+    coverage = Mock(wraps=service.check_transcript_coverage)
+    monkeypatch.setattr(service, "check_transcript_coverage", coverage)
+    backend = service.WhisperCppBackend(binary_path="cli", model_name="model", processors=1)
+    params = service.TranscribeParams("auto", None, None)
+
+    with pytest.raises(
+        TranscriptionError, match="whisper.cpp transcription produced invalid segment"
+    ):
+        backend.transcribe(tmp_path / "input.wav", params)
+    monkeypatch.setattr(
+        service,
+        "get_backend_services_for_model",
+        lambda _model: [service.BackendInvocation("whispercpp", backend)],
+    )
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={
+            "file": SimpleUploadedFile("input.wav", b"synthetic audio", content_type="audio/wav"),
+            "model": "whisper-1",
+            "response_format": "vtt",
+        },
+        HTTP_AUTHORIZATION="Bearer test-token",
+    )
+    assert response.status_code == 500
+    assert "invalid segment" in response.json()["error"]["message"]
+    coverage.assert_not_called()
+
+    records[1] = {"text": " \n "}
+    result = backend.transcribe(tmp_path / "input.wav", params)
+    assert result.segments == [service.TranscriptionSegment(id=0, start=0, end=1, text="Valid")]
+    coverage.assert_called_once()
 
 
 def test_native_output_keeps_admitted_language_evidence():

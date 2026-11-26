@@ -33,6 +33,7 @@ from transcriptions.coverage import (
     validate_max_gap_seconds,
     wav_duration_seconds,
 )
+from transcriptions.errors import TranscriptionError
 from transcriptions.json_input import decode_json_object
 from transcriptions.native_output import file_generation, read_native_json
 from transcriptions.owned_process import (
@@ -864,15 +865,14 @@ def normalize_whispercpp_payload(
     if isinstance(raw_segments, list):
         for index, raw_segment in enumerate(raw_segments):
             if not isinstance(raw_segment, dict):
-                continue
-            timestamps = raw_segment.get("timestamps")
-            if not isinstance(timestamps, dict):
-                continue
-            segment_text = str(raw_segment.get("text", "")).strip()
+                raise TranscriptionError("whisper.cpp transcription produced invalid segment data.")
+            raw_text = raw_segment.get("text")
+            if not isinstance(raw_text, str):
+                raise TranscriptionError("whisper.cpp transcription produced invalid segment text.")
+            segment_text = raw_text.strip()
             if not segment_text:
                 continue
-            start = timestamp_to_seconds(str(timestamps.get("from", "00:00:00,000")))
-            end = timestamp_to_seconds(str(timestamps.get("to", "00:00:00,000")))
+            start, end = _whispercpp_segment_times(raw_segment.get("timestamps"))
             segments.append(
                 TranscriptionSegment(
                     id=index,
@@ -893,6 +893,23 @@ def normalize_whispercpp_payload(
         backend_name="whisper.cpp",
         model_name=model_name,
     )
+
+
+def _whispercpp_segment_times(timestamps: object) -> tuple[float, float]:
+    error = "whisper.cpp transcription produced invalid segment timestamps."
+    if not isinstance(timestamps, dict):
+        raise TranscriptionError(error)
+    start, end = timestamps.get("from"), timestamps.get("to")
+    if not isinstance(start, str) or not isinstance(end, str):
+        raise TranscriptionError(error)
+    try:
+        start_seconds = timestamp_to_seconds(start)
+        end_seconds = timestamp_to_seconds(end)
+    except ValueError:
+        raise TranscriptionError(error) from None
+    if not (math.isfinite(start_seconds * 1000) and math.isfinite(end_seconds * 1000)):
+        raise TranscriptionError(error)
+    return start_seconds, end_seconds
 
 
 def whispercpp_segment_words(
