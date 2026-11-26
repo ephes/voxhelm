@@ -36,6 +36,7 @@ from transcriptions.drift import (
     ENGLISH_FUNCTION_WORDS,
     FUNCTION_WORDS_SHA256,
     GERMAN_FUNCTION_WORDS,
+    DriftRule,
     count_function_words,
     function_word_tokens,
     run_drift_check,
@@ -188,6 +189,38 @@ def test_flag_rule_on_window_text_at_the_share_edge(german: int, flagged: bool):
 
 
 # --- splice and acceptance --------------------------------------------------------------------
+
+
+def test_default_retry_refuses_a_different_drift_window_width(monkeypatch):
+    retry = FakeRetry()
+    monkeypatch.setattr(drift, "transcribe_window", retry)
+    words = words_at(45.0, DRIFTED) + [word("später", 85.0)]
+
+    with pytest.raises(ValueError, match="Drift window width must match"):
+        run_drift_check(AUDIO, words, language="de", rule=DriftRule(window_seconds=45.0))
+
+    assert retry.calls == []
+
+
+def test_custom_retry_can_cover_a_different_drift_window_width():
+    words = words_at(45.0, DRIFTED) + [word("später", 85.0), word("danach", 90.0)]
+
+    def retry(audio_path: Path, t: float, *, cancel_event=None) -> WindowTranscription:
+        assert t == 45.0
+        return WindowTranscription(
+            t=t,
+            clip_start=t - 1.0,
+            language="de",
+            language_probability=0.999,
+            words=[{"w": "Korrektur", "s": 85.0, "e": 85.2}],
+            identity={},
+        )
+
+    check = run_drift_check(
+        AUDIO, words, language="de", rule=DriftRule(window_seconds=45.0), retry=retry
+    )
+
+    assert check.words == [word("Korrektur", 85.0) | {"c": None}, words[-1]]
 
 
 def test_splice_replaces_exactly_the_words_starting_in_the_window():

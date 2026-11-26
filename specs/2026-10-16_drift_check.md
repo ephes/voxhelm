@@ -64,6 +64,10 @@ profile).
 The check runs only for `language_hint` `de` (`DriftRule.languages`); for any
 other hint or none it does nothing and says so in its record.
 
+When a window is flagged, the built-in retry requires the rule's width to
+match its pinned 30-second window. A mismatch raises `ValueError` before
+retrying. Callers using another width can supply a retry that covers their grid.
+
 ### Where it runs
 
 `run_profile_transcription` resolves the Parakeet runtime and the window

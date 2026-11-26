@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refuse a flagged drift window when its width differs from the built-in retry's 30-second window.
+
 - Expand German `z. B.` only when its `B` ends the abbreviation.
 
 - Preserve inference errors and cancellations when releasing the lane slot also fails.

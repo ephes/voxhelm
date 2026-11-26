@@ -36,7 +36,12 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from transcriptions.windows import WindowTranscription, raise_if_cancelled, transcribe_window
+from transcriptions.windows import (
+    WINDOW_SETTINGS,
+    WindowTranscription,
+    raise_if_cancelled,
+    transcribe_window,
+)
 
 # The research lists (``lib.py``, FREEZE.txt sha256 5948f803...), verbatim. English words
 # that are also common German words (in, so, was, an, also, man, will, hat, war, die,
@@ -227,11 +232,13 @@ def run_drift_check(
     Retry words carry ``c: null`` (whisper's token probabilities are not Parakeet
     confidences). Raises what the retry raises (``BackendUnavailableError`` when the
     turbo runtime went away, ``RuntimeError`` on a failed window, ``InferenceCancelled``).
-    ``retry`` defaults to ``transcribe_window``. When there are no accepted replacements,
-    the result may share the input list. Treat the words as read-only.
+    ``retry`` defaults to ``transcribe_window``, which requires the pinned window width.
+    A flagged window of a different width raises ``ValueError`` unless the caller
+    supplies a retry that covers it. When there are no accepted replacements, the result
+    may share the input list. Treat the words as read-only.
     """
     raise_if_cancelled(cancel_event)
-    retry_window = retry or transcribe_window
+    retry_window = transcribe_window if retry is None else retry
     if language not in rule.languages:
         checked = ", ".join(rule.languages)
         reason = (
@@ -271,6 +278,11 @@ def run_drift_check(
         }
         if flagged:
             raise_if_cancelled(cancel_event)
+            if retry is None and rule.window_seconds != WINDOW_SETTINGS.window_seconds:
+                raise ValueError(
+                    "Drift window width must match the default retry window width "
+                    f"({WINDOW_SETTINGS.window_seconds:g} seconds)."
+                )
             started = monotonic()
             result = retry_window(
                 audio_path, index * rule.window_seconds, cancel_event=cancel_event
