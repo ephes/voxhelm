@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve staged upload failures and retry expiry when cleanup logging fails.
+- Refuse completion after a staged upload lease expires and clean up the late object.
+
 - Keep the original words when a drift retry reports a different window start.
 - Reject invalid drift window widths and probability thresholds before grouping words.
 

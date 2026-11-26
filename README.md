@@ -768,14 +768,15 @@ An upload that is interrupted or fails while Voxhelm copies it to local disk
 (client disconnect, disk write error) removes its partial temporary file, so a
 failed staging request leaves no local audio behind.
 Staging registers the upload in the database before it writes the object to the
-artifact backend, so a stored staged object always has a row that expiry cleanup
-can find. If the object upload or the final row update fails, Voxhelm deletes
-the object and the row again and returns the error; if that deletion fails as
-well, the row is kept (or written again) as already expired, so the next expiry
-cleanup retries the object deletion. While the object is still uploading the
-registration carries a 24-hour in-progress expiry, so a concurrent cleanup never
-removes it; `VOXHELM_STAGED_INPUT_RETENTION_SECONDS` counts from the finished
-upload.
+artifact backend. The registration carries a 24-hour in-progress lease.
+Completion must still own that lease, and
+`VOXHELM_STAGED_INPUT_RETENTION_SECONDS` counts from successful completion.
+If the lease expires or cleanup removes the registration before completion,
+`POST /v1/uploads` returns HTTP 400 asking the producer to stage the media again.
+Voxhelm deletes the late object through the same cleanup used for failed uploads
+and database updates. If deletion fails, Voxhelm keeps or recreates the row as
+already expired so the next cleanup can retry. Failed cleanup diagnostics cannot
+prevent recording that expiry or replace the original staging error.
 The staging byte ceiling is checked against both the declared size and the
 actual chunks before they are written to the temporary file. An over-limit
 stream removes its partial file and publishes no object or staging row. An

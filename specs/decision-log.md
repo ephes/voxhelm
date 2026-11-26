@@ -506,6 +506,13 @@ The follow-on slice should be defined as:
 
 **Implementation note (2026-10-12, staging failure cleanup):** `POST /v1/uploads` no longer leaves residue when staging fails. A failed copy of the upload stream removes its partial local temp file. The `StagedMedia` row is now committed (durable transaction, so it must not run inside a caller's transaction) before the object is uploaded; a failed upload or final row update deletes the object and row again, and if that compensation fails the row stays (or is written again, already expired) as the record that expiry cleanup uses to retry the object deletion. An in-progress registration carries a 24-hour expiry so concurrent expiry cleanup cannot remove it mid-upload; the configured retention counts from the finished upload. Previously a failed row save after a successful upload left an object no row pointed at, invisible to expiry cleanup.
 
+**Implementation note (2026-11-26, staging lease completion):** Completion updates
+the registration only while it still holds the original, unexpired 24-hour
+lease. If expiry cleanup has already retired the row or the lease has elapsed,
+the upload endpoint returns HTTP 400 and compensates for the late object.
+Failed cleanup diagnostics preserve the original error and allow the retry
+record write to proceed.
+
 **Recommended shape:**
 
 - keep `POST /v1/audio/transcriptions` unchanged as the small-file convenience path

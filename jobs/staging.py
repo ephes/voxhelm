@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterator
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -38,8 +39,8 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
     """Store an uploaded audio file as staged media and return its row.
 
     The ``StagedMedia`` row is committed before the object is uploaded, so a
-    stored object always has a row that expiry cleanup can find. If the upload
-    or the final row update fails, the object and the row are removed again; if
+    upload is tracked during its in-progress lease. If the upload or the final
+    row update fails, the object and the row are removed again; if
     that removal fails too, the row stays and expiry cleanup retries it.
 
     Must not run inside a caller's transaction: a rollback there would drop the
@@ -76,6 +77,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
     try:
         upload_size = temp_path.stat().st_size
         store = get_artifact_store()
+        upload_deadline = timezone.now() + timedelta(seconds=STAGED_UPLOAD_IN_PROGRESS_SECONDS)
         staged = StagedMedia(
             id=uuid.uuid4(),
             producer=producer,
@@ -84,7 +86,7 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             size_bytes=upload_size,
             storage_backend=store.backend_name,
             storage_identity=current_artifact_store_identity(),
-            expires_at=timezone.now() + timedelta(seconds=STAGED_UPLOAD_IN_PROGRESS_SECONDS),
+            expires_at=upload_deadline,
         )
         staged.storage_key = build_staged_media_key(staged=staged)
         with transaction.atomic(durable=True):
@@ -99,15 +101,24 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
             staged.storage_key = stored.key
             # Retention counts from the finished upload; until here the row
             # carried the in-progress expiry.
-            staged.expires_at = timezone.now() + timedelta(
+            finished_at = timezone.now()
+            staged.expires_at = finished_at + timedelta(
                 seconds=settings.VOXHELM_STAGED_INPUT_RETENTION_SECONDS
             )
             # Own atomic block: a failed update must leave the connection usable
             # for the compensation below even when a transaction is open.
             with transaction.atomic():
-                staged.save(
-                    update_fields=["storage_backend", "storage_key", "size_bytes", "expires_at"]
+                completed = StagedMedia.objects.filter(
+                    pk=staged.pk,
+                    expires_at=upload_deadline,
+                    expires_at__gt=finished_at,
+                ).update(
+                    storage_backend=staged.storage_backend,
+                    storage_key=staged.storage_key,
+                    expires_at=staged.expires_at,
                 )
+                if not completed:
+                    raise ApiError("Staged upload has expired. Stage the media again.")
         except BaseException:
             discard_unfinished_staged_media(staged=staged)
             raise
@@ -119,21 +130,26 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
 def discard_unfinished_staged_media(*, staged: StagedMedia) -> None:
     """Remove the object and row of a staging attempt that did not complete.
 
-    Never raises, so the original staging error propagates. On failure the row
+    Ordinary cleanup and logging failures preserve the original error. The row
     is kept, or written again if something removed it meanwhile: it is the
     record expiry cleanup uses to retry the object deletion.
     """
     try:
         delete_staged_media(staged=staged, missing_ok=False)
     except Exception:
-        logger.error("batch_staging_cleanup_failure staged=%s action=retry_on_expiry", staged.id)
+        with suppress(Exception):
+            logger.error(
+                "batch_staging_cleanup_failure staged=%s action=retry_on_expiry", staged.id
+            )
         try:
             staged.expires_at = timezone.now()
             staged.save()
         except Exception:
-            logger.error(
-                "batch_staging_cleanup_record_failure staged=%s action=operator_recovery", staged.id
-            )
+            with suppress(Exception):
+                logger.error(
+                    "batch_staging_cleanup_record_failure staged=%s action=operator_recovery",
+                    staged.id,
+                )
 
 
 def cleanup_expired_staged_media(

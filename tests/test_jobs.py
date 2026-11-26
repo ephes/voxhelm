@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from asgiref.local import Local
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DatabaseError, IntegrityError, connection, connections, transaction
 from django.db.migrations.executor import MigrationExecutor
+from django.db.models import QuerySet
 from django.utils import timezone
 from django_tasks import task_backends
 
@@ -721,6 +723,39 @@ def test_staging_keeps_object_and_row_on_success(settings, staging_temp_paths):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("pruned", [False, True])
+def test_staging_rejects_completion_after_upload_lease_expires(
+    client, settings, monkeypatch, staging_temp_paths, pruned
+):
+    current_time = timezone.now()
+    monkeypatch.setattr(jobs_staging.timezone, "now", lambda: current_time)
+    real_put = FilesystemArtifactStore.put_file
+
+    def finish_after_expiry(self, **kwargs):
+        nonlocal current_time
+        staged = StagedMedia.objects.get()
+        current_time = staged.expires_at
+        if pruned:
+            jobs_staging.cleanup_expired_staged_media()
+            assert not StagedMedia.objects.exists()
+        return real_put(self, **kwargs)
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", finish_after_expiry)
+
+    response = stage_upload(
+        client, name="episode.mp3", content=b"synthetic audio", content_type="audio/mpeg"
+    )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["error"]["message"] == "Staged upload has expired. Stage the media again."
+    )
+    assert stored_staged_objects(settings) == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
 def test_staging_uploads_nothing_when_registration_fails(settings, monkeypatch, staging_temp_paths):
     def failing_save(self, *args, **kwargs):
         raise DatabaseError("registration exploded")
@@ -735,18 +770,22 @@ def test_staging_uploads_nothing_when_registration_fails(settings, monkeypatch, 
     assert [path.exists() for path in staging_temp_paths] == [False]
 
 
+@pytest.fixture
+def fail_staging_completion_update(monkeypatch):
+    real_update = QuerySet.update
+
+    def failing_update(self, **kwargs):
+        if self.model is StagedMedia and "storage_backend" in kwargs:
+            raise DatabaseError("update exploded")
+        return real_update(self, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "update", failing_update)
+
+
 @pytest.mark.django_db
 def test_staging_removes_object_and_row_when_final_row_update_fails(
-    settings, monkeypatch, staging_temp_paths
+    settings, staging_temp_paths, fail_staging_completion_update
 ):
-    real_save = StagedMedia.save
-
-    def failing_update(self, *args, **kwargs):
-        if kwargs.get("update_fields"):
-            raise DatabaseError("update exploded")
-        return real_save(self, *args, **kwargs)
-
-    monkeypatch.setattr(StagedMedia, "save", failing_update)
 
     with pytest.raises(DatabaseError, match="update exploded"):
         stage_audio_directly()
@@ -777,20 +816,29 @@ def test_staging_removes_partial_object_and_row_when_upload_fails(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("retry_record_fails", [False, True])
 def test_staging_keeps_row_for_expiry_cleanup_when_compensation_fails(
-    settings, monkeypatch, staging_temp_paths
+    settings, monkeypatch, staging_temp_paths, fail_staging_completion_update, retry_record_fails
 ):
     real_save = StagedMedia.save
+    diagnostics = []
 
-    def failing_update(self, *args, **kwargs):
-        if kwargs.get("update_fields"):
-            raise DatabaseError("update exploded")
+    class FailingHandler(logging.Handler):
+        def emit(self, record):
+            diagnostics.append(record.getMessage())
+            raise RuntimeError("logging exploded")
+
+    monkeypatch.setattr(jobs_staging.logger, "handlers", [FailingHandler()])
+
+    def failing_retry_save(self, *args, **kwargs):
+        if retry_record_fails and not kwargs.get("force_insert"):
+            raise DatabaseError("retry record exploded")
         return real_save(self, *args, **kwargs)
 
     def failing_delete(self, *, key: str) -> None:
         raise OSError("delete exploded")
 
-    monkeypatch.setattr(StagedMedia, "save", failing_update)
+    monkeypatch.setattr(StagedMedia, "save", failing_retry_save)
     with monkeypatch.context() as patch:
         patch.setattr(FilesystemArtifactStore, "delete", failing_delete)
         with pytest.raises(DatabaseError, match="update exploded"):
@@ -803,10 +851,15 @@ def test_staging_keeps_row_for_expiry_cleanup_when_compensation_fails(
     assert leftover.storage_identity["backend"] == "filesystem"
     assert [path.exists() for path in staging_temp_paths] == [False]
 
+    assert any("action=retry_on_expiry" in message for message in diagnostics)
+    if retry_record_fails:
+        assert any("action=operator_recovery" in message for message in diagnostics)
+        assert leftover.expires_at > timezone.now()
+        StagedMedia.objects.filter(id=leftover.id).update(expires_at=timezone.now())
+    else:
+        assert leftover.expires_at <= timezone.now()
+
     # Expiry cleanup finds the row and removes the object once deletion works.
-    StagedMedia.objects.filter(id=leftover.id).update(
-        expires_at=timezone.now() - timedelta(seconds=1)
-    )
     jobs_staging.cleanup_expired_staged_media()
 
     assert stored_staged_objects(settings) == []
@@ -854,7 +907,7 @@ def test_staging_restores_cleanup_record_when_row_vanished_and_compensation_fail
     monkeypatch.setattr(FilesystemArtifactStore, "put_file", put_file_then_lose_row)
     with monkeypatch.context() as patch:
         patch.setattr(FilesystemArtifactStore, "delete", failing_delete)
-        with pytest.raises(DatabaseError):
+        with pytest.raises(ApiError, match="Staged upload has expired"):
             stage_audio_directly()
 
     leftover = StagedMedia.objects.get()
