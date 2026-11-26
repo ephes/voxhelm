@@ -282,7 +282,9 @@ remaining rules, as before. Invalid date candidates stay literal through date
 and ordinal normalization.
 
 German clock expansion accepts hours 0–23 and two-digit minutes 00–59.
-Midnight `00:00` becomes `null Uhr`. Out-of-range values and longer colon
+It reads `00:00` as `null Uhr`, `1:00` as `eins Uhr` and `01:30` as
+`eins Uhr dreißig`. Quantities such as `1 kg` use the corresponding singular
+unit form (`ein Kilogramm`). Out-of-range values and longer colon
 sequences such as `1:02:03` stay literal through clock and ordinal normalization.
 
 Kokoro accepts nonempty finite mono inference arrays, either a sample vector or
@@ -1414,6 +1416,7 @@ is already scoped to the producer and `task_ref`). Absent/empty `profile` and
 present profiles and ordered chapter marks are identity. Synthesis retains its
 looser rule: only job type enters the digest, so a non-failed job of that type
 with the same producer and `task_ref` can be reused despite payload changes.
+Use a new `task_ref` to regenerate batch speech with updated pronunciation rules.
 `uv run pytest tests/test_fingerprints.py` protects these persisted bytes with
 handwritten JSON/golden digests and a synthetic matcher-equivalence matrix.
 

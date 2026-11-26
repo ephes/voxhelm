@@ -187,6 +187,8 @@ One new backend, one routing layer, minimal surgery elsewhere:
     quantities. Other occurrences and signs on rejected numbers stay literal.
   - Unit inflection uses the exact magnitude of the admitted decimal quantity.
     Signed one and decimal one keep the singular form.
+  - Clock hours use standalone cardinals, including `eins Uhr` at 1:00.
+    Nonzero minutes follow `Uhr`, as in `eins Uhr dreißig` at 01:30.
   - Cardinal labels (`Kapitel 2.`, `Seite 4.`, etc.) emit their spoken number
     and dot directly; subsequent ordinal rules cannot match the words. No
     reserved sentinel or global restoration is used, so literal marker-looking

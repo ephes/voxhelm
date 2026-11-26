@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Expand German `z. B.` only when its `B` ends the abbreviation.
+- Pronounce German clock times at hour one as `eins Uhr`, including times with minutes.
 
 - Preserve inference errors and cancellations when releasing the lane slot also fails.
 - Wake cancelled inference waiters immediately between queue scans.
