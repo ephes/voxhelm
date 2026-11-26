@@ -59,7 +59,9 @@ research's 120 s DTW recipe, `2026-10-17_chapter_windows.md`, D-29.)
 ## Design
 
 `transcribe_window(audio_path, t, *, cancel_event=None) -> WindowTranscription`
-re-transcribes the grid window `[t, t + 30)` of a local source file:
+re-transcribes the grid window `[t, t + 30)` of a local source file. The start
+must be a nonnegative integer or float representable as a finite float.
+Booleans and invalid starts raise `ValueError` before runtime lookup.
 
 1. Resolve the runtime: `VOXHELM_WHISPERCPP_BIN` and `VOXHELM_WINDOW_MODEL`
    (a file name in `VOXHELM_MODEL_CACHE_DIR` or a path; default

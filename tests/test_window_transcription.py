@@ -383,6 +383,7 @@ def test_window_returns_words_language_probability_and_identity(window_runtime) 
 def test_window_at_file_start_clamps_the_clip(window_runtime) -> None:
     result = transcribe_window(window_runtime.source, 0.5)
 
+    assert result.t == 0.5
     assert result.clip_start == 0.0
     assert window_runtime.ffmpeg_args()[4:7] == ["0.000", "-t", "32.000"]
 
@@ -519,11 +520,21 @@ def test_cancelled_after_a_fast_step_returns_no_result(
     assert_nothing_left(window_runtime)
 
 
-@pytest.mark.parametrize("t", [-1, math.nan, math.inf, True, "30"])
-def test_window_start_must_be_a_non_negative_number(window_runtime, t: Any) -> None:
-    with pytest.raises(ValueError):
-        transcribe_window(window_runtime.source, t)
-    assert not window_runtime.whisper_ran()
+@pytest.mark.parametrize(
+    "t", [-1, math.nan, math.inf, True, "30", pytest.param(10**400, id="integer-overflow")]
+)
+def test_invalid_window_start_is_refused_before_runtime_lookup(monkeypatch, t: Any) -> None:
+    lookups = 0
+
+    def resolve_runtime():
+        nonlocal lookups
+        lookups += 1
+        pytest.fail("Invalid window start reached runtime lookup")
+
+    monkeypatch.setattr(windows, "resolve_window_runtime", resolve_runtime)
+    with pytest.raises(ValueError, match="Window start must be a finite, non-negative number"):
+        transcribe_window(Path("synthetic.wav"), t)
+    assert lookups == 0
 
 
 def test_word_assembly_and_window_filter_match_retry_py() -> None:

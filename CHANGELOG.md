@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report out-of-range integer window starts as invalid arguments before looking up the retry runtime.
+
 - Refuse a flagged drift window when its width differs from the built-in retry's 30-second window.
 
 - Expand German `z. B.` only when its `B` ends the abbreviation.

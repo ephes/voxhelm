@@ -176,16 +176,24 @@ def transcribe_window(
 ) -> WindowTranscription:
     """Re-transcribe the window ``[t, t + 30)`` of ``audio_path`` with the pinned turbo model.
 
-    ``t`` is in seconds of file time. Raises ``BackendUnavailableError`` when the binary or
-    the pinned model is missing, ``RuntimeError`` when ffmpeg or whisper.cpp fails or its
-    output is malformed, ``InferenceCancelled`` when ``cancel_event`` is set.
+    ``t`` is in seconds of file time. An invalid start raises ``ValueError`` before runtime
+    lookup. Raises ``BackendUnavailableError`` when the binary or the pinned model is
+    missing, ``RuntimeError`` when ffmpeg or whisper.cpp fails or its output is malformed,
+    ``InferenceCancelled`` when ``cancel_event`` is set.
     """
-    if isinstance(t, bool) or not isinstance(t, int | float) or not math.isfinite(t) or t < 0:
-        raise ValueError("Window start must be a finite, non-negative number of seconds.")
+    start_error = "Window start must be a finite, non-negative number of seconds."
+    if isinstance(t, bool) or not isinstance(t, int | float):
+        raise ValueError(start_error)
+    try:
+        t = float(t)
+    except OverflowError as exc:
+        raise ValueError(start_error) from exc
+    if not math.isfinite(t) or t < 0:
+        raise ValueError(start_error)
     window = WINDOW_SETTINGS
     raise_if_cancelled(cancel_event)
     executable, model_path = resolve_window_runtime()
-    clip_start = max(0.0, float(t) - window.pad_seconds)
+    clip_start = max(0.0, t - window.pad_seconds)
     with (
         open_window_model(model_path) as model_handle,
         process_output_directory(prefix="voxhelm-window-") as temp_dir,
@@ -257,13 +265,13 @@ def transcribe_window(
         except (ValueError, RecursionError) as exc:
             raise RuntimeError("whisper.cpp window transcription produced invalid JSON.") from exc
         language, probability = detected_language(completed.stderr, payload)
-    words = window_words(payload, clip_start=clip_start, t=float(t))
+    words = window_words(payload, clip_start=clip_start, t=t)
     # Identity may run ``whisper-cli --version`` the first time; resolve it before the
     # last check so a cancellation during it is not answered with a result.
     identity = window_identity(executable)
     raise_if_cancelled(cancel_event)
     return WindowTranscription(
-        t=float(t),
+        t=t,
         clip_start=clip_start,
         language=language,
         language_probability=probability,
