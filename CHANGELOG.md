@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Order WebVTT cues by their normalized start, preserving source order for equal starts.
 - Reject malformed whisper.cpp segment records before measuring coverage or publishing a transcript.
 - Reclaim or reconcile remote leases at their expiry timestamp.
 - Reject remote completions when the final artifact stat reaches the verification deadline.

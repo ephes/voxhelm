@@ -175,10 +175,9 @@ Podlove. Finite negative/reversed timestamps retain the existing policy:
 verbose JSON preserves raw boundaries. Timed formats quantize each endpoint once
 to integer milliseconds, clamp negative times to zero and extend zero, reversed
 or rounding-collapsed spans to a minimum of 1 ms. Text-only fallback cues follow
-the same rule. This preserves nonblank content in playable cues; overlapping or
-adjacent cues keep their original ordering and are not globally retimed. VTT,
-DOTe and Podlove validate all timestamps before rendering and normalize each
-nonblank cue as they render it, keeping only the rendered output.
+the same rule. This preserves nonblank content in playable cues, including
+overlapping and adjacent cues. VTT, DOTe and Podlove validate all timestamps
+before rendering and normalize each nonblank cue as they render it.
 
 Known-speaker reference and segment embeddings must be nonempty and contain
 only finite coordinates. Invalid evidence raises `KnownSpeakerError`, aborting
@@ -237,6 +236,8 @@ breaks inside a segment collapse to one space, so transcript text can neither
 inject markup nor end or split a cue. Players decode the character references;
 consumers that parse the raw file must decode them too. Speaker labels stay out
 of WebVTT. Artifacts stored before this change are not rewritten.
+WebVTT cues are ordered by their normalized start in milliseconds, with source
+order preserved when starts tie. JSON, DOTe and Podlove retain source order.
 Whitespace normalization scans each cue once, including long space runs without
 line breaks. Ordinary interior whitespace is preserved; a whitespace run containing
 CR or LF becomes one space, and surrounding whitespace is trimmed.

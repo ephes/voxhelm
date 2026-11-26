@@ -79,6 +79,28 @@ def test_render_vtt_skips_empty_segments() -> None:
     assert vtt == "WEBVTT\n\n00:00:02.000 --> 00:00:03.000\nText\n"
 
 
+def test_render_vtt_orders_cues_by_normalized_start_and_keeps_ties_stable() -> None:
+    result = _result(
+        TranscriptionSegment(id=0, start=2.0004, end=3, text="First at two"),
+        TranscriptionSegment(id=1, start=0, end=1, text="First at zero"),
+        TranscriptionSegment(id=2, start=2, end=2.5, text="Second at two"),
+        TranscriptionSegment(id=3, start=-1, end=0.5, text="Second at zero"),
+    )
+
+    header, *cues = render_vtt(result).strip().split("\n\n")
+    assert header == "WEBVTT"
+    assert [cue.splitlines() for cue in cues] == [
+        ["00:00:00.000 --> 00:00:01.000", "First at zero"],
+        ["00:00:00.000 --> 00:00:00.500", "Second at zero"],
+        ["00:00:02.000 --> 00:00:03.000", "First at two"],
+        ["00:00:02.000 --> 00:00:02.500", "Second at two"],
+    ]
+    source_order = ["First at two", "First at zero", "Second at two", "Second at zero"]
+    assert [cue["text"] for cue in formats.render_verbose_json(result)["segments"]] == source_order
+    assert [cue["text"] for cue in formats.render_dote(result)["lines"]] == source_order
+    assert [cue["text"] for cue in formats.render_podlove(result)["transcripts"]] == source_order
+
+
 def test_render_vtt_falls_back_to_single_cue_without_segments() -> None:
     vtt = render_vtt(_result(text="Nur Text & mehr\nzweite Zeile"))
     assert vtt == "WEBVTT\n\n00:00:00.000 --> 00:00:00.001\nNur Text &amp; mehr zweite Zeile\n"

@@ -58,7 +58,7 @@ def render_text(result: TranscriptionResult) -> str:
 
 
 def render_vtt(result: TranscriptionResult) -> str:
-    lines = ["WEBVTT", ""]
+    cues: list[tuple[int, str]] = []
     for segment in _iter_normalized_segments(result):
         cue_text = escape_vtt_cue_text(segment.text)
         if not cue_text:
@@ -66,10 +66,11 @@ def render_vtt(result: TranscriptionResult) -> str:
         timestamp_line = (
             f"{format_milliseconds(segment.start_ms)} --> {format_milliseconds(segment.end_ms)}"
         )
-        lines.append(timestamp_line)
-        lines.append(cue_text)
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+        cues.append((segment.start_ms, f"{timestamp_line}\n{cue_text}"))
+    if not cues:
+        return "WEBVTT\n"
+    cues.sort(key=lambda cue: cue[0])
+    return "WEBVTT\n\n" + "\n\n".join(block for _, block in cues) + "\n"
 
 
 def escape_vtt_cue_text(text: str) -> str:
