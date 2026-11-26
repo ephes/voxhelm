@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject invalid drift window widths and probability thresholds before grouping words.
+
 - Reject frozen speaker bundles that reuse an array member across job audio or reference windows.
 - Limit frozen speaker bundle admission to one open array member at a time and refuse members replaced between passes.
 

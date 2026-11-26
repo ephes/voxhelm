@@ -86,6 +86,25 @@ class DriftRule:
     min_english_share: float = 0.10
     accept_probability: float = 0.9
 
+    def validate(self) -> None:
+        width_error = "Drift rule window_seconds must be a finite positive number."
+        width = self.window_seconds
+        if isinstance(width, bool) or not isinstance(width, int | float):
+            raise ValueError(width_error)
+        try:
+            finite_width = math.isfinite(width)
+        except OverflowError as exc:
+            raise ValueError(width_error) from exc
+        if not finite_width or width <= 0:
+            raise ValueError(width_error)
+
+        for field, value in (
+            ("min_english_share", self.min_english_share),
+            ("accept_probability", self.accept_probability),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+                raise ValueError(f"Drift rule {field} must be a number in [0, 1].")
+
     def flags(self, english: int, german: int) -> bool:
         """The research rule (``splice.py``): ``e >= E and e / max(1, e + g) >= S``."""
         return (
@@ -232,12 +251,14 @@ def run_drift_check(
     Retry words carry ``c: null`` (whisper's token probabilities are not Parakeet
     confidences). Raises what the retry raises (``BackendUnavailableError`` when the
     turbo runtime went away, ``RuntimeError`` on a failed window, ``InferenceCancelled``).
+    An invalid rule raises ``ValueError`` before grouping any words.
     ``retry`` defaults to ``transcribe_window``, which requires the pinned window width.
     A flagged window of a different width raises ``ValueError`` unless the caller
     supplies a retry that covers it. When there are no accepted replacements, the result
     may share the input list. Treat the words as read-only.
     """
     raise_if_cancelled(cancel_event)
+    rule.validate()
     retry_window = transcribe_window if retry is None else retry
     if language not in rule.languages:
         checked = ", ".join(rule.languages)

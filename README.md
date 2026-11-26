@@ -237,6 +237,11 @@ Whitespace normalization scans each cue once, including long space runs without
 line breaks. Ordinary interior whitespace is preserved; a whitespace run containing
 CR or LF becomes one space, and surrounding whitespace is trimmed.
 
+The German drift check validates custom rules before grouping words or invoking
+a retry. The window width must be finite and positive, and the minimum English
+share and retry acceptance probability must be in `[0, 1]`. Invalid settings
+raise `ValueError`.
+
 The German drift check retains the original window words when a retry has no
 usable in-window words, even with strong matching language evidence. Nonblank,
 finite, positive-duration retry words must start inside the window; ends are

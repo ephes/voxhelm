@@ -67,6 +67,9 @@ other hint or none it does nothing and says so in its record.
 When a window is flagged, the built-in retry requires the rule's width to
 match its pinned 30-second window. A mismatch raises `ValueError` before
 retrying. Callers using another width can supply a retry that covers their grid.
+`run_drift_check` validates the rule at entry. `window_seconds` must be finite
+and positive, and `min_english_share` and `accept_probability` must be numbers
+in `[0, 1]`. Invalid settings raise `ValueError` before grouping or retrying.
 
 ### Where it runs
 

@@ -191,6 +191,36 @@ def test_flag_rule_on_window_text_at_the_share_edge(german: int, flagged: bool):
 # --- splice and acceptance --------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("field", "rule"),
+    [
+        ("window_seconds", DriftRule(window_seconds=0.0)),
+        ("window_seconds", DriftRule(window_seconds=-30.0)),
+        ("window_seconds", DriftRule(window_seconds=float("nan"))),
+        ("window_seconds", DriftRule(window_seconds=float("inf"))),
+        ("window_seconds", DriftRule(window_seconds=True)),
+        ("window_seconds", DriftRule(window_seconds=10**400)),
+        ("min_english_share", DriftRule(min_english_share=-0.01)),
+        ("min_english_share", DriftRule(min_english_share=1.01)),
+        ("min_english_share", DriftRule(min_english_share=float("nan"))),
+        ("accept_probability", DriftRule(accept_probability=-0.01)),
+        ("accept_probability", DriftRule(accept_probability=1.01)),
+        ("accept_probability", DriftRule(accept_probability=float("inf"))),
+    ],
+)
+def test_drift_rejects_invalid_rule_before_grouping(field: str, rule: DriftRule, monkeypatch):
+    retry = FakeRetry()
+
+    def unexpected_grouping(*args, **kwargs):
+        pytest.fail("Invalid drift rule reached window grouping")
+
+    monkeypatch.setattr(drift, "_group_windows", unexpected_grouping)
+    with pytest.raises(ValueError, match=field):
+        run_drift_check(AUDIO, words_at(30.0, DRIFTED), language="de", rule=rule, retry=retry)
+
+    assert retry.calls == []
+
+
 def test_default_retry_refuses_a_different_drift_window_width(monkeypatch):
     retry = FakeRetry()
     monkeypatch.setattr(drift, "transcribe_window", retry)
