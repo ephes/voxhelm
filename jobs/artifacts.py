@@ -7,7 +7,7 @@ import shutil
 import stat
 import uuid
 from collections.abc import Iterable, Iterator
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -86,8 +86,13 @@ class FilesystemArtifactStore:
                 child = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
                 )
+                parent, directory = directory, child
+                os.close(parent)
+        except BaseException:
+            with suppress(OSError):
                 os.close(directory)
-                directory = child
+            raise
+        try:
             yield directory, parts[-1]
         finally:
             os.close(directory)

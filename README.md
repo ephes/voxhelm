@@ -852,6 +852,9 @@ resolved once when the store is created. The configured root and its
 ancestors must be trusted administrator-owned paths; untrusted users must not
 be able to rename these directories. Retention still lists symlink entries so
 its existing ownership checks can refuse unsafe deletion.
+During traversal, the store takes ownership of each child descriptor before
+closing its parent. If the parent close fails, traversal stops before accessing
+the artifact, attempts to close the child once and propagates the parent error.
 
 New artifact directories use mode 0700 and published objects use mode 0600.
 Writes use private sibling temporary files and check each write count. After

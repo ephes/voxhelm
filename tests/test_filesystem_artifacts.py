@@ -48,6 +48,48 @@ def test_every_operation_refuses_escaping_keys(tmp_path, operation, alias):
     assert not (tmp_path / "download").exists()
 
 
+@pytest.mark.parametrize("child_close_fails", [False, True])
+def test_traversal_retires_child_on_ancestor_close_error(tmp_path, monkeypatch, child_close_fails):
+    store = FilesystemArtifactStore(root=tmp_path)
+    store.put_bytes(key="job/nested/object", data=b"old", content_type="text/plain")
+    real_open, real_close = os.open, os.close
+    ancestor_error = OSError("synthetic ancestor close failure")
+    opened = {}
+    retired = []
+    live = set()
+
+    def track_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        opened[fd] = path
+        live.add(fd)
+        return fd
+
+    def close(fd):
+        path = opened[fd]
+        retired.append(path)
+        real_close(fd)
+        live.remove(fd)
+        if path == store.root:
+            raise ancestor_error
+        if child_close_fails:
+            raise OSError("synthetic child close failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "open", track_open)
+            patch.setattr(os, "close", close)
+            with pytest.raises(OSError) as caught:
+                store.put_bytes(key="job/nested/object", data=b"new", content_type="text/plain")
+        assert caught.value is ancestor_error
+        assert retired == [store.root, "job"]
+        assert not live
+        assert list((tmp_path / "job/nested").iterdir()) == [tmp_path / "job/nested/object"]
+        assert (tmp_path / "job/nested/object").read_bytes() == b"old"
+    finally:
+        for fd in live:
+            real_close(fd)
+
+
 @pytest.mark.parametrize("method", ["put_bytes", "put_file"])
 @pytest.mark.parametrize("reports_full_count", [False, True])
 def test_incomplete_publish_preserves_previous_bytes(
