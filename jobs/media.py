@@ -105,15 +105,16 @@ def reserve_temp_media_path(*, suffix: str) -> Path:
 def write_uploaded_media_to_tempfile(chunks: Iterable[bytes], *, suffix: str) -> Path:
     """Copy uploaded chunks into a reserved temp file and return its path.
 
-    The caller takes ownership only after a successful close. On failure, this
-    function attempts to remove the partial file while preserving the first error.
+    The caller takes ownership after complete writes and a successful close.
+    On failure, remove the partial file if possible and preserve the first error.
     """
     temp_path = reserve_temp_media_path(suffix=suffix)
     try:
         file_handle = temp_path.open("wb")
         try:
             for chunk in chunks:
-                file_handle.write(chunk)
+                if file_handle.write(chunk) != len(chunk):
+                    raise OSError("Incomplete temporary upload write.")
         except BaseException as exc:
             try:
                 file_handle.close()
@@ -468,10 +469,16 @@ def fetch_allowed_url_to_tempfile(
             total = 0
             with temp_path.open("wb") as handle:
                 while chunk:
-                    total += len(chunk)
-                    if total > max_bytes:
+                    chunk_size = len(chunk)
+                    if total + chunk_size > max_bytes:
                         raise ApiError(limit_message)
-                    handle.write(chunk)
+                    if handle.write(chunk) != chunk_size:
+                        raise ApiError(
+                            "Incomplete temporary download write.",
+                            status=500,
+                            error_type="server_error",
+                        )
+                    total += chunk_size
                     deadline.remaining()
                     chunk = read(_FETCH_CHUNK_BYTES)
                     deadline.remaining()

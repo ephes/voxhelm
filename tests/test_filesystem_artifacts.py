@@ -49,6 +49,31 @@ def test_every_operation_refuses_escaping_keys(tmp_path, operation, alias):
 
 
 @pytest.mark.parametrize("method", ["put_bytes", "put_file"])
+@pytest.mark.parametrize("reports_full_count", [False, True])
+def test_incomplete_publish_preserves_previous_bytes(
+    tmp_path, monkeypatch, method, reports_full_count
+):
+    store = FilesystemArtifactStore(root=tmp_path / "root")
+    store.put_bytes(key="job/transcript", data=b"previous", content_type="text/plain")
+    payload = b"replacement"
+    source = tmp_path / "source"
+    source.write_bytes(payload)
+
+    class IncompleteWriter(io.BufferedWriter):
+        def write(self, data):
+            written = super().write(data[:-1])
+            return len(data) if reports_full_count else written
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, mode: IncompleteWriter(io.FileIO(fd, mode)))
+    kwargs = {"source_path": source} if method == "put_file" else {"data": payload}
+    with pytest.raises(OSError, match="Incomplete artifact write"):
+        getattr(store, method)(key="job/transcript", content_type="text/plain", **kwargs)
+
+    assert store.read_bytes(key="job/transcript") == b"previous"
+    assert store.list_keys(prefix="job/") == ["job/transcript"]
+
+
+@pytest.mark.parametrize("method", ["put_bytes", "put_file"])
 def test_failed_publish_preserves_previous_bytes_and_cleans_temp(tmp_path, monkeypatch, method):
     store = FilesystemArtifactStore(root=tmp_path / "root")
     store.put_bytes(key="job/transcript", data=b"previous", content_type="text/plain")
@@ -56,12 +81,13 @@ def test_failed_publish_preserves_previous_bytes_and_cleans_temp(tmp_path, monke
     source.write_bytes(b"replacement")
     if method == "put_file":
 
-        def fail_copy(source, target):
-            target.write(b"partial")
-            assert store.read_bytes(key="job/transcript") == b"previous"
-            raise OSError("synthetic copy failure")
+        class FailingWriter(io.BufferedWriter):
+            def write(self, data):
+                super().write(b"partial")
+                assert store.read_bytes(key="job/transcript") == b"previous"
+                raise OSError("synthetic copy failure")
 
-        monkeypatch.setattr("shutil.copyfileobj", fail_copy)
+        monkeypatch.setattr(os, "fdopen", lambda fd, mode: FailingWriter(io.FileIO(fd, mode)))
     else:
 
         def fail_flush(fd):
@@ -236,7 +262,11 @@ def test_cleanup_denial_preserves_primary_error(tmp_path, monkeypatch, caplog, p
         raise PermissionError("synthetic cleanup private payload")
 
     if primary == "write":
-        monkeypatch.setattr("shutil.copyfileobj", fail)
+
+        class FailingWriter(io.BufferedWriter):
+            write = fail
+
+        monkeypatch.setattr(os, "fdopen", lambda fd, mode: FailingWriter(io.FileIO(fd, mode)))
     else:
         monkeypatch.setattr(os, primary, fail)
     monkeypatch.setattr(os, "unlink", deny_unlink)

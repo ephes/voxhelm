@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuse incomplete filesystem artifact writes before replacing the previous object.
+- Refuse short temporary media writes in upload and URL acquisition before handing off the file.
+
 - Preserve staged upload failures and retry expiry when cleanup logging fails.
 - Refuse completion after a staged upload lease expires and clean up the late object.
 

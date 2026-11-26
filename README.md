@@ -17,9 +17,9 @@ The current slice also adds the first Voxhelm-owned operator UI:
 - staged batch uploads for oversized/private/local audio via `POST /v1/uploads`
 
 The synchronous API, operator uploads and batch staging take ownership of their
-temporary copy only after it closes successfully. A failed copy attempts to
-remove the incomplete file. Secondary close or removal failures add fixed
-diagnostics to the original error.
+temporary copy after every write reports its full byte count and the file
+closes successfully. A failed copy attempts to remove the incomplete file.
+Secondary close or removal failures add fixed diagnostics to the original error.
 
 `whisper.cpp` inputs are normalized through `ffmpeg` to 16 kHz mono PCM WAV before
 inference so AAC/M4A and other container/codec quirks do not leak into the backend.
@@ -854,8 +854,9 @@ be able to rename these directories. Retention still lists symlink entries so
 its existing ownership checks can refuse unsafe deletion.
 
 New artifact directories use mode 0700 and published objects use mode 0600.
-Writes use private sibling temporary files, flush them, and atomically replace
-the final object only after success. Readers see the previous complete object
+Writes use private sibling temporary files and check each write count. After
+flushing, Voxhelm checks the file size against the transferred bytes before
+atomically replacing the final object. Readers see the previous complete object
 until replacement; failed writes preserve old bytes and attempt temporary cleanup.
 If cleanup also fails, a fixed warning is logged and the original write error survives.
 Existing directory modes are not changed. These guarantees apply to the
@@ -1880,6 +1881,9 @@ lookup may finish later in a daemon thread, which cannot open a connection or
 create a file. Sync URL inputs are limited to `VOXHELM_MAX_URL_DOWNLOAD_BYTES`
 (default 128 MiB) and are fetched once. Any URL fetch whose body ends before
 its announced `Content-Length` fails instead of passing a truncated file on.
+A short local write also fails before media handoff and removes the temporary
+file when cleanup succeeds. Voxhelm reports a local storage failure (HTTP 500
+for sync callers) and skips further batch fetch tries for that failure.
 
 Both sync and batch URL media require a nonempty HTTP 200 response without a
 `Content-Range` header. Unsolicited partial responses (including HTTP 206), other

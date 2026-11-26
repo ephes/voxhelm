@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import sys
+from email.message import Message
 from pathlib import Path
 
 import pytest
 
 from jobs import media
 from jobs.media import extract_audio_from_video, write_uploaded_media_to_tempfile
+from transcriptions.errors import ApiError
 from transcriptions.input_media import write_upload_to_tempfile
 
 
@@ -177,6 +180,52 @@ def test_write_uploaded_media_removes_tempfile_when_write_fails(
     assert len(handles) == 1
     assert handles[0].closed
     assert not (handles[0].name and Path(handles[0].name).exists())
+
+
+@pytest.mark.parametrize("source", ["upload", "url"])
+def test_short_media_write_removes_tempfile(monkeypatch, reserved_paths, settings, source):
+    payload = b"synthetic audio"
+    real_open = Path.open
+
+    class ShortWriter(io.BufferedWriter):
+        def write(self, data):
+            return super().write(data[:-1])
+
+    def short_open(path, mode="r", *args, **kwargs):
+        if path in reserved_paths and mode == "wb":
+            return ShortWriter(real_open(path, mode, buffering=0))
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", short_open)
+    if source == "upload":
+        with pytest.raises(OSError, match="Incomplete temporary upload write"):
+            write_uploaded_media_to_tempfile([payload], suffix=".mp3")
+    else:
+        url = "https://media.example.com/test.mp3"
+        settings.VOXHELM_ALLOWED_URL_HOSTS = {"media.example.com"}
+        settings.VOXHELM_BATCH_URL_FETCH_ATTEMPTS = 3
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = Message()
+            headers["Content-Type"] = "audio/mpeg"
+            headers["Content-Length"] = str(len(payload))
+
+            def geturl(self):
+                return url
+
+        response = Response(payload)
+        monkeypatch.setattr(media, "open_allowed_url", lambda *args, **kwargs: response)
+
+        with pytest.raises(ApiError, match="Incomplete temporary download write") as caught:
+            media.download_allowed_media(source_url=url)
+
+        assert type(caught.value) is ApiError
+        assert caught.value.status == 500
+        assert response.closed
+
+    assert len(reserved_paths) == 1
+    assert not reserved_paths[0].exists()
 
 
 @pytest.mark.parametrize("mode", ["hang", "missing", "exit", "success"])

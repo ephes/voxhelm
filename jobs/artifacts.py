@@ -6,7 +6,7 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -128,8 +128,7 @@ class FilesystemArtifactStore:
         with self.open_reader(key=key) as source:
             yield source
 
-    @contextmanager
-    def _writer(self, key: str) -> Iterator[BinaryIO]:
+    def _publish(self, key: str, chunks: Iterable[bytes]) -> int:
         with self._parent(key, create=True) as (directory, name):
             self._check_leaf(directory, name)
             temporary = f".artifact-{uuid.uuid4().hex}.tmp"
@@ -142,11 +141,19 @@ class FilesystemArtifactStore:
             primary_error = False
             try:
                 with os.fdopen(fd, "wb") as target:
-                    yield target
+                    size = 0
+                    for chunk in chunks:
+                        chunk_size = len(chunk)
+                        if target.write(chunk) != chunk_size:
+                            raise OSError("Incomplete artifact write.")
+                        size += chunk_size
                     target.flush()
+                    if os.fstat(target.fileno()).st_size != size:
+                        raise OSError("Incomplete artifact write.")
                     os.fsync(target.fileno())
                 self._check_leaf(directory, name)
                 os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                return size
             except BaseException:
                 primary_error = True
                 raise
@@ -162,16 +169,14 @@ class FilesystemArtifactStore:
 
     def put_file(self, *, key: str, source_path: Path, content_type: str) -> StoredArtifact:
         del content_type
-        with source_path.open("rb") as source, self._writer(key) as target:
-            shutil.copyfileobj(source, target)
-            size = target.tell()
+        with source_path.open("rb") as source:
+            size = self._publish(key, iter(lambda: source.read(256 * 1024), b""))
         return StoredArtifact(backend=self.backend_name, key=key, size_bytes=size)
 
     def put_bytes(self, *, key: str, data: bytes, content_type: str) -> StoredArtifact:
         del content_type
-        with self._writer(key) as target:
-            target.write(data)
-        return StoredArtifact(backend=self.backend_name, key=key, size_bytes=len(data))
+        size = self._publish(key, (data,))
+        return StoredArtifact(backend=self.backend_name, key=key, size_bytes=size)
 
     def read_bytes(self, *, key: str) -> bytes:
         with self._reader(key) as source:
