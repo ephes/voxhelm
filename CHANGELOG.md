@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject empty batch audio uploads before registering a lease or writing an artifact.
 - Continue staged upload admission and defer failed expiry cleanup before logging warnings.
 - Preserve artifact reader refusals when both closing the reader and logging the cleanup failure fail.
 - Release the newly opened artifact directory if closing its parent fails, and preserve the parent error.

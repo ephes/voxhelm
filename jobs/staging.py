@@ -76,6 +76,8 @@ def stage_uploaded_audio(*, producer: str, upload) -> StagedMedia:
     temp_path = write_uploaded_media_to_tempfile(bounded_chunks(), suffix=suffix)
     try:
         upload_size = temp_path.stat().st_size
+        if upload_size == 0:
+            raise ApiError("Uploaded audio file is empty.")
         store = get_artifact_store()
         upload_deadline = timezone.now() + timedelta(seconds=STAGED_UPLOAD_IN_PROGRESS_SECONDS)
         staged = StagedMedia(

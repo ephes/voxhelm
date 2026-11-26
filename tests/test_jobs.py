@@ -664,6 +664,25 @@ def stage_audio_directly() -> StagedMedia:
 
 
 @pytest.mark.django_db
+def test_batch_upload_rejects_empty_audio(client, monkeypatch, staging_temp_paths):
+    published = []
+    real_put = FilesystemArtifactStore.put_file
+
+    def put(self, **kwargs):
+        published.append(kwargs)
+        return real_put(self, **kwargs)
+
+    monkeypatch.setattr(FilesystemArtifactStore, "put_file", put)
+    response = stage_upload(client, name="empty.mp3", content=b"", content_type="audio/mpeg")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Uploaded audio file is empty."
+    assert published == []
+    assert not StagedMedia.objects.exists()
+    assert [path.exists() for path in staging_temp_paths] == [False]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("chunks", [(b"123456",), (b"123", b"456")])
 def test_staging_rejects_actual_bytes_above_limit(
     settings, monkeypatch, staging_temp_paths, chunks

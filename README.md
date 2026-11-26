@@ -781,6 +781,8 @@ The staging byte ceiling is checked against both the declared size and the
 actual chunks before they are written to the temporary file. An over-limit
 stream removes its partial file and publishes no object or staging row. An
 exact-limit stream is accepted; staging and job metadata use the copied size.
+If the local copy contains zero bytes, `POST /v1/uploads` returns HTTP 400
+and removes the temporary file. The refusal creates neither a staging row nor an object.
 Expiry cleanup re-fetches each candidate and rechecks expiry and its job claim
 inside the same database write/row lock used by submission, holding it through
 object deletion and row removal. A claim committed after candidate enumeration
