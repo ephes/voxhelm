@@ -256,7 +256,10 @@ class LaneScheduler:
                         )
                     return ticket
 
-                time.sleep(_POLL_INTERVAL_SECONDS)
+                if cancel_event is not None:
+                    cancel_event.wait(_POLL_INTERVAL_SECONDS)
+                else:
+                    time.sleep(_POLL_INTERVAL_SECONDS)
         except BaseException as exc:
             if holder_handle is not None:
                 self._retire_pending_holder(holder_path, holder_handle, exc)

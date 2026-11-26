@@ -1747,9 +1747,10 @@ Capacity is a small, bounded set of slots (decision D-24):
   a contender checks that `control.lock` still names the locked inode before
   accessing the queue. Stop all local inference consumers before replacing
   the scheduler directory or its lock.
-- Queued cancellation is checked every 50 ms while waiting for the control lock,
-  including initial waiter registration. Cancellation removes only the attempt's
-  waiter without waiting for that lock; no holder is published for it.
+- A cancellation event wakes a queued caller during the 50 ms polling interval,
+  both between queue scans and while contending for the control lock, including
+  initial waiter registration. Cancellation removes only the attempt's waiter
+  without waiting for that lock. The cancelled attempt receives no ticket.
 - Each new ticket holds an OS file lock on its holder record until release.
   Release checks that the receipt still names the locked inode. If another
   inode has taken its place, release preserves that receipt, closes the

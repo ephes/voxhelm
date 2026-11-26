@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Preserve inference errors and cancellations when releasing the lane slot also fails.
+- Wake cancelled inference waiters immediately between queue scans.
 
 - Remove waiter receipts whose filenames do not match their tokens before ranking the inference queue.
 - Refuse inference admission when the waiter directory cannot be scanned and retire the failed attempt's waiter.

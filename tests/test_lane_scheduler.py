@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -668,6 +669,44 @@ def test_cancel_event_while_queued_raises_and_removes_the_waiter(tmp_path: Path)
 
     holder_release.set()
     holder_thread.join(timeout=TIMEOUT)
+
+
+def test_cancel_wakes_waiter_between_queue_scans(tmp_path, monkeypatch):
+    scheduler = LaneScheduler(root_dir=tmp_path, stale_seconds=60, interactive_slots=0)
+    holder = scheduler.acquire(lane=LANE_NON_INTERACTIVE)
+    cancel_event = threading.Event()
+    waiting = threading.Event()
+    original_wait = cancel_event.wait
+    poll_interval = 2 * TIMEOUT
+
+    def event_wait(timeout=None):
+        assert timeout == poll_interval
+        waiting.set()
+        return original_wait(timeout)
+
+    def unexpected_sleep(_timeout):
+        waiting.set()
+        assert original_wait(TIMEOUT)
+        pytest.fail("Queued cancellation used an unconditional sleep")
+
+    monkeypatch.setattr("lane_scheduler._POLL_INTERVAL_SECONDS", poll_interval)
+    monkeypatch.setattr(cancel_event, "wait", event_wait)
+    monkeypatch.setattr("lane_scheduler.time.sleep", unexpected_sleep)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            claim = pool.submit(scheduler.acquire, lane=LANE_INTERACTIVE, cancel_event=cancel_event)
+            try:
+                assert waiting.wait(TIMEOUT)
+                assert waiter_count(scheduler) == 1
+            finally:
+                cancel_event.set()
+            with pytest.raises(InferenceCancelled, match="cancelled while waiting for lane"):
+                claim.result(timeout=TIMEOUT)
+
+        assert waiter_count(scheduler) == 0
+        assert list(scheduler.holders_dir.iterdir()) == [scheduler._holder_path(holder.token)]
+    finally:
+        scheduler.release(holder)
 
 
 @pytest.mark.parametrize(
