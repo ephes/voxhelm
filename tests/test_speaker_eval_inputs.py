@@ -4,11 +4,14 @@ import hashlib
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from evals import speaker_naming_eval as ev
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def tiny_bundle(path):
@@ -222,6 +225,7 @@ assert all(numpy.array_equal(array, numpy.ones(16, dtype=numpy.float32)) for arr
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=REPO_ROOT,
     )
     assert result.returncode == 0, result.stderr
 
