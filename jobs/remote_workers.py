@@ -1016,7 +1016,7 @@ def delete_completed_remote_staged_upload(*, job_id: UUID, upload_id: str | None
 def claimable_job_filter(now: object) -> Q:
     attempts_remain = Q(attempt_count__lt=F("max_attempts"))
     return attempts_remain & (
-        Q(state=Job.State.QUEUED) | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
+        Q(state=Job.State.QUEUED) | Q(state=Job.State.RUNNING, lease_expires_at__lte=now)
     )
 
 
@@ -1068,7 +1068,7 @@ def mark_remote_job_failed_before_claim(*, job: Job, message: str) -> None:
         Job.objects.filter(id=job.id, execution_mode=Job.ExecutionMode.REMOTE_PULL)
         .filter(
             Q(state=Job.State.QUEUED, assigned_worker_id="")
-            | Q(state=Job.State.RUNNING, lease_expires_at__lt=now)
+            | Q(state=Job.State.RUNNING, lease_expires_at__lte=now)
         )
         .update(
             state=Job.State.FAILED,
@@ -1857,7 +1857,7 @@ def expire_exhausted_remote_leases(now: datetime) -> None:
     exhausted_jobs = Job.objects.filter(
         execution_mode=Job.ExecutionMode.REMOTE_PULL,
         state=Job.State.RUNNING,
-        lease_expires_at__lt=now,
+        lease_expires_at__lte=now,
         attempt_count__gte=F("max_attempts"),
     ).order_by("lease_expires_at", "pk")[:EXHAUSTED_LEASE_RECONCILIATION_LIMIT]
     for job in exhausted_jobs:

@@ -620,6 +620,7 @@ def test_remote_submission_rejects_disallowed_url_before_queueing(client, settin
 @pytest.mark.django_db
 def test_worker_claim_fails_expired_running_job_when_revalidated_url_is_disallowed(
     client,
+    monkeypatch,
     settings,
 ):
     job = submit_remote_job(
@@ -630,8 +631,9 @@ def test_worker_claim_fails_expired_running_job_when_revalidated_url_is_disallow
     )
     assert claim_one(client).status_code == 200
     job.refresh_from_db()
-    job.lease_expires_at = timezone.now() - timedelta(seconds=1)
-    job.save(update_fields=["lease_expires_at"])
+    expiry = job.lease_expires_at
+    assert expiry is not None
+    monkeypatch.setattr(timezone, "now", lambda: expiry)
     settings.VOXHELM_ALLOWED_URL_HOSTS = {"cdn.example.com"}
 
     response = claim_one(client)
@@ -2020,19 +2022,69 @@ def test_terminal_remote_failure_releases_staged_upload_for_retry(client, settin
 
 
 @pytest.mark.django_db
-def test_expired_final_attempt_fails_on_producer_poll(client, settings):
+def test_final_attempt_fails_on_producer_poll_at_lease_expiry(client, monkeypatch, settings):
     settings.VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = 1
     job = submit_remote_job(client, settings, task_ref="remote-expired-final-attempt")
     claim_one(client)
     job.refresh_from_db()
-    job.lease_expires_at = timezone.now() - timedelta(seconds=1)
-    job.save(update_fields=["lease_expires_at"])
+    expiry = job.lease_expires_at
+    assert expiry is not None
+    monkeypatch.setattr(timezone, "now", lambda: expiry)
 
     response = client.get(f"/v1/jobs/{job.id}", **producer_headers())
 
     assert response.status_code == 200
     assert response.json()["state"] == "failed"
     assert "maximum attempts" in response.json()["error"]["message"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("max_attempts", [1, 2], ids=["exhausted", "retryable"])
+def test_worker_poll_reclaims_or_fails_at_lease_expiry(client, monkeypatch, settings, max_attempts):
+    settings.VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = max_attempts
+    job = submit_remote_job(client, settings, task_ref="remote-worker-poll-at-expiry")
+    claim = claim_one(client).json()["job"]
+    job.refresh_from_db()
+    expiry = job.lease_expires_at
+    assert expiry is not None
+    monkeypatch.setattr(timezone, "now", lambda: expiry)
+    old_lease = {"worker_id": "atlas", "lease_token": claim["lease_token"]}
+    heartbeat_url = f"/v1/internal/work/{job.id}/heartbeat"
+
+    heartbeat = client.post(
+        heartbeat_url, old_lease, content_type="application/json", **worker_headers()
+    )
+    assert heartbeat.status_code == 409
+
+    poll = claim_one(client, worker_id="zephyr")
+    job.refresh_from_db()
+    if max_attempts == 1:
+        assert poll.status_code == 204
+        assert job.state == Job.State.FAILED
+        assert job.finished_at == expiry
+    else:
+        assert poll.status_code == 200
+        replacement = poll.json()["job"]
+        assert replacement["id"] == str(job.id)
+        assert replacement["attempt"] == 2
+        assert replacement["lease_token"] != claim["lease_token"]
+        assert job.assigned_worker_id == "zephyr"
+
+    heartbeat = client.post(
+        heartbeat_url, old_lease, content_type="application/json", **worker_headers()
+    )
+    assert heartbeat.status_code == 409
+
+    manifest = transcript_manifest(str(job.id), claim["attempt"])
+    store_manifest_artifacts(settings, manifest)
+    completion = client.post(
+        f"/v1/internal/work/{job.id}/complete",
+        {**old_lease, "result_text": "remote transcript", "artifacts": manifest},
+        content_type="application/json",
+        **worker_headers(),
+    )
+    assert completion.status_code == 409
+    assert not JobArtifact.objects.filter(job=job).exists()
 
 
 @pytest.mark.django_db
@@ -2172,8 +2224,9 @@ def test_task_ref_retry_replaces_remote_job_failed_during_reconciliation(client,
 
 
 @pytest.mark.django_db
-def test_task_ref_retry_requeues_expired_remote_lease_with_attempts_remaining(
+def test_task_ref_retry_requeues_remote_lease_at_expiry_with_attempts_remaining(
     client,
+    monkeypatch,
     settings,
 ):
     settings.VOXHELM_REMOTE_WORKER_MAX_ATTEMPTS = 3
@@ -2181,9 +2234,11 @@ def test_task_ref_retry_requeues_expired_remote_lease_with_attempts_remaining(
     job = submit_remote_job(client, settings, task_ref=task_ref)
     claim_one(client)
     job.refresh_from_db()
-    job.lease_expires_at = timezone.now() - timedelta(seconds=1)
+    expiry = job.lease_expires_at
+    assert expiry is not None
+    monkeypatch.setattr(timezone, "now", lambda: expiry)
     job.worker_progress = {"phase": "transcribing"}
-    job.save(update_fields=["lease_expires_at", "worker_progress"])
+    job.save(update_fields=["worker_progress"])
 
     response = client.post(
         "/v1/jobs",

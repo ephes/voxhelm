@@ -536,7 +536,7 @@ Server-side algorithm shape:
 
 1. Find an ordered candidate set with `execution_mode=remote_pull`, eligible type/capabilities, and either:
    - `state=queued`, or
-   - `state=running` with `lease_expires_at < now` and `attempt_count < max_attempts`.
+   - `state=running` with `lease_expires_at <= now` and `attempt_count < max_attempts`.
    The candidate scan is bounded (see "Bounded remote claim scans" below). URL revalidation, stale pre-claim failure, and capability filtering happen before taking the worker write lock; the write transaction samples the admission clock after acquiring the worker write lock, rechecks capacity and claimability at that instant, and issues a full lease from that instant. Fair sharing only yields to fresh peers whose advertised capabilities can execute at least one current candidate, using the same capability checks as claim selection.
    If the authenticated worker already has active leased jobs at the lower of
    its recorded concurrency and requested `max_jobs`, return no claim instead
@@ -555,7 +555,10 @@ Server-side algorithm shape:
 4. Treat affected row count `0` as a lost race and try the next candidate. When every candidate is lost, rescan once more at most (two scans per poll), then return no claim.
 5. Return the new opaque lease token only once, in the successful claim response.
 
-All lease and heartbeat comparisons use `studio` server time. Worker-supplied timestamps are informational only.
+All lease and heartbeat comparisons use `studio` server time. Worker-supplied
+timestamps are informational only. Heartbeats and new settlements require
+`lease_expires_at > now`. Reclaim and expiry reconciliation are eligible at
+`lease_expires_at <= now`.
 
 Producer retries with the same `task_ref` also reconcile stale remote leases before returning an existing job. An expired lease with attempts remaining moves back to `queued` with the stale worker assignment and lease token cleared, so the next worker poll can reclaim it. An expired final attempt is marked `failed` and releases any staged upload
 claim in the same write transaction. A failure during the transition leaves

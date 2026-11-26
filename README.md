@@ -1362,6 +1362,11 @@ share one grouped active/recent Job count query instead of per-peer counts. Capa
 lease expiry use the admission time sampled after acquiring the worker write lock,
 so lock contention does not consume the issued lease.
 
+At the lease expiry timestamp, the previous worker loses heartbeat and
+settlement rights. Producer reconciliation can requeue the job if attempts
+remain or fail it if the attempt limit is exhausted. A worker poll can reclaim
+an expired job with attempts remaining at that same timestamp.
+
 Before scanning, each worker poll reconciles up to 16 expired final attempts in
 lease-expiry and job-ID order. The poll can lease runnable work while later polls
 drain the remaining expired attempts.

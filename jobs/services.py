@@ -1825,7 +1825,7 @@ def reconcile_remote_job_state(job: Job) -> bool:
         job.execution_mode != Job.ExecutionMode.REMOTE_PULL
         or job.state != Job.State.RUNNING
         or job.lease_expires_at is None
-        or job.lease_expires_at >= now
+        or job.lease_expires_at > now
     ):
         return False
     if job.attempt_count < job.max_attempts:
@@ -1833,7 +1833,7 @@ def reconcile_remote_job_state(job: Job) -> bool:
             id=job.id,
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
             state=Job.State.RUNNING,
-            lease_expires_at__lt=now,
+            lease_expires_at__lte=now,
             attempt_count__lt=F("max_attempts"),
         ).update(
             state=Job.State.QUEUED,
@@ -1865,7 +1865,7 @@ def reconcile_remote_job_state(job: Job) -> bool:
             id=job.id,
             execution_mode=Job.ExecutionMode.REMOTE_PULL,
             state=Job.State.RUNNING,
-            lease_expires_at__lt=now,
+            lease_expires_at__lte=now,
             attempt_count__gte=F("max_attempts"),
         ).update(
             state=Job.State.FAILED,

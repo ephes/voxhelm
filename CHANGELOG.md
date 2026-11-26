@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reclaim or reconcile remote leases at their expiry timestamp.
 - Reject remote completions when the final artifact stat reaches the verification deadline.
 - Reject staged uploads when the store reports the wrong byte count and clean up the registered object.
 - Check staged audio size at open and after copying before local batch transcription.
