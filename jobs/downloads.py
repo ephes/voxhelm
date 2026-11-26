@@ -17,10 +17,11 @@ from transcriptions.views import openai_error_response
 def artifact_response(request: HttpRequest, artifact: JobArtifact) -> HttpResponseBase:
     try:
         store = artifacts.get_artifact_store_for_identity(artifact.storage_identity)
-        reader = store.open_reader(
-            key=artifact.storage_key, expected_size_bytes=artifact.size_bytes
+        size_bytes = artifact.size_bytes
+        reader = store.open_reader(key=artifact.storage_key, expected_size_bytes=size_bytes)
+        return reader_response(
+            request, reader, content_type=artifact.content_type, content_length=size_bytes
         )
-        return reader_response(request, reader, content_type=artifact.content_type)
     except (OSError, BotoCoreError, ClientError, ValueError, RuntimeError) as exc:
         missing = isinstance(exc, FileNotFoundError)
         if isinstance(exc, ClientError) and isinstance(exc.response, Mapping):

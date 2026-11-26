@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Send the admitted job artifact size as `Content-Length` for nonseekable S3/MinIO downloads under WSGI and ASGI.
 - Order WebVTT cues by their normalized start, preserving source order for equal starts.
 - Reject malformed whisper.cpp segment records before measuring coverage or publishing a transcript.
 - Reclaim or reconcile remote leases at their expiry timestamp.

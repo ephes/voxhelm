@@ -551,9 +551,59 @@ def test_asgi_cancellation_closes_after_active_storage_read_settles(monkeypatch)
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("asgi", [False, True], ids=["wsgi", "asgi"])
+@pytest.mark.parametrize("data", [b"x" * 70001, b""], ids=["artifact", "empty"])
+def test_nonseekable_s3_download_keeps_admitted_length(client, monkeypatch, asgi, data):
+    job, artifact = artifact_fixture()
+    artifact.size_bytes = len(data)
+    artifact.save(update_fields=["size_bytes"])
+    raw = io.BytesIO(data)
+    body = StreamingBody(raw, len(data))
+    body.close = close = Mock(wraps=body.close)
+    assert not body.seekable()
+    store = object.__new__(S3ArtifactStore)
+    store.bucket = "synthetic"
+    store.client = SimpleNamespace(
+        get_object=lambda **kwargs: {"Body": body, "ContentLength": len(data)}
+    )
+    install_store(monkeypatch, lambda identity: store)
+    url = artifact_url(job, False)
+    headers = {"Authorization": "Bearer test-token"}
+
+    async def async_download():
+        response = await AsyncClient().get(url, headers=headers)
+        try:
+            assert response.status_code == 200
+            assert isinstance(response, StreamingHttpResponse)
+            assert response.is_async
+            return response.headers, b"".join([chunk async for chunk in response.streaming_content])
+        finally:
+            await sync_to_async(response.close)()
+
+    if asgi:
+        response_headers, downloaded = asyncio.run(async_download())
+    else:
+        response = client.get(url, headers=headers)
+        try:
+            assert response.status_code == 200
+            assert isinstance(response, StreamingHttpResponse)
+            assert not response.is_async
+            response_headers, downloaded = response.headers, b"".join(response)
+        finally:
+            response.close()
+
+    close.assert_called_once_with()
+    assert raw.closed
+    assert downloaded == data
+    assert response_headers["Content-Length"] == str(len(data))
+
+
+@pytest.mark.django_db(transaction=True)
 def test_asgi_filesystem_download_keeps_content_length(django_user_model, monkeypatch, tmp_path):
     user = django_user_model.objects.create_user(username="synthetic-length", is_staff=True)
     job, artifact = artifact_fixture(user)
+    artifact.size_bytes = 70001
+    artifact.save(update_fields=["size_bytes"])
     payload = tmp_path / "transcript.txt"
     payload.write_bytes(b"y" * 70001)
     readers = []

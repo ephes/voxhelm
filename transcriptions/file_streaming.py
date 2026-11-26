@@ -84,18 +84,24 @@ class AsyncReaderStream:
 
 
 def reader_response(
-    request: HttpRequest, reader: BinaryIO, *, content_type: str
+    request: HttpRequest,
+    reader: BinaryIO,
+    *,
+    content_type: str,
+    content_length: int | None = None,
 ) -> HttpResponseBase:
     """Return a bounded streaming response that owns ``reader``.
 
     Under ASGI, Django would materialize a synchronous file iterator in memory, so
     reads run in worker threads instead; the response closes the reader exactly
-    once, after any in-flight read settles. ``Content-Length`` and
-    ``Content-Disposition`` match what ``FileResponse`` computes under WSGI.
+    once, after any in-flight read settles. Both transports use the admitted
+    ``content_length`` when supplied and otherwise keep Django's inferred headers.
     """
     owner = None
     try:
         file_response = FileResponse(reader, content_type=content_type)
+        if content_length is not None:
+            file_response["Content-Length"] = str(content_length)
         if not isinstance(request, ASGIRequest):
             return file_response
         # Only the stream owner closes the reader; FileResponse is a header

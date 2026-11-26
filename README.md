@@ -367,8 +367,9 @@ streaming, a read error or cancellation remains authoritative if closing also
 fails; a fixed warning reports the secondary cleanup failure without reader
 diagnostics. A close failure at otherwise normal EOF still fails the stream. S3 reads use the transport's 60-second socket read timeout; local
 regular-file reads settle through the filesystem. Closing never races a read.
-ASGI responses keep the `Content-Length` (and any `Content-Disposition`) that a
-filesystem download would send under WSGI.
+Job artifact downloads send the admitted byte count as `Content-Length` under
+WSGI and ASGI, including empty artifacts and nonseekable S3/MinIO streams.
+Other file downloads keep Django's inferred length and disposition headers.
 
 If filesystem publication and temporary cleanup both fail, the original storage
 error propagates and a fixed cleanup warning is logged without paths or payloads.
