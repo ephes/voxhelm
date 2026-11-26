@@ -173,10 +173,11 @@ def cleanup_expired_staged_media(
         except Exception:
             # Leave the row for maintenance retry. Log only its public identifier:
             # storage/DB exceptions may contain private keys, URLs or credentials.
-            logger.warning(
-                "Could not clean expired staged upload %s; maintenance will retry.", upload_id
-            )
             defer_failed_staged_cleanup(upload_id)
+            with suppress(Exception):
+                logger.warning(
+                    "Could not clean expired staged upload %s; maintenance will retry.", upload_id
+                )
 
 
 def defer_failed_staged_cleanup(upload_id: uuid.UUID) -> None:
@@ -190,7 +191,8 @@ def defer_failed_staged_cleanup(upload_id: uuid.UUID) -> None:
         now = timezone.now()
         StagedMedia.objects.filter(pk=upload_id, expires_at__lte=now).update(expires_at=now)
     except Exception:
-        logger.warning("Could not defer cleanup of expired staged upload %s.", upload_id)
+        with suppress(Exception):
+            logger.warning("Could not defer cleanup of expired staged upload %s.", upload_id)
 
 
 class StagedMediaAlreadyClaimed(ApiError):

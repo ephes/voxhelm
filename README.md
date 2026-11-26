@@ -785,8 +785,11 @@ Expiry cleanup re-fetches each candidate and rechecks expiry and its job claim
 inside the same database write/row lock used by submission, holding it through
 object deletion and row removal. A claim committed after candidate enumeration
 keeps the input while its job is active. Expired unclaimed inputs and inputs
-whose owning job has finished can be removed. Storage deletion failure keeps
-the row for a later cleanup retry.
+whose owning job has finished can be removed. During admission, a failed
+deletion keeps the row expired for retry and attempts to move it behind other
+expired candidates before logging a warning. A warning handler failure does not
+interrupt the remaining cleanup attempts or the new upload. Admission examines
+at most four cleanup candidates per request.
 If the artifact backend, filesystem root, S3 endpoint, or bucket changes after
 staging, submitters must stage the media again; Voxhelm rejects `upload_id`
 values whose store identity no longer matches the active artifact store.

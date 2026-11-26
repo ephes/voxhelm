@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from uuid import UUID
 
@@ -228,7 +229,7 @@ def test_command_persists_cursor_through_failures_and_validates_before_deleting(
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("failure", ["storage", "row_delete"])
+@pytest.mark.parametrize("failure", ["storage", "row_delete", "storage_and_warning"])
 def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch, caplog, failure):
     from django.db import DatabaseError
 
@@ -246,10 +247,12 @@ def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch
     real_delete = FilesystemArtifactStore.delete
     real_row_delete = StagedMedia.delete
     attempted = []
+    warnings = []
+    warning_expiries = []
 
     def delete_object(self, *, key):
         attempted.append(key)
-        if key == failed.storage_key and failure == "storage":
+        if key == failed.storage_key and failure != "row_delete":
             raise OSError("synthetic-private-storage-error https://private.invalid/path")
         return real_delete(self, key=key)
 
@@ -258,9 +261,17 @@ def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch
             raise DatabaseError("synthetic-private-row-error https://private.invalid/path")
         return real_row_delete(self, *args, **kwargs)
 
+    class FailingWarningHandler(logging.Handler):
+        def emit(self, record):
+            warnings.append(record.getMessage())
+            warning_expiries.append(StagedMedia.objects.get(pk=failed.pk).expires_at)
+            raise RuntimeError("synthetic warning handler failure")
+
     with monkeypatch.context() as patch:
         patch.setattr(FilesystemArtifactStore, "delete", delete_object)
         patch.setattr(StagedMedia, "delete", delete_row)
+        if failure == "storage_and_warning":
+            patch.setattr(staging.logger, "handlers", [FailingWarningHandler(logging.WARNING)])
         fresh = staging.stage_uploaded_audio(
             producer="synthetic",
             upload=SimpleUploadedFile("new.mp3", b"audio", content_type="audio/mpeg"),
@@ -273,10 +284,13 @@ def test_admission_isolates_cleanup_failures_and_keeps_retry_records(monkeypatch
     assert StagedMedia.objects.filter(expires_at=expired).count() == 2
     failed.refresh_from_db()
     assert expired < failed.expires_at <= timezone.now()
-    assert str(failed.pk) in caplog.text
-    assert "synthetic-private" not in caplog.text
-    assert "private.invalid" not in caplog.text
-    assert failed.storage_key not in caplog.text
+    if failure == "storage_and_warning":
+        assert warning_expiries == [failed.expires_at]
+    diagnostics = "\n".join(warnings) if failure == "storage_and_warning" else caplog.text
+    assert str(failed.pk) in diagnostics
+    assert "synthetic-private" not in diagnostics
+    assert "private.invalid" not in diagnostics
+    assert failed.storage_key not in diagnostics
     staging.cleanup_expired_staged_media()
     assert not StagedMedia.objects.filter(expires_at=expired).exists()
 
